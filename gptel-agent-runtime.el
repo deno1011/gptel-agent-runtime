@@ -22,6 +22,11 @@
 
 (require 'cl-lib)
 
+(defvar my/data-dir (expand-file-name "~/emacs/")
+  "Personal data/config root supplied by the host Emacs configuration.
+This fallback keeps the package loadable when it is required outside Denis's
+normal init path.")
+
 (defgroup gptel-agent-runtime nil
   "Emacs-native agent runtime built on top of gptel."
   :group 'applications
