@@ -546,6 +546,350 @@ Emacs and safe to evolve while the data model is still changing."
     path))
 #+end_src
 
+* Agent and Skill Registry
+
+This section adds the first real multi-agent and skill layer. It does not run
+several autonomous workers in parallel yet; instead it provides durable
+registries and routing decisions so the runtime can choose an appropriate agent
+role and skill set for a task. Later planner/orchestration code can consume
+these same registries to delegate subtasks.
+
+Agents describe who should handle a task. Skills describe reusable procedures
+or strategies the selected agent should apply.
+
+#+begin_src emacs-lisp
+(defcustom gptel-agent-runtime-enable-routing t
+  "When non-nil, use the agent/skill router for new agent sessions."
+  :type 'boolean
+  :group 'gptel-agent-runtime)
+
+(cl-defstruct (gptel-agent-runtime-agent
+               (:constructor gptel-agent-runtime-agent-create))
+  "Definition of one specialist agent role."
+  name
+  role
+  description
+  directive
+  model-tags
+  tool-categories
+  default-skills
+  system-prompt
+  enabled-p
+  metadata)
+
+(cl-defstruct (gptel-agent-runtime-skill
+               (:constructor gptel-agent-runtime-skill-create))
+  "Definition of one reusable task skill."
+  name
+  summary
+  triggers
+  agent-names
+  tool-categories
+  instructions
+  examples
+  validation
+  memory-key
+  enabled-p
+  metadata)
+
+(defvar gptel-agent-runtime-agent-registry nil
+  "Registered `gptel-agent-runtime-agent' definitions.")
+
+(defvar gptel-agent-runtime-skill-registry nil
+  "Registered `gptel-agent-runtime-skill' definitions.")
+
+(defvar gptel-agent-runtime-last-route nil
+  "Most recent route plist returned by `gptel-agent-runtime-route-task'.")
+
+(defun gptel-agent-runtime--symbol-name (value)
+  "Return a stable string name for VALUE."
+  (cond
+   ((symbolp value) (symbol-name value))
+   ((stringp value) value)
+   (t (format "%s" value))))
+
+(defun gptel-agent-runtime-register-agent
+    (name role description &rest plist)
+  "Register an agent definition.
+NAME and ROLE may be symbols or strings. DESCRIPTION is user-facing text.
+PLIST accepts :directive, :model-tags, :tool-categories, :default-skills,
+:system-prompt, :enabled-p, and :metadata."
+  (let* ((agent-name (gptel-agent-runtime--symbol-name name))
+         (agent (gptel-agent-runtime-agent-create
+                 :name agent-name
+                 :role role
+                 :description description
+                 :directive (or (plist-get plist :directive) role)
+                 :model-tags (plist-get plist :model-tags)
+                 :tool-categories (plist-get plist :tool-categories)
+                 :default-skills (plist-get plist :default-skills)
+                 :system-prompt (plist-get plist :system-prompt)
+                 :enabled-p (if (plist-member plist :enabled-p)
+                                (plist-get plist :enabled-p)
+                              t)
+                 :metadata (plist-get plist :metadata))))
+    (setq gptel-agent-runtime-agent-registry
+          (cons agent
+                (cl-remove agent-name gptel-agent-runtime-agent-registry
+                           :key #'gptel-agent-runtime-agent-name
+                           :test #'equal)))
+    agent))
+
+(defun gptel-agent-runtime-find-agent (name)
+  "Return registered agent NAME, or nil."
+  (let ((agent-name (gptel-agent-runtime--symbol-name name)))
+    (cl-find agent-name gptel-agent-runtime-agent-registry
+             :key #'gptel-agent-runtime-agent-name
+             :test #'equal)))
+
+(defun gptel-agent-runtime-enabled-agents ()
+  "Return all enabled registered agents."
+  (cl-remove-if-not #'gptel-agent-runtime-agent-enabled-p
+                    gptel-agent-runtime-agent-registry))
+
+(defun gptel-agent-runtime-register-skill
+    (name summary triggers &rest plist)
+  "Register a reusable skill.
+NAME may be a symbol or string. SUMMARY describes the skill. TRIGGERS is a list
+of regexps or keywords matched against a task. PLIST accepts :agent-names,
+:tool-categories, :instructions, :examples, :validation, :memory-key,
+:enabled-p, and :metadata."
+  (let* ((skill-name (gptel-agent-runtime--symbol-name name))
+         (skill (gptel-agent-runtime-skill-create
+                 :name skill-name
+                 :summary summary
+                 :triggers triggers
+                 :agent-names (plist-get plist :agent-names)
+                 :tool-categories (plist-get plist :tool-categories)
+                 :instructions (plist-get plist :instructions)
+                 :examples (plist-get plist :examples)
+                 :validation (plist-get plist :validation)
+                 :memory-key (plist-get plist :memory-key)
+                 :enabled-p (if (plist-member plist :enabled-p)
+                                (plist-get plist :enabled-p)
+                              t)
+                 :metadata (plist-get plist :metadata))))
+    (setq gptel-agent-runtime-skill-registry
+          (cons skill
+                (cl-remove skill-name gptel-agent-runtime-skill-registry
+                           :key #'gptel-agent-runtime-skill-name
+                           :test #'equal)))
+    skill))
+
+(defun gptel-agent-runtime-find-skill (name)
+  "Return registered skill NAME, or nil."
+  (let ((skill-name (gptel-agent-runtime--symbol-name name)))
+    (cl-find skill-name gptel-agent-runtime-skill-registry
+             :key #'gptel-agent-runtime-skill-name
+             :test #'equal)))
+
+(defun gptel-agent-runtime-enabled-skills ()
+  "Return all enabled registered skills."
+  (cl-remove-if-not #'gptel-agent-runtime-skill-enabled-p
+                    gptel-agent-runtime-skill-registry))
+
+(defun gptel-agent-runtime--skill-matches-p (skill text)
+  "Return non-nil when SKILL trigger matches TEXT."
+  (let ((case-fold-search t))
+    (cl-some
+     (lambda (trigger)
+       (cond
+        ((symbolp trigger)
+         (string-match-p (regexp-quote (symbol-name trigger)) text))
+        ((stringp trigger)
+         (string-match-p trigger text))
+        (t nil)))
+     (gptel-agent-runtime-skill-triggers skill))))
+
+(defun gptel-agent-runtime-match-skills (text)
+  "Return enabled skills whose triggers match TEXT."
+  (cl-remove-if-not
+   (lambda (skill)
+     (gptel-agent-runtime--skill-matches-p skill text))
+   (gptel-agent-runtime-enabled-skills)))
+
+(defun gptel-agent-runtime--agent-score (agent text skills)
+  "Return a simple routing score for AGENT given TEXT and matched SKILLS."
+  (let* ((case-fold-search t)
+         (name (gptel-agent-runtime-agent-name agent))
+         (role (gptel-agent-runtime--symbol-name
+                (gptel-agent-runtime-agent-role agent)))
+         (description (or (gptel-agent-runtime-agent-description agent) ""))
+         (skill-score
+          (cl-count-if
+           (lambda (skill)
+             (member name (mapcar #'gptel-agent-runtime--symbol-name
+                                  (gptel-agent-runtime-skill-agent-names skill))))
+           skills)))
+    (+ (if (string-match-p (regexp-quote role) text) 3 0)
+       (if (and description
+                (string-match-p (regexp-quote name) text)) 2 0)
+       skill-score)))
+
+(defun gptel-agent-runtime-route-task (text)
+  "Route task TEXT to an agent and matching skills.
+Returns a plist with :agent, :skills, :all-agents, and :reason."
+  (let* ((skills (gptel-agent-runtime-match-skills text))
+         (agents (gptel-agent-runtime-enabled-agents))
+         (scored (mapcar
+                  (lambda (agent)
+                    (cons agent
+                          (gptel-agent-runtime--agent-score agent text skills)))
+                  agents))
+         (best (car (sort scored (lambda (a b) (> (cdr a) (cdr b))))))
+         (agent (or (car-safe best)
+                    (gptel-agent-runtime-find-agent
+                     gptel-agent-runtime-default-role)
+                    (car agents)))
+         (route (list
+                 :agent agent
+                 :skills skills
+                 :all-agents agents
+                 :reason
+                 (format "Matched %d skill(s); selected %s."
+                         (length skills)
+                         (if agent
+                             (gptel-agent-runtime-agent-name agent)
+                           "<none>")))))
+    (setq gptel-agent-runtime-last-route route)
+    route))
+
+(defun gptel-agent-runtime-route-summary (text)
+  "Return a human-readable route summary for TEXT."
+  (let* ((route (gptel-agent-runtime-route-task text))
+         (agent (plist-get route :agent))
+         (skills (plist-get route :skills)))
+    (format "Agent: %s\nRole: %s\nSkills: %s\nReason: %s"
+            (if agent (gptel-agent-runtime-agent-name agent) "<none>")
+            (if agent (gptel-agent-runtime-agent-role agent) "<none>")
+            (if skills
+                (mapconcat #'gptel-agent-runtime-skill-name skills ", ")
+              "<none>")
+            (plist-get route :reason))))
+
+(defun gptel-agent-runtime-describe-route (text)
+  "Display the agent/skill route for TEXT."
+  (interactive "sRoute task: ")
+  (message "%s" (gptel-agent-runtime-route-summary text)))
+
+(defun gptel-agent-runtime-agent-directive (agent)
+  "Return directive symbol for AGENT."
+  (or (and agent (gptel-agent-runtime-agent-directive agent))
+      (if (my/gptel-local-runtime-p)
+          'emacs-local-assistant
+        'emacs-assistant)))
+
+(defun gptel-agent-runtime-skill-instructions (skills)
+  "Return prompt instructions for SKILLS."
+  (when skills
+    (concat
+     "Relevant skills:\n"
+     (mapconcat
+      (lambda (skill)
+        (format "- %s: %s\n  Instructions: %s\n  Validation: %s"
+                (gptel-agent-runtime-skill-name skill)
+                (or (gptel-agent-runtime-skill-summary skill) "")
+                (or (gptel-agent-runtime-skill-instructions skill) "")
+                (or (gptel-agent-runtime-skill-validation skill) "")))
+      skills
+      "\n"))))
+
+(defun gptel-agent-runtime-apply-route-to-current-buffer (text)
+  "Apply route for TEXT to the current gptel buffer.
+This sets the local directive and appends skill instructions to the active
+system message. It is intentionally lightweight; the planner loop will later
+consume the full route object."
+  (let* ((route (gptel-agent-runtime-route-task text))
+         (agent (plist-get route :agent))
+         (skills (plist-get route :skills))
+         (directive (gptel-agent-runtime-agent-directive agent))
+         (base (alist-get directive gptel-directives))
+         (skill-text (gptel-agent-runtime-skill-instructions skills)))
+    (when base
+      (setq-local gptel--system-message
+                  (if skill-text
+                      (concat base "\n\n" skill-text)
+                    base)))
+    route))
+
+(defun gptel-agent-runtime-register-default-agents-and-skills ()
+  "Register built-in starter agents and skills.
+These defaults are intentionally small and transparent; users can override or
+extend them later from their private config."
+  (interactive)
+  (gptel-agent-runtime-register-agent
+   'assistant 'assistant
+   "General Emacs assistant for direct user-facing answers."
+   :directive 'emacs-local-assistant
+   :tool-categories '(org files buffers web export code)
+   :default-skills '(org-output web-research inline-rendering))
+  (gptel-agent-runtime-register-agent
+   'planner 'planner
+   "Breaks broad goals into explicit steps and selects tools."
+   :directive 'emacs-planner
+   :tool-categories '(context tools))
+  (gptel-agent-runtime-register-agent
+   'executor 'executor
+   "Runs concrete Emacs, file, shell, and Org actions."
+   :directive 'emacs-local-assistant
+   :tool-categories '(org files buffers code export))
+  (gptel-agent-runtime-register-agent
+   'reviewer 'reviewer
+   "Checks results, looks for failures, and requests fixes."
+   :directive 'emacs-local-assistant
+   :tool-categories '(context files code))
+  (gptel-agent-runtime-register-agent
+   'memory-curator 'memory-curator
+   "Records durable lessons, preferences, and strategy notes."
+   :directive 'emacs-local-assistant
+   :tool-categories '(memory org files))
+
+  (gptel-agent-runtime-register-skill
+   'inline-rendering
+   "Create inline Org output for math, plots, diagrams, and generated files."
+   '("plot" "graph" "diagram" "inline" "latex" "math" "3d")
+   :agent-names '("assistant" "executor")
+   :tool-categories '(code export)
+   :instructions "Return finished Org content with LaTeX, executable Babel blocks, :file headers for images, #+RESULTS:, and [[file:...]] links."
+   :validation "The response contains executable Org and any image block has a :file result link.")
+  (gptel-agent-runtime-register-skill
+   'web-research
+   "Search and fetch current information before answering."
+   '("web" "internet" "current" "latest" "today" "rules" "law" "regulation")
+   :agent-names '("assistant" "planner")
+   :tool-categories '(web)
+   :instructions "Use web_search first, fetch official or primary sources, then cite source URLs."
+   :validation "Answer cites URLs used for current facts.")
+  (gptel-agent-runtime-register-skill
+   'org-task-management
+   "Read and update Org TODOs, agenda files, and task state."
+   '("todo" "task" "agenda" "deadline" "schedule" "org")
+   :agent-names '("assistant" "executor")
+   :tool-categories '(org)
+   :instructions "Use Org tools for task inspection and mutation; protect config files."
+   :validation "Changed Org state is saved and reported.")
+  (gptel-agent-runtime-register-skill
+   'code-change
+   "Inspect, edit, test, and review code changes."
+   '("code" "repo" "test" "bug" "refactor" "implement" "fix")
+   :agent-names '("planner" "executor" "reviewer")
+   :tool-categories '(files code context)
+   :instructions "Inspect relevant files first, make scoped edits, run appropriate checks, and summarize verification."
+   :validation "Relevant tests or syntax checks were run, or the reason they were not run is stated.")
+  (gptel-agent-runtime-register-skill
+   'memory-update
+   "Record reusable lessons and strategy updates."
+   '("remember" "memory" "handover" "lesson" "strategy" "skill")
+   :agent-names '("memory-curator")
+   :tool-categories '(memory org files)
+   :instructions "Write concise durable lessons to the appropriate memory or handover file."
+   :validation "Memory update is committed or explicitly reported.")
+  (list :agents gptel-agent-runtime-agent-registry
+        :skills gptel-agent-runtime-skill-registry))
+
+(gptel-agent-runtime-register-default-agents-and-skills)
+#+end_src
+
 * gptel Base Setup and Backend Registration
 
 Installs/configures gptel, loads provider modules, registers cloud and local backends, starts/selects Ollama, and prefers the currently active Ollama model when available.
@@ -1914,14 +2258,22 @@ Each entry is a plist with :state :heading :file :deadline :tags."
 (defvar my/gptel-context-enabled t
   "When non-nil, inject workspace context into every gptel-send call.")
 
+(defun gptel-agent-runtime-current-buffer-task-text ()
+  "Return recent buffer text used for lightweight agent/skill routing."
+  (let ((start (max (point-min) (- (point) 4000))))
+    (string-trim (buffer-substring-no-properties start (point)))))
+
 (defun my/gptel--inject-context (orig-fn &rest args)
-  "Around advice for `gptel-send': sync directive and prepend workspace context."
+  "Around advice for `gptel-send': route, sync directive, and prepend context."
   (if (not my/gptel-context-enabled)
       (progn
         (my/gptel-sync-directive-for-current-runtime)
         (my/gptel-sync-tools)
         (apply orig-fn args))
-    (my/gptel-sync-directive-for-current-runtime)
+    (if gptel-agent-runtime-enable-routing
+        (gptel-agent-runtime-apply-route-to-current-buffer
+         (gptel-agent-runtime-current-buffer-task-text))
+      (my/gptel-sync-directive-for-current-runtime))
     (my/gptel-sync-tools)
     (let* ((ctx   (my/workspace-context-string))
            (orig  gptel--system-message)

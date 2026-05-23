@@ -12,6 +12,7 @@ for MELPA.
 - Package-shaped first extraction.
 - Literate source: edit `gptel-agent-runtime.org` first.
 - Generated package artifact: `gptel-agent-runtime.el`.
+- Agent/skill registry scaffold with a lightweight router.
 - Installs from Git via `package-vc-install`.
 - `main` and `stable` initially point to the same current version.
 - The implementation is still monolithic and keeps compatibility names such as
@@ -26,6 +27,29 @@ for MELPA.
    :branch "main"))
 (require 'gptel-agent-runtime)
 ```
+
+## Agents And Skills
+
+The package includes first-class registries for agents and skills:
+
+- agents describe specialist roles such as `assistant`, `planner`, `executor`,
+  `reviewer`, and `memory-curator`
+- skills describe reusable strategies such as `inline-rendering`,
+  `web-research`, `org-task-management`, `code-change`, and `memory-update`
+- a lightweight router matches recent task text to skills and selects an agent
+- `gptel-send` applies the route by appending relevant skill instructions to
+  the active system message
+
+Useful inspection command:
+
+```elisp
+(gptel-agent-runtime-route-summary
+ "plot a 3d math function inline and search current rules")
+```
+
+This is routing scaffolding, not parallel multi-agent execution yet. The next
+step is to let the planner delegate substeps to specialist agents and persist
+skill outcomes into memory.
 
 ## Development Notes
 

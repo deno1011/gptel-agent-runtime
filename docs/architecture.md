@@ -150,6 +150,26 @@ This collects project/buffer/git context and can inject it into model requests.
 It is a first step toward better context management but is not yet a full
 adaptive attention/memory system.
 
+### Agents And Skills
+
+Defined in `Agent and Skill Registry`.
+
+The package now has explicit registries for agents and skills. Agents are
+specialist roles such as `assistant`, `planner`, `executor`, `reviewer`, and
+`memory-curator`. Skills are reusable strategies such as `inline-rendering`,
+`web-research`, `org-task-management`, `code-change`, and `memory-update`.
+
+Before `gptel-send`, the runtime inspects recent buffer text, matches skills,
+selects an agent, and appends relevant skill instructions to the active system
+message. This gives the current single-session assistant a route decision and
+skill context without pretending to run multiple parallel workers.
+
+Useful inspection entry points:
+
+- `gptel-agent-runtime-route-task`
+- `gptel-agent-runtime-route-summary`
+- `gptel-agent-runtime-describe-route`
+
 ### Planner Loop
 
 Defined in `Planner Loop`.
@@ -197,6 +217,8 @@ Missing or incomplete pieces:
 - reliable tool argument generation
 - persistent memory with retrieval and scoring
 - task state stored across sessions
+- planner delegation from substeps to specialist agents
+- persisted skill outcome tracking and reuse
 - automatic verification after tool execution
 - adaptive retry strategy
 - safe command policy and risk classification
