@@ -181,30 +181,42 @@ This is the first working autonomous-agent loop:
 2. observe the active Emacs/workspace context
 3. route the goal through the agent/skill registry
 4. ask the planner for strict JSON plan steps
-5. delegate each step to an agent role or safe parallel worker
+5. delegate each step to an agent role or safe/read parallel worker
 6. act with `direct_response`, `remember`, or a native gptel tool and JSON args
 7. observe, verify, and store the action result
 8. ask the reviewer for strict JSON reflection
-9. remember session state and skill outcomes on disk
+9. remember resumable session state and skill outcomes on disk
 10. continue, replan, finish, or fail
 
 The interactive entry point is `M-x gptel-agent-runtime-start`. Status can be
 inspected with `gptel-agent-runtime-session-summary` or
 `M-x gptel-agent-runtime-describe-session`.
 
-The planner can mark safe `direct_response` steps as parallel. Those steps run
-as separate worker requests with worker state stored in the session. Native
+The planner can mark safe/read steps as parallel. Those steps run as worker
+records with worker state stored in the session. Direct responses run as
+separate gptel requests; safe/read native tools such as file reads, buffer
+reads, Org inspection, and web search/fetch can also run as workers. Native
 async gptel tools are supported when they use gptel's callback-first tool
 function convention.
 
-Before planning, the runtime retrieves relevant prior session memory. After
-execution, the runtime records skill success/failure statistics and uses those
-stats as a small adjustment in future routing.
+Before planning, the runtime retrieves relevant prior session memory. Retrieval
+defaults to lexical scoring and can optionally use Ollama embeddings when
+`gptel-agent-runtime-memory-retrieval-method` is set to `ollama-embeddings` and
+the configured embedding model is available.
+
+Session memory is readable Elisp data and can now be reconstructed into runtime
+structs. Use `M-x gptel-agent-runtime-resume-last-session` or
+`M-x gptel-agent-runtime-resume-session` to continue unfinished work after an
+Emacs restart.
+
+After execution, the runtime records skill success/failure statistics and uses
+those stats as a small adjustment in future routing. Planner and reviewer JSON
+is repaired and schema-validated before the runtime acts on it.
 
 This is useful and executable, but it is not yet as robust as Claude Code. The
-loop still depends on local-model JSON quality, parallelism is currently
-limited to safe direct-response workers, and verification is still rule-based
-rather than a complete task-specific test framework.
+loop still depends on local-model planning quality, parallelism is limited to
+safe/read workers, and verification is still rule-based rather than a complete
+task-specific test framework.
 
 ## Why It Still Fails Sometimes
 
@@ -232,11 +244,11 @@ target is a real agent runtime.
 Missing or incomplete pieces:
 
 - stronger structured tool-call enforcement for local models
-- external JSON schema validation beyond deterministic repair
+- external JSON schema library integration beyond internal schema checks
 - more reliable tool argument generation
-- semantic memory retrieval with embeddings and scoring
-- resumable task state across Emacs restarts
-- parallel workers for safe read/tool subtasks, not only direct responses
+- persistent embedding cache and richer semantic memory scoring
+- stronger conflict handling for resumed tasks
+- parallel workers for broader safe tool subtasks with cancellation
 - richer skill outcome learning and strategy selection
 - broader task-specific automatic verification after tool execution
 - adaptive retry strategy

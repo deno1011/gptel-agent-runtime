@@ -133,6 +133,19 @@ Write, shell, and destructive actions still honor
   :safe #'integerp
   :group 'gptel-agent-runtime)
 
+(defcustom gptel-agent-runtime-memory-retrieval-method 'lexical
+  "Memory retrieval method.
+`lexical' uses local keyword scoring. `ollama-embeddings' asks Ollama for
+embeddings and falls back to lexical scoring when unavailable."
+  :type '(choice (const :tag "Lexical" lexical)
+                 (const :tag "Ollama embeddings" ollama-embeddings))
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-embedding-model "nomic-embed-text"
+  "Ollama embedding model used when memory retrieval method is `ollama-embeddings'."
+  :type 'string
+  :group 'gptel-agent-runtime)
+
 (defcustom gptel-agent-runtime-enable-parallel-workers t
   "When non-nil, allow independent worker requests for parallelizable steps.
 Parallel workers are separate gptel requests with their own agent directive and
@@ -144,6 +157,15 @@ worker state. Tool mutation remains guarded by safety policy."
   "Maximum number of worker requests launched from one plan at a time."
   :type 'integer
   :safe #'integerp
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-parallel-safe-tool-names
+  '("direct_response"
+    "read_file" "read_org_file" "list_directory" "search_files"
+    "list_buffers" "get_buffer_content" "get_org_structure" "get_todos"
+    "web_search" "web_fetch_text" "web_extract_images")
+  "Tool names that may run as safe/read parallel workers."
+  :type '(repeat string)
   :group 'gptel-agent-runtime)
 
 (defcustom gptel-agent-runtime-blocked-shell-patterns
@@ -498,7 +520,7 @@ human-readable summary. PLIST may include :package-ready-p, :local-only-p,
   reflection-needed-p
   metadata)
 
-(defun gptel-agent-runtime-result-ok
+(cl-defun gptel-agent-runtime-result-ok
     (&key tool output warnings changed-files changed-buffers metadata)
   "Create a successful action result."
   (gptel-agent-runtime-action-result-create
@@ -511,7 +533,7 @@ human-readable summary. PLIST may include :package-ready-p, :local-only-p,
    :reflection-needed-p nil
    :metadata metadata))
 
-(defun gptel-agent-runtime-result-error
+(cl-defun gptel-agent-runtime-result-error
     (&key tool error output warnings metadata)
   "Create a failed action result."
   (gptel-agent-runtime-action-result-create
@@ -729,6 +751,101 @@ Emacs and safe to evolve while the data model is still changing."
       (insert "\n"))
     path))
 
+(defun gptel-agent-runtime--data-to-struct (data)
+  "Convert persisted DATA back into runtime structs."
+  (if (not (and (listp data) (keywordp (car data))))
+      data
+    (pcase (plist-get data :type)
+      ('task
+       (gptel-agent-runtime-task-create
+        :id (plist-get data :id)
+        :title (plist-get data :title)
+        :goal (plist-get data :goal)
+        :status (plist-get data :status)
+        :parent-id (plist-get data :parent-id)
+        :children (plist-get data :children)
+        :created-at (plist-get data :created-at)
+        :updated-at (plist-get data :updated-at)
+        :notes (gptel-agent-runtime--data-to-struct
+                (plist-get data :notes))))
+      ('plan
+       (gptel-agent-runtime-plan-create
+        :id (plist-get data :id)
+        :task-id (plist-get data :task-id)
+        :status (plist-get data :status)
+        :steps (mapcar #'gptel-agent-runtime--data-to-struct
+                       (plist-get data :steps))
+        :created-at (plist-get data :created-at)
+        :updated-at (plist-get data :updated-at)))
+      ('plan-step
+       (gptel-agent-runtime-plan-step-create
+        :id (plist-get data :id)
+        :title (plist-get data :title)
+        :rationale (plist-get data :rationale)
+        :agent (plist-get data :agent)
+        :skills (plist-get data :skills)
+        :suggested-tool (plist-get data :tool)
+        :args (plist-get data :args)
+        :parallel-p (plist-get data :parallel-p)
+        :risk (plist-get data :risk)
+        :status (plist-get data :status)
+        :result (gptel-agent-runtime--data-to-struct
+                 (plist-get data :result))
+        :observations (plist-get data :observations)
+        :reflections (plist-get data :reflections)
+        :attempts (plist-get data :attempts)))
+      ('action-result
+       (gptel-agent-runtime-action-result-create
+        :status (plist-get data :status)
+        :tool (plist-get data :tool)
+        :output (plist-get data :output)
+        :error (plist-get data :error)
+        :warnings (plist-get data :warnings)
+        :changed-files (plist-get data :changed-files)
+        :changed-buffers (plist-get data :changed-buffers)
+        :reflection-needed-p (plist-get data :reflection-needed-p)
+        :metadata (plist-get data :metadata)))
+      ('worker
+       (gptel-agent-runtime-worker-create
+        :id (plist-get data :id)
+        :session-id (plist-get data :session-id)
+        :agent (plist-get data :agent)
+        :step-id (plist-get data :step-id)
+        :status (plist-get data :status)
+        :prompt (plist-get data :prompt)
+        :result (gptel-agent-runtime--data-to-struct
+                 (plist-get data :result))
+        :error (plist-get data :error)
+        :started-at (plist-get data :started-at)
+        :updated-at (plist-get data :updated-at)))
+      ('session
+       (gptel-agent-runtime-session-create
+        :id (plist-get data :id)
+        :role (plist-get data :role)
+        :root-task (gptel-agent-runtime--data-to-struct
+                    (plist-get data :root-task))
+        :current-task (gptel-agent-runtime--data-to-struct
+                       (plist-get data :current-task))
+        :iteration (plist-get data :iteration)
+        :observations (plist-get data :observations)
+        :decisions (plist-get data :decisions)
+        :tool-results (mapcar #'gptel-agent-runtime--data-to-struct
+                              (plist-get data :tool-results))
+        :workers (mapcar #'gptel-agent-runtime--data-to-struct
+                         (plist-get data :workers))
+        :started-at (plist-get data :started-at)
+        :updated-at (plist-get data :updated-at)))
+      (_ data))))
+
+(defun gptel-agent-runtime-memory-read-session (file)
+  "Read runtime session memory FILE into structs."
+  (with-temp-buffer
+    (insert-file-contents file)
+    (goto-char (point-min))
+    (when (looking-at ";;;")
+      (forward-line 1))
+    (gptel-agent-runtime--data-to-struct (read (current-buffer)))))
+
 (defun gptel-agent-runtime-memory-files ()
   "Return existing runtime memory files, newest first."
   (let ((dir (gptel-agent-runtime-memory-ensure-directory)))
@@ -749,6 +866,46 @@ Emacs and safe to evolve while the data model is still changing."
         (setq score (1+ score))))
     score))
 
+(defun gptel-agent-runtime--ollama-embedding (text)
+  "Return Ollama embedding vector for TEXT, or nil."
+  (when (eq gptel-agent-runtime-memory-retrieval-method 'ollama-embeddings)
+    (condition-case nil
+        (let* ((url-request-method "POST")
+               (url-request-extra-headers '(("Content-Type" . "application/json")))
+               (url-request-data
+                (json-encode `(("model" . ,gptel-agent-runtime-embedding-model)
+                               ("prompt" . ,text))))
+               (buf (url-retrieve-synchronously
+                     (gptel-agent-runtime--ollama-url "/api/embeddings")
+                     t t 3)))
+          (when buf
+            (unwind-protect
+                (with-current-buffer buf
+                  (goto-char (point-min))
+                  (when (re-search-forward "\n\n" nil t)
+                    (let* ((json-object-type 'plist)
+                           (json-array-type 'list)
+                           (json-key-type 'keyword)
+                           (data (json-read)))
+                      (plist-get data :embedding))))
+              (kill-buffer buf))))
+      (error nil))))
+
+(defun gptel-agent-runtime--cosine-similarity (a b)
+  "Return cosine similarity between numeric vectors A and B."
+  (when (and a b (= (length a) (length b)) (> (length a) 0))
+    (let ((dot 0.0)
+          (amag 0.0)
+          (bmag 0.0))
+      (cl-loop for x in a
+               for y in b
+               do (setq dot (+ dot (* x y))
+                        amag (+ amag (* x x))
+                        bmag (+ bmag (* y y))))
+      (if (or (zerop amag) (zerop bmag))
+          0.0
+        (/ dot (* (sqrt amag) (sqrt bmag)))))))
+
 (defun gptel-agent-runtime-memory-retrieve (query &optional limit)
   "Return up to LIMIT memory snippets relevant to QUERY."
   (let ((limit (or limit gptel-agent-runtime-memory-retrieval-limit))
@@ -760,11 +917,25 @@ Emacs and safe to evolve while the data model is still changing."
                                             (min 12000
                                                  (nth 7 (file-attributes file))))
                       (buffer-string))))
-          (push (list :file file
-                      :score (gptel-agent-runtime--text-score query text)
-                      :text (string-trim
-                             (truncate-string-to-width text 1800 nil nil t)))
-                scored))))
+          (let* ((query-embedding
+                  (and (eq gptel-agent-runtime-memory-retrieval-method
+                           'ollama-embeddings)
+                       (gptel-agent-runtime--ollama-embedding query)))
+                 (text-snippet (string-trim
+                                (truncate-string-to-width text 1800 nil nil t)))
+                 (text-embedding
+                  (and query-embedding
+                       (gptel-agent-runtime--ollama-embedding text-snippet)))
+                 (embedding-score
+                  (and query-embedding text-embedding
+                       (gptel-agent-runtime--cosine-similarity
+                        query-embedding text-embedding)))
+                 (lexical-score (gptel-agent-runtime--text-score query text)))
+            (push (list :file file
+                        :score (or embedding-score lexical-score)
+                        :method (if embedding-score 'ollama-embeddings 'lexical)
+                        :text text-snippet)
+                  scored)))))
     (cl-loop for item in (sort scored
                                (lambda (a b)
                                  (> (plist-get a :score)
@@ -782,8 +953,9 @@ Emacs and safe to evolve while the data model is still changing."
     (if items
         (mapconcat
          (lambda (item)
-           (format "- Memory %s (score %s):\n%s"
+           (format "- Memory %s (%s score %s):\n%s"
                    (file-name-nondirectory (plist-get item :file))
+                   (plist-get item :method)
                    (plist-get item :score)
                    (plist-get item :text)))
          items "\n\n")
@@ -3053,6 +3225,64 @@ remember -> continue."
   (interactive)
   (message "%s" (gptel-agent-runtime-session-summary)))
 
+(defun gptel-agent-runtime-list-sessions ()
+  "Return saved runtime session files newest first."
+  (gptel-agent-runtime-memory-files))
+
+(defun gptel-agent-runtime--session-complete-p (session)
+  "Return non-nil when SESSION is in a terminal state."
+  (memq (gptel-agent-runtime-task-status
+         (gptel-agent-runtime-session-root-task session))
+        '(completed cancelled failed max-iterations)))
+
+(defun gptel-agent-runtime-resume-session (file)
+  "Resume an unfinished runtime session from FILE."
+  (interactive
+   (list (completing-read "Resume session: "
+                          (gptel-agent-runtime-list-sessions)
+                          nil t)))
+  (let ((session (gptel-agent-runtime-memory-read-session file)))
+    (unless (gptel-agent-runtime-session-p session)
+      (error "Not a gptel-agent-runtime session: %s" file))
+    (dolist (worker (gptel-agent-runtime-session-workers session))
+      (when (eq (gptel-agent-runtime-worker-status worker) 'running)
+        (setf (gptel-agent-runtime-worker-status worker) 'failed)
+        (setf (gptel-agent-runtime-worker-error worker)
+              "Worker was running when session was saved; marked failed on resume.")))
+    (let* ((task (gptel-agent-runtime-session-current-task session))
+           (plan (and task (gptel-agent-runtime-task-notes task))))
+      (when (gptel-agent-runtime-plan-p plan)
+        (dolist (step (gptel-agent-runtime-plan-steps plan))
+          (when (eq (gptel-agent-runtime-plan-step-status step) 'running)
+            (setf (gptel-agent-runtime-plan-step-status step) 'draft)))))
+    (setq gptel-agent-runtime--current-session session)
+    (setq gptel-agent-runtime--origin-buffer (current-buffer))
+    (push (format "%s resumed from %s"
+                  (gptel-agent-runtime--timestamp)
+                  file)
+          (gptel-agent-runtime-session-decisions session))
+    (if (gptel-agent-runtime--session-complete-p session)
+        (message "Loaded completed session: %s"
+                 (gptel-agent-runtime-session-id session))
+      (message "Resumed session: %s"
+               (gptel-agent-runtime-session-id session))
+      (gptel-agent-runtime--continue session))))
+
+(defun gptel-agent-runtime-resume-last-session ()
+  "Resume the newest unfinished runtime session."
+  (interactive)
+  (let ((found nil))
+    (dolist (file (gptel-agent-runtime-list-sessions))
+      (unless found
+        (let ((session (ignore-errors
+                         (gptel-agent-runtime-memory-read-session file))))
+          (when (and (gptel-agent-runtime-session-p session)
+                     (not (gptel-agent-runtime--session-complete-p session)))
+            (setq found file)))))
+    (if found
+        (gptel-agent-runtime-resume-session found)
+      (message "No unfinished gptel-agent-runtime session found."))))
+
 (defun gptel-agent-runtime--continue (session)
   "Continue SESSION through the next loop phase."
   (cond
@@ -3184,6 +3414,72 @@ remember -> continue."
        (not (and (boundp 'json-false)
                  (eq value json-false)))))
 
+(defun gptel-agent-runtime--schema-error (path message)
+  "Create a schema error at PATH with MESSAGE."
+  (format "%s: %s" path message))
+
+(defun gptel-agent-runtime--validate-plan-item (item index)
+  "Return schema errors for plan ITEM at INDEX."
+  (let ((path (format "steps[%d]" index))
+        errors)
+    (unless (and (plist-get item :title)
+                 (stringp (plist-get item :title)))
+      (push (gptel-agent-runtime--schema-error path "title must be a string")
+            errors))
+    (unless (and (plist-get item :rationale)
+                 (stringp (plist-get item :rationale)))
+      (push (gptel-agent-runtime--schema-error path "rationale must be a string")
+            errors))
+    (unless (or (null (plist-get item :agent))
+                (stringp (plist-get item :agent)))
+      (push (gptel-agent-runtime--schema-error path "agent must be a string")
+            errors))
+    (unless (or (null (plist-get item :tool))
+                (stringp (plist-get item :tool)))
+      (push (gptel-agent-runtime--schema-error path "tool must be a string")
+            errors))
+    (unless (memq (gptel-agent-runtime--keywordize-risk
+                   (plist-get item :risk))
+                  '(safe read write shell destructive))
+      (push (gptel-agent-runtime--schema-error path "risk is invalid")
+            errors))
+    errors))
+
+(defun gptel-agent-runtime-validate-plan-data (data)
+  "Return schema validation errors for parsed planner DATA."
+  (let ((steps (plist-get data :steps))
+        errors)
+    (cond
+     ((not (listp data))
+      (push "plan root must be an object" errors))
+     ((not (listp steps))
+      (push "steps must be a list" errors))
+     ((null steps)
+      (push "steps must not be empty" errors))
+     (t
+      (cl-loop for item in steps
+               for index from 0
+               do (setq errors
+                        (append (gptel-agent-runtime--validate-plan-item
+                                 item index)
+                                errors)))))
+    (nreverse errors)))
+
+(defun gptel-agent-runtime-validate-reflection-data (data)
+  "Return schema validation errors for parsed reviewer DATA."
+  (let ((status (and (plist-get data :status)
+                     (intern (plist-get data :status))))
+        errors)
+    (unless (memq status '(continue replan done failed))
+      (push "status must be continue, replan, done, or failed" errors))
+    (unless (or (null (plist-get data :reflection))
+                (stringp (plist-get data :reflection)))
+      (push "reflection must be a string" errors))
+    (unless (or (null (plist-get data :memory))
+                (stringp (plist-get data :memory)))
+      (push "memory must be a string" errors))
+    (nreverse errors)))
+
 (defun gptel-agent-runtime--normalize-args (args)
   "Normalize JSON ARGS into a keyword plist."
   (cond
@@ -3208,9 +3504,11 @@ The preferred format is JSON with a top-level :steps list. A single
       (let* ((json (gptel-agent-runtime--repair-json-string
                     (gptel-agent-runtime--extract-json text)))
              (data (and json (gptel-agent-runtime--json-read-plist json)))
+             (schema-errors (gptel-agent-runtime-validate-plan-data data))
              (items (plist-get data :steps)))
-        (if (not items)
-            (error "JSON did not contain :steps")
+        (if schema-errors
+            (error "Plan schema invalid: %s"
+                   (mapconcat #'identity schema-errors "; "))
           (cl-loop
            for item in items
            for title = (or (plist-get item :title) "Untitled step")
@@ -3291,22 +3589,24 @@ The preferred format is JSON with a top-level :steps list. A single
              while (or (eq (gptel-agent-runtime-plan-step-status step) 'done)
                        (and (eq (gptel-agent-runtime-plan-step-status step) 'draft)
                             (gptel-agent-runtime-plan-step-parallel-p step)
-                            (equal (or (gptel-agent-runtime-plan-step-suggested-tool step)
-                                       "direct_response")
-                                   "direct_response")
-                            (not (gptel-agent-runtime-risk-at-least-p
-                                  (or (gptel-agent-runtime-plan-step-risk step)
-                                      'safe)
-                                  'write))))
+                            (gptel-agent-runtime--parallel-safe-step-p step)))
              when (and (eq (gptel-agent-runtime-plan-step-status step) 'draft)
                        (gptel-agent-runtime-plan-step-parallel-p step)
-                       (equal (or (gptel-agent-runtime-plan-step-suggested-tool step)
-                                  "direct_response")
-                              "direct_response"))
+                       (gptel-agent-runtime--parallel-safe-step-p step))
              collect step into steps
              finally return
              (cl-subseq steps 0 (min (length steps)
                                      gptel-agent-runtime-max-parallel-workers)))))
+
+(defun gptel-agent-runtime--parallel-safe-step-p (step)
+  "Return non-nil when STEP may run as a parallel worker."
+  (let ((tool-name (or (gptel-agent-runtime-plan-step-suggested-tool step)
+                       "direct_response")))
+    (and (member tool-name gptel-agent-runtime-parallel-safe-tool-names)
+         (not (gptel-agent-runtime-risk-at-least-p
+               (or (gptel-agent-runtime-plan-step-risk step) 'safe)
+               'write))
+         (not (gptel-agent-runtime-safety-check-step step)))))
 
 (defun gptel-agent-runtime--launch-parallel-workers (steps session)
   "Launch STEPS as independent worker requests for SESSION."
@@ -3338,7 +3638,75 @@ The preferred format is JSON with a top-level :steps list. A single
                        "direct_response")))
     (if (equal tool-name "direct_response")
         (gptel-agent-runtime--worker-direct-response worker step session)
-      (gptel-agent-runtime--dispatch-action step session))))
+      (gptel-agent-runtime--worker-tool worker step session))))
+
+(defun gptel-agent-runtime--worker-tool (worker step session)
+  "Run a safe/read tool WORKER for STEP."
+  (let* ((tool-name (or (gptel-agent-runtime-plan-step-suggested-tool step)
+                        "direct_response"))
+         (tool (gptel-agent-runtime--find-native-tool tool-name)))
+    (if (not tool)
+        (progn
+          (setf (gptel-agent-runtime-worker-status worker) 'failed)
+          (setf (gptel-agent-runtime-worker-error worker)
+                (format "Unknown tool: %s" tool-name))
+          (gptel-agent-runtime--observe-result
+           step session
+           (gptel-agent-runtime-result-error
+            :tool tool-name
+            :error (format "Unknown tool: %s" tool-name)
+            :metadata (list :worker
+                            (gptel-agent-runtime-worker-id worker)))))
+      (if (and (fboundp 'gptel-tool-async) (gptel-tool-async tool))
+          (let* ((args (gptel-agent-runtime--normalize-args
+                        (gptel-agent-runtime-plan-step-args step)))
+                 (arg-values (if (fboundp 'gptel--map-tool-args)
+                                 (gptel--map-tool-args tool args)
+                               nil)))
+            (apply (gptel-tool-function tool)
+                   (lambda (value)
+                     (setf (gptel-agent-runtime-worker-status worker) 'done)
+                     (setf (gptel-agent-runtime-worker-result worker) value)
+                     (setf (gptel-agent-runtime-worker-updated-at worker)
+                           (gptel-agent-runtime--timestamp))
+                     (gptel-agent-runtime--observe-result
+                      step session
+                      (gptel-agent-runtime-result-ok
+                       :tool tool-name
+                       :output (format "%s" value)
+                       :metadata (list :worker
+                                       (gptel-agent-runtime-worker-id worker)
+                                       :async t))))
+                   arg-values))
+        (condition-case err
+            (let* ((args (gptel-agent-runtime--normalize-args
+                          (gptel-agent-runtime-plan-step-args step)))
+                   (arg-values (if (fboundp 'gptel--map-tool-args)
+                                   (gptel--map-tool-args tool args)
+                                 nil))
+                   (value (apply (gptel-tool-function tool) arg-values)))
+              (setf (gptel-agent-runtime-worker-status worker) 'done)
+              (setf (gptel-agent-runtime-worker-result worker) value)
+              (setf (gptel-agent-runtime-worker-updated-at worker)
+                    (gptel-agent-runtime--timestamp))
+              (gptel-agent-runtime--observe-result
+               step session
+               (gptel-agent-runtime-result-ok
+                :tool tool-name
+                :output (format "%s" value)
+                :metadata (list :worker
+                                (gptel-agent-runtime-worker-id worker)))))
+          (error
+           (setf (gptel-agent-runtime-worker-status worker) 'failed)
+           (setf (gptel-agent-runtime-worker-error worker)
+                 (error-message-string err))
+           (gptel-agent-runtime--observe-result
+            step session
+            (gptel-agent-runtime-result-error
+             :tool tool-name
+             :error (error-message-string err)
+             :metadata (list :worker
+                             (gptel-agent-runtime-worker-id worker))))))))))
 
 (defun gptel-agent-runtime--worker-direct-response (worker step session)
   "Run a direct-response WORKER request for STEP."
@@ -3522,7 +3890,10 @@ The preferred format is JSON with a top-level :steps list. A single
 (defun gptel-agent-runtime--verify-step-result (step result)
   "Return nil when RESULT verifies for STEP, or a failure reason."
   (let* ((tool (or (gptel-agent-runtime-action-result-tool result) ""))
-         (output (or (gptel-agent-runtime-action-result-output result) "")))
+         (output (or (gptel-agent-runtime-action-result-output result) ""))
+         (args (gptel-agent-runtime--normalize-args
+                (gptel-agent-runtime-plan-step-args step)))
+         (skills (or (gptel-agent-runtime-plan-step-skills step) nil)))
     (cond
      ((eq (gptel-agent-runtime-action-result-status result) 'error)
       (or (gptel-agent-runtime-action-result-error result)
@@ -3530,16 +3901,40 @@ The preferred format is JSON with a top-level :steps list. A single
      ((and (member tool '("direct_response" "parallel-direct-response"))
            (string-empty-p (string-trim output)))
       "Direct response produced no text.")
+     ((and (member "inline-rendering" skills)
+           (member tool '("direct_response" "parallel-direct-response"))
+           (not (or (string-match-p "#\\+begin_src" output)
+                    (string-match-p "\\[\\[file:" output)
+                    (string-match-p "\\\\(" output)
+                    (string-match-p "\\$[^$]+\\$" output))))
+      "Inline-rendering response did not contain Org source, file link, or math.")
+     ((and (member "web-research" skills)
+           (member tool '("direct_response" "parallel-direct-response"))
+           (not (string-match-p "\\(https?://\\|\\[\\[https?://\\)" output)))
+      "Web-research response did not contain source URLs.")
      ((and (equal tool "web_search")
-           (not (string-match-p "\\(http\\|\\[\\[" output)))
+           (not (string-match-p "\\(http\\|\\[\\[\\)" output)))
       "Web search output did not contain source links.")
+     ((and (member tool '("web_fetch_text"))
+           (< (length (string-trim output)) 80))
+      "Fetched web text was too short to verify.")
      ((and (member tool '("write_file" "write_org_file"))
            (not (string-match-p "\\(Written\\|Error\\)" output)))
       "Write tool did not report a recognizable write result.")
+     ((and (member tool '("write_file" "write_org_file"))
+           (plist-get args :path)
+           (not (file-exists-p (expand-file-name (plist-get args :path)))))
+      "Write tool reported success but target file does not exist.")
      ((and (member tool '("add_todo" "change_todo_state" "set_deadline"
                           "add_tag"))
            (string-match-p "\\(not found\\|Error\\)" output))
       "Org mutation tool reported a failed mutation.")
+     ((and (equal tool "org_export")
+           (not (string-match-p "\\(Exported to:\\|Export error\\)" output)))
+      "Org export output did not report export status.")
+     ((and (equal tool "execute_code")
+           (string-match-p "\\`Error:" output))
+      "Code execution reported an error.")
      (t nil))))
 
 (defun gptel-agent-runtime--record-step-skill-outcomes (step success-p note)
@@ -3640,7 +4035,11 @@ The preferred format is JSON with a top-level :steps list. A single
   (condition-case nil
       (let* ((json (gptel-agent-runtime--repair-json-string
                     (gptel-agent-runtime--extract-json response)))
-             (data (and json (gptel-agent-runtime--json-read-plist json))))
+             (data (and json (gptel-agent-runtime--json-read-plist json)))
+             (schema-errors (gptel-agent-runtime-validate-reflection-data data)))
+        (when schema-errors
+          (error "Reflection schema invalid: %s"
+                 (mapconcat #'identity schema-errors "; ")))
         (list :status (let ((status (intern (or (plist-get data :status)
                                                 "continue"))))
                         (if (memq status '(continue replan done failed))

@@ -15,10 +15,10 @@ for MELPA.
 - Agent/skill registry scaffold with a lightweight router.
 - Autonomous execution loop: observe, plan, delegate, act with tools,
   observe result, reflect, remember, and continue.
-- Worker records for parallel direct-response substeps.
-- Deterministic JSON repair for common local-model planner/reviewer mistakes.
-- Memory retrieval before planning and skill outcome statistics for routing.
-- Verification and safety policies for tool execution.
+- Worker records for parallel safe/read tool and direct-response substeps.
+- Deterministic JSON repair plus schema validation for planner/reviewer JSON.
+- Lexical memory retrieval, optional Ollama embedding retrieval, and session resume.
+- Skill outcome statistics, richer verification, and safety policies for tool execution.
 - Installs from Git via `package-vc-install`.
 - `main` and `stable` initially point to the same current version.
 - The implementation is still monolithic and keeps compatibility names such as
@@ -65,23 +65,34 @@ Useful inspection command:
 6. ask the reviewer for JSON reflection
 7. write session memory and continue, replan, finish, or fail
 
-The planner can mark safe `direct_response` steps with `"parallel": true`.
-Those steps are launched as independent worker requests with their own agent
-role and worker state. The loop also retrieves relevant prior memory before
-planning, records skill success/failure statistics, verifies common tool
-results, and supports async gptel tools that follow gptel's callback convention.
+The planner can mark safe/read steps with `"parallel": true`. Those steps are
+launched as independent worker records and can run direct responses, read-only
+file/buffer/Org tools, and web search/fetch tools. Mutating tools stay
+serialized behind safety policy.
+
+The loop retrieves relevant prior memory before planning. Retrieval defaults to
+lexical matching and can optionally use Ollama embeddings with
+`gptel-agent-runtime-memory-retrieval-method`. Sessions are written as readable
+Elisp data and can be resumed with `M-x gptel-agent-runtime-resume-last-session`
+or `M-x gptel-agent-runtime-resume-session`.
+
+Planner/reviewer JSON is repaired for common local-model mistakes and then
+validated against runtime schemas before execution. Verification checks are
+tool/skill-aware for web research, inline rendering, writes, Org mutations,
+exports, and code execution.
 
 Useful inspection commands:
 
 ```elisp
 (gptel-agent-runtime-session-summary)
 (gptel-agent-runtime-describe-session)
+(gptel-agent-runtime-resume-last-session)
 ```
 
 This is a real loop now, but it is still conservative. Parallelism is limited
-to safe direct-response workers, schema repair is deterministic rather than a
-full validator, and local model planner quality still determines how good the
-JSON steps are.
+to safe/read workers, embedding retrieval depends on a local Ollama embedding
+model being available, and local model planner quality still determines how
+good the JSON steps are.
 
 ## Development Notes
 
