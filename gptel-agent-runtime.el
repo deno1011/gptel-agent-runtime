@@ -673,8 +673,7 @@ both plist and vector shapes returned by `json-read'."
                     ("Mistral (Ollama)"       ,backend . mistral)
                     ("DeepSeek R1 (Ollama)"   ,backend . deepseek-r1)
                     ("Qwen 2.5 Coder 7B (Ollama)" ,backend . qwen2.5-coder:7b)
-                    ("Qwen 2.5 (Ollama)"      ,backend . qwen2.5))))
-    (gptel-agent-runtime-use-default-local-model)))
+                    ("Qwen 2.5 (Ollama)"      ,backend . qwen2.5))))))
 
 (defun my/gptel-register-model (name backend model)
   "Register NAME with BACKEND+MODEL in `my/gptel-backends'.
@@ -2659,6 +2658,13 @@ Each entry is a plist with :state :heading :file :deadline :tags."
     (setf (gptel-agent-runtime-plan-step-status step) 'failed)
     (message "Execution failed: %s. Re-planning..." err-msg)
     (run-with-timer 1 nil #'gptel-agent-runtime--step)))
+
+;; Select the local model only after directives, tools, and compatibility
+;; helpers have been defined. In the old literate config this ordering was
+;; implicit; as a package it must be explicit.
+(when (and (boundp 'my/gptel-ollama-backend)
+           my/gptel-ollama-backend)
+  (gptel-agent-runtime-use-default-local-model))
 
 (provide 'gptel-agent-runtime)
 
