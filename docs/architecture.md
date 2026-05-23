@@ -181,21 +181,30 @@ This is the first working autonomous-agent loop:
 2. observe the active Emacs/workspace context
 3. route the goal through the agent/skill registry
 4. ask the planner for strict JSON plan steps
-5. delegate each step to an agent role
+5. delegate each step to an agent role or safe parallel worker
 6. act with `direct_response`, `remember`, or a native gptel tool and JSON args
-7. observe and store the action result
+7. observe, verify, and store the action result
 8. ask the reviewer for strict JSON reflection
-9. remember session state on disk
+9. remember session state and skill outcomes on disk
 10. continue, replan, finish, or fail
 
 The interactive entry point is `M-x gptel-agent-runtime-start`. Status can be
 inspected with `gptel-agent-runtime-session-summary` or
 `M-x gptel-agent-runtime-describe-session`.
 
+The planner can mark safe `direct_response` steps as parallel. Those steps run
+as separate worker requests with worker state stored in the session. Native
+async gptel tools are supported when they use gptel's callback-first tool
+function convention.
+
+Before planning, the runtime retrieves relevant prior session memory. After
+execution, the runtime records skill success/failure statistics and uses those
+stats as a small adjustment in future routing.
+
 This is useful and executable, but it is not yet as robust as Claude Code. The
-loop still depends on local-model JSON quality, does not run parallel workers,
-does not support async gptel tools inside the loop, and still needs
-task-specific verification policies.
+loop still depends on local-model JSON quality, parallelism is currently
+limited to safe direct-response workers, and verification is still rule-based
+rather than a complete task-specific test framework.
 
 ## Why It Still Fails Sometimes
 
@@ -223,15 +232,15 @@ target is a real agent runtime.
 Missing or incomplete pieces:
 
 - stronger structured tool-call enforcement for local models
-- external JSON schema validation and repair
+- external JSON schema validation beyond deterministic repair
 - more reliable tool argument generation
-- persistent memory with retrieval and scoring
-- task state stored across sessions
-- parallel or independent specialist-agent workers
-- persisted skill outcome tracking and reuse
-- task-specific automatic verification after tool execution
+- semantic memory retrieval with embeddings and scoring
+- resumable task state across Emacs restarts
+- parallel workers for safe read/tool subtasks, not only direct responses
+- richer skill outcome learning and strategy selection
+- broader task-specific automatic verification after tool execution
 - adaptive retry strategy
-- safe command policy and risk classification
+- stricter safe command policy and risk classification
 - model-specific compatibility adapters
 - package extraction into a clean MELPA-ready module
 

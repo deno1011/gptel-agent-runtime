@@ -13,8 +13,12 @@ for MELPA.
 - Literate source: edit `gptel-agent-runtime.org` first.
 - Generated package artifact: `gptel-agent-runtime.el`.
 - Agent/skill registry scaffold with a lightweight router.
-- Autonomous execution loop scaffold: observe, plan, delegate, act with tools,
+- Autonomous execution loop: observe, plan, delegate, act with tools,
   observe result, reflect, remember, and continue.
+- Worker records for parallel direct-response substeps.
+- Deterministic JSON repair for common local-model planner/reviewer mistakes.
+- Memory retrieval before planning and skill outcome statistics for routing.
+- Verification and safety policies for tool execution.
 - Installs from Git via `package-vc-install`.
 - `main` and `stable` initially point to the same current version.
 - The implementation is still monolithic and keeps compatibility names such as
@@ -61,6 +65,12 @@ Useful inspection command:
 6. ask the reviewer for JSON reflection
 7. write session memory and continue, replan, finish, or fail
 
+The planner can mark safe `direct_response` steps with `"parallel": true`.
+Those steps are launched as independent worker requests with their own agent
+role and worker state. The loop also retrieves relevant prior memory before
+planning, records skill success/failure statistics, verifies common tool
+results, and supports async gptel tools that follow gptel's callback convention.
+
 Useful inspection commands:
 
 ```elisp
@@ -68,9 +78,10 @@ Useful inspection commands:
 (gptel-agent-runtime-describe-session)
 ```
 
-This is a real loop now, but it is still conservative. It does not run
-parallel workers, async gptel tools are not supported in the loop yet, and
-local model planner quality still determines how good the JSON steps are.
+This is a real loop now, but it is still conservative. Parallelism is limited
+to safe direct-response workers, schema repair is deterministic rather than a
+full validator, and local model planner quality still determines how good the
+JSON steps are.
 
 ## Development Notes
 
