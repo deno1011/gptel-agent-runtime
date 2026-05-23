@@ -161,8 +161,9 @@ specialist roles such as `assistant`, `planner`, `executor`, `reviewer`, and
 
 Before `gptel-send`, the runtime inspects recent buffer text, matches skills,
 selects an agent, and appends relevant skill instructions to the active system
-message. This gives the current single-session assistant a route decision and
-skill context without pretending to run multiple parallel workers.
+message. This gives direct chat requests a route decision and skill context.
+The autonomous loop also uses the same registry to delegate each planned step to
+an agent role.
 
 Useful inspection entry points:
 
@@ -174,18 +175,27 @@ Useful inspection entry points:
 
 Defined in `Planner Loop`.
 
-This is an early autonomous-agent loop:
+This is the first working autonomous-agent loop:
 
 1. create a session
-2. ask for a structured plan
-3. parse plan steps
-4. dispatch a tool or direct response
-5. reflect on results
-6. finalize or adapt
+2. observe the active Emacs/workspace context
+3. route the goal through the agent/skill registry
+4. ask the planner for strict JSON plan steps
+5. delegate each step to an agent role
+6. act with `direct_response`, `remember`, or a native gptel tool and JSON args
+7. observe and store the action result
+8. ask the reviewer for strict JSON reflection
+9. remember session state on disk
+10. continue, replan, finish, or fail
 
-This is useful groundwork, but it is not yet as robust as Claude Code. The loop
-still needs stronger schemas, better error recovery, tool argument generation,
-state persistence, and task-specific verification.
+The interactive entry point is `M-x gptel-agent-runtime-start`. Status can be
+inspected with `gptel-agent-runtime-session-summary` or
+`M-x gptel-agent-runtime-describe-session`.
+
+This is useful and executable, but it is not yet as robust as Claude Code. The
+loop still depends on local-model JSON quality, does not run parallel workers,
+does not support async gptel tools inside the loop, and still needs
+task-specific verification policies.
 
 ## Why It Still Fails Sometimes
 
@@ -212,14 +222,14 @@ target is a real agent runtime.
 
 Missing or incomplete pieces:
 
-- structured tool-call enforcement for local models
-- schema-validated planner output
-- reliable tool argument generation
+- stronger structured tool-call enforcement for local models
+- external JSON schema validation and repair
+- more reliable tool argument generation
 - persistent memory with retrieval and scoring
 - task state stored across sessions
-- planner delegation from substeps to specialist agents
+- parallel or independent specialist-agent workers
 - persisted skill outcome tracking and reuse
-- automatic verification after tool execution
+- task-specific automatic verification after tool execution
 - adaptive retry strategy
 - safe command policy and risk classification
 - model-specific compatibility adapters

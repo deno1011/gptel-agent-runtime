@@ -13,6 +13,8 @@ for MELPA.
 - Literate source: edit `gptel-agent-runtime.org` first.
 - Generated package artifact: `gptel-agent-runtime.el`.
 - Agent/skill registry scaffold with a lightweight router.
+- Autonomous execution loop scaffold: observe, plan, delegate, act with tools,
+  observe result, reflect, remember, and continue.
 - Installs from Git via `package-vc-install`.
 - `main` and `stable` initially point to the same current version.
 - The implementation is still monolithic and keeps compatibility names such as
@@ -47,9 +49,28 @@ Useful inspection command:
  "plot a 3d math function inline and search current rules")
 ```
 
-This is routing scaffolding, not parallel multi-agent execution yet. The next
-step is to let the planner delegate substeps to specialist agents and persist
-skill outcomes into memory.
+## Autonomous Loop
+
+`M-x gptel-agent-runtime-start` starts the first autonomous session loop:
+
+1. observe the current Emacs/workspace context
+2. ask the planner for strict JSON steps
+3. delegate each step to an agent role
+4. execute `direct_response`, `remember`, or a native gptel tool with JSON args
+5. record observations and tool results
+6. ask the reviewer for JSON reflection
+7. write session memory and continue, replan, finish, or fail
+
+Useful inspection commands:
+
+```elisp
+(gptel-agent-runtime-session-summary)
+(gptel-agent-runtime-describe-session)
+```
+
+This is a real loop now, but it is still conservative. It does not run
+parallel workers, async gptel tools are not supported in the loop yet, and
+local model planner quality still determines how good the JSON steps are.
 
 ## Development Notes
 
