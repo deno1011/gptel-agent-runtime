@@ -146,6 +146,11 @@ embeddings and falls back to lexical scoring when unavailable."
   :type 'string
   :group 'gptel-agent-runtime)
 
+(defcustom gptel-agent-runtime-embedding-cache-enabled t
+  "When non-nil, persist Ollama embeddings in a local cache file."
+  :type 'boolean
+  :group 'gptel-agent-runtime)
+
 (defcustom gptel-agent-runtime-enable-parallel-workers t
   "When non-nil, allow independent worker requests for parallelizable steps.
 Parallel workers are separate gptel requests with their own agent directive and
@@ -167,6 +172,39 @@ worker state. Tool mutation remains guarded by safety policy."
   "Tool names that may run as safe/read parallel workers."
   :type '(repeat string)
   :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-enable-parallel-mutations t
+  "When non-nil, allow non-conflicting write-risk tools to run as workers.
+This only applies when the step passes safety checks and confirmation policy
+does not require an interactive confirmation."
+  :type 'boolean
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-parallel-mutation-tool-names
+  '("write_file" "write_org_file" "add_todo" "change_todo_state"
+    "set_deadline" "add_tag")
+  "Mutation tool names that may run in parallel when policy allows it."
+  :type '(repeat string)
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-json-schema-validator 'auto
+  "JSON schema validator preference.
+`auto' uses an external validator when configured and available, then falls
+back to internal checks. `internal' uses only built-in checks. `external-command'
+requires `gptel-agent-runtime-json-schema-command'."
+  :type '(choice (const :tag "Auto" auto)
+                 (const :tag "Internal" internal)
+                 (const :tag "External command" external-command))
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-json-schema-command "check-jsonschema"
+  "External JSON Schema CLI command used when available.
+The command must accept: COMMAND --schemafile SCHEMA INSTANCE."
+  :type 'string
+  :group 'gptel-agent-runtime)
+
+(defvar gptel-agent-runtime-embedding-cache nil
+  "Persistent embedding cache alist.")
 
 (defcustom gptel-agent-runtime-blocked-shell-patterns
   '("\\`\\s-*sudo\\b"
@@ -866,30 +904,87 @@ Emacs and safe to evolve while the data model is still changing."
         (setq score (1+ score))))
     score))
 
+(defun gptel-agent-runtime-embedding-cache-path ()
+  "Return the persistent embedding cache path."
+  (expand-file-name "embedding-cache.el"
+                    (gptel-agent-runtime-memory-ensure-directory)))
+
+(defun gptel-agent-runtime-load-embedding-cache ()
+  "Load the persistent embedding cache."
+  (let ((path (gptel-agent-runtime-embedding-cache-path)))
+    (setq gptel-agent-runtime-embedding-cache
+          (if (and gptel-agent-runtime-embedding-cache-enabled
+                   (file-exists-p path))
+              (with-temp-buffer
+                (insert-file-contents path)
+                (read (current-buffer)))
+            nil))))
+
+(defun gptel-agent-runtime-save-embedding-cache ()
+  "Save the persistent embedding cache."
+  (when gptel-agent-runtime-embedding-cache-enabled
+    (let ((path (gptel-agent-runtime-embedding-cache-path))
+          (print-length nil)
+          (print-level nil))
+      (with-temp-file path
+        (prin1 gptel-agent-runtime-embedding-cache (current-buffer))
+        (insert "\n"))
+      path)))
+
+(defun gptel-agent-runtime--embedding-cache-key (text)
+  "Return cache key for TEXT and current embedding model."
+  (format "%s:%s"
+          gptel-agent-runtime-embedding-model
+          (secure-hash 'sha1 text)))
+
+(defun gptel-agent-runtime--embedding-cache-get (text)
+  "Return cached embedding for TEXT, or nil."
+  (when gptel-agent-runtime-embedding-cache-enabled
+    (unless gptel-agent-runtime-embedding-cache
+      (gptel-agent-runtime-load-embedding-cache))
+    (cdr (assoc (gptel-agent-runtime--embedding-cache-key text)
+                gptel-agent-runtime-embedding-cache))))
+
+(defun gptel-agent-runtime--embedding-cache-put (text embedding)
+  "Cache EMBEDDING for TEXT."
+  (when (and gptel-agent-runtime-embedding-cache-enabled embedding)
+    (let ((key (gptel-agent-runtime--embedding-cache-key text)))
+      (setq gptel-agent-runtime-embedding-cache
+            (cons (cons key embedding)
+                  (cl-remove key gptel-agent-runtime-embedding-cache
+                             :key #'car :test #'equal)))
+      (gptel-agent-runtime-save-embedding-cache))))
+
 (defun gptel-agent-runtime--ollama-embedding (text)
   "Return Ollama embedding vector for TEXT, or nil."
   (when (eq gptel-agent-runtime-memory-retrieval-method 'ollama-embeddings)
-    (condition-case nil
-        (let* ((url-request-method "POST")
-               (url-request-extra-headers '(("Content-Type" . "application/json")))
-               (url-request-data
-                (json-encode `(("model" . ,gptel-agent-runtime-embedding-model)
-                               ("prompt" . ,text))))
-               (buf (url-retrieve-synchronously
-                     (gptel-agent-runtime--ollama-url "/api/embeddings")
-                     t t 3)))
-          (when buf
-            (unwind-protect
-                (with-current-buffer buf
-                  (goto-char (point-min))
-                  (when (re-search-forward "\n\n" nil t)
-                    (let* ((json-object-type 'plist)
-                           (json-array-type 'list)
-                           (json-key-type 'keyword)
-                           (data (json-read)))
-                      (plist-get data :embedding))))
-              (kill-buffer buf))))
-      (error nil))))
+    (or (gptel-agent-runtime--embedding-cache-get text)
+        (let ((embedding
+               (condition-case nil
+                   (let* ((url-request-method "POST")
+                          (url-request-extra-headers
+                           '(("Content-Type" . "application/json")))
+                          (url-request-data
+                           (json-encode
+                            `(("model" . ,gptel-agent-runtime-embedding-model)
+                              ("prompt" . ,text))))
+                          (buf (url-retrieve-synchronously
+                                (gptel-agent-runtime--ollama-url "/api/embeddings")
+                                t t 3)))
+                     (when buf
+                       (unwind-protect
+                           (with-current-buffer buf
+                             (goto-char (point-min))
+                             (when (re-search-forward "\n\n" nil t)
+                               (let* ((json-object-type 'plist)
+                                      (json-array-type 'list)
+                                      (json-key-type 'keyword)
+                                      (data (json-read)))
+                                 (plist-get data :embedding))))
+                         (kill-buffer buf))))
+                 (error nil))))
+          (gptel-agent-runtime--embedding-cache-put text embedding)
+          embedding))))
 
 (defun gptel-agent-runtime--cosine-similarity (a b)
   "Return cosine similarity between numeric vectors A and B."
@@ -910,18 +1005,18 @@ Emacs and safe to evolve while the data model is still changing."
   "Return up to LIMIT memory snippets relevant to QUERY."
   (let ((limit (or limit gptel-agent-runtime-memory-retrieval-limit))
         scored)
-    (dolist (file (gptel-agent-runtime-memory-files))
+    (let ((query-embedding
+           (and (eq gptel-agent-runtime-memory-retrieval-method
+                    'ollama-embeddings)
+                (gptel-agent-runtime--ollama-embedding query))))
+      (dolist (file (gptel-agent-runtime-memory-files))
       (when (file-readable-p file)
         (let ((text (with-temp-buffer
                       (insert-file-contents file nil 0
                                             (min 12000
                                                  (nth 7 (file-attributes file))))
                       (buffer-string))))
-          (let* ((query-embedding
-                  (and (eq gptel-agent-runtime-memory-retrieval-method
-                           'ollama-embeddings)
-                       (gptel-agent-runtime--ollama-embedding query)))
-                 (text-snippet (string-trim
+          (let* ((text-snippet (string-trim
                                 (truncate-string-to-width text 1800 nil nil t)))
                  (text-embedding
                   (and query-embedding
@@ -935,7 +1030,7 @@ Emacs and safe to evolve while the data model is still changing."
                         :score (or embedding-score lexical-score)
                         :method (if embedding-score 'ollama-embeddings 'lexical)
                         :text text-snippet)
-                  scored)))))
+                  scored))))))
     (cl-loop for item in (sort scored
                                (lambda (a b)
                                  (> (plist-get a :score)
@@ -1377,6 +1472,7 @@ extend them later from their private config."
 
 (gptel-agent-runtime-register-default-agents-and-skills)
 (gptel-agent-runtime-load-skill-stats)
+(gptel-agent-runtime-load-embedding-cache)
 #+end_src
 
 * gptel Base Setup and Backend Registration
@@ -3244,17 +3340,7 @@ remember -> continue."
   (let ((session (gptel-agent-runtime-memory-read-session file)))
     (unless (gptel-agent-runtime-session-p session)
       (error "Not a gptel-agent-runtime session: %s" file))
-    (dolist (worker (gptel-agent-runtime-session-workers session))
-      (when (eq (gptel-agent-runtime-worker-status worker) 'running)
-        (setf (gptel-agent-runtime-worker-status worker) 'failed)
-        (setf (gptel-agent-runtime-worker-error worker)
-              "Worker was running when session was saved; marked failed on resume.")))
-    (let* ((task (gptel-agent-runtime-session-current-task session))
-           (plan (and task (gptel-agent-runtime-task-notes task))))
-      (when (gptel-agent-runtime-plan-p plan)
-        (dolist (step (gptel-agent-runtime-plan-steps plan))
-          (when (eq (gptel-agent-runtime-plan-step-status step) 'running)
-            (setf (gptel-agent-runtime-plan-step-status step) 'draft)))))
+    (gptel-agent-runtime--requeue-running-work session)
     (setq gptel-agent-runtime--current-session session)
     (setq gptel-agent-runtime--origin-buffer (current-buffer))
     (push (format "%s resumed from %s"
@@ -3267,6 +3353,21 @@ remember -> continue."
       (message "Resumed session: %s"
                (gptel-agent-runtime-session-id session))
       (gptel-agent-runtime--continue session))))
+
+(defun gptel-agent-runtime--requeue-running-work (session)
+  "Mark in-flight work in SESSION as requeued for restart-safe resume."
+  (dolist (worker (gptel-agent-runtime-session-workers session))
+    (when (eq (gptel-agent-runtime-worker-status worker) 'running)
+      (setf (gptel-agent-runtime-worker-status worker) 'requeued)
+      (setf (gptel-agent-runtime-worker-error worker)
+            "Worker was running when session was saved; requeued on resume.")))
+  (let* ((task (gptel-agent-runtime-session-current-task session))
+         (plan (and task (gptel-agent-runtime-task-notes task))))
+    (when (gptel-agent-runtime-plan-p plan)
+      (dolist (step (gptel-agent-runtime-plan-steps plan))
+        (when (eq (gptel-agent-runtime-plan-step-status step) 'running)
+          (setf (gptel-agent-runtime-plan-step-status step) 'draft)))))
+  session)
 
 (defun gptel-agent-runtime-resume-last-session ()
   "Resume the newest unfinished runtime session."
@@ -3418,6 +3519,69 @@ remember -> continue."
   "Create a schema error at PATH with MESSAGE."
   (format "%s: %s" path message))
 
+(defconst gptel-agent-runtime--plan-json-schema
+  '(:type "object"
+    :required ["steps"]
+    :properties (:steps
+                 (:type "array"
+                  :minItems 1
+                  :items (:type "object"
+                          :required ["title" "rationale"]
+                          :properties
+                          (:title (:type "string")
+                           :rationale (:type "string")
+                           :agent (:type "string")
+                           :tool (:type "string")
+                           :args (:type "object")
+                           :parallel (:type "boolean")
+                           :risk (:enum ["safe" "read" "write"
+                                         "shell" "destructive"]))))))
+  "JSON Schema for planner output.")
+
+(defconst gptel-agent-runtime--reflection-json-schema
+  '(:type "object"
+    :required ["status"]
+    :properties (:status (:enum ["continue" "replan" "done" "failed"])
+                 :reflection (:type "string")
+                 :memory (:type "string")))
+  "JSON Schema for reviewer output.")
+
+(defun gptel-agent-runtime--external-json-schema-errors (data schema)
+  "Return external JSON Schema validation errors for DATA against SCHEMA.
+Returns nil when validation passes or no external validator is available."
+  (when (and (memq gptel-agent-runtime-json-schema-validator
+                   '(auto external-command))
+             (executable-find gptel-agent-runtime-json-schema-command))
+    (let ((schema-file (make-temp-file "gptel-schema-" nil ".json"))
+          (data-file (make-temp-file "gptel-json-" nil ".json")))
+      (unwind-protect
+          (progn
+            (with-temp-file schema-file
+              (insert (json-encode schema)))
+            (with-temp-file data-file
+              (insert (json-encode data)))
+            (with-temp-buffer
+              (let ((code (call-process
+                           gptel-agent-runtime-json-schema-command
+                           nil t nil
+                           "--schemafile" schema-file data-file)))
+                (unless (zerop code)
+                  (list (string-trim (buffer-string)))))))
+        (ignore-errors (delete-file schema-file))
+        (ignore-errors (delete-file data-file))))))
+
+(defun gptel-agent-runtime--jsonschema-feature-errors (_data _schema)
+  "Return validation errors using optional jsonschema feature.
+No bundled jsonschema API is assumed; this hook is intentionally conservative
+and currently returns nil unless a future adapter is added."
+  nil)
+
+(defun gptel-agent-runtime--validate-with-schema (data schema)
+  "Return external schema validation errors for DATA and SCHEMA."
+  (or (and (featurep 'jsonschema)
+           (gptel-agent-runtime--jsonschema-feature-errors data schema))
+      (gptel-agent-runtime--external-json-schema-errors data schema)))
+
 (defun gptel-agent-runtime--validate-plan-item (item index)
   "Return schema errors for plan ITEM at INDEX."
   (let ((path (format "steps[%d]" index))
@@ -3448,7 +3612,8 @@ remember -> continue."
 (defun gptel-agent-runtime-validate-plan-data (data)
   "Return schema validation errors for parsed planner DATA."
   (let ((steps (plist-get data :steps))
-        errors)
+        (errors (gptel-agent-runtime--validate-with-schema
+                 data gptel-agent-runtime--plan-json-schema)))
     (cond
      ((not (listp data))
       (push "plan root must be an object" errors))
@@ -3469,7 +3634,8 @@ remember -> continue."
   "Return schema validation errors for parsed reviewer DATA."
   (let ((status (and (plist-get data :status)
                      (intern (plist-get data :status))))
-        errors)
+        (errors (gptel-agent-runtime--validate-with-schema
+                 data gptel-agent-runtime--reflection-json-schema)))
     (unless (memq status '(continue replan done failed))
       (push "status must be continue, replan, done, or failed" errors))
     (unless (or (null (plist-get data :reflection))
@@ -3585,27 +3751,69 @@ The preferred format is JSON with a top-level :steps list. A single
 (defun gptel-agent-runtime--parallelizable-steps (plan)
   "Return currently parallelizable draft steps from PLAN."
   (when gptel-agent-runtime-enable-parallel-workers
-    (cl-loop for step in (gptel-agent-runtime-plan-steps plan)
-             while (or (eq (gptel-agent-runtime-plan-step-status step) 'done)
-                       (and (eq (gptel-agent-runtime-plan-step-status step) 'draft)
-                            (gptel-agent-runtime-plan-step-parallel-p step)
-                            (gptel-agent-runtime--parallel-safe-step-p step)))
-             when (and (eq (gptel-agent-runtime-plan-step-status step) 'draft)
-                       (gptel-agent-runtime-plan-step-parallel-p step)
-                       (gptel-agent-runtime--parallel-safe-step-p step))
-             collect step into steps
-             finally return
-             (cl-subseq steps 0 (min (length steps)
-                                     gptel-agent-runtime-max-parallel-workers)))))
+    (let (selected locked-paths stop)
+      (dolist (step (gptel-agent-runtime-plan-steps plan))
+        (cond
+         ((eq (gptel-agent-runtime-plan-step-status step) 'done))
+         ((and (not stop)
+               (eq (gptel-agent-runtime-plan-step-status step) 'draft)
+               (gptel-agent-runtime-plan-step-parallel-p step)
+               (gptel-agent-runtime--parallel-safe-step-p step)
+               (not (gptel-agent-runtime--paths-conflict-p
+                     (gptel-agent-runtime--step-target-paths step)
+                     locked-paths)))
+          (setq selected (append selected (list step)))
+          (setq locked-paths
+                (append locked-paths
+                        (gptel-agent-runtime--step-target-paths step))))
+         (t
+          (setq stop t))))
+      (cl-subseq selected 0 (min (length selected)
+                                gptel-agent-runtime-max-parallel-workers)))))
+
+(defun gptel-agent-runtime--step-target-paths (step)
+  "Return normalized target paths touched by STEP."
+  (let* ((args (gptel-agent-runtime--normalize-args
+                (gptel-agent-runtime-plan-step-args step)))
+         (values (gptel-agent-runtime--plist-values-for-keys
+                  args '(:path :file :directory))))
+    (delq nil
+          (mapcar (lambda (value)
+                    (when (and (stringp value)
+                               (not (string-empty-p value)))
+                      (expand-file-name value)))
+                  values))))
+
+(defun gptel-agent-runtime--paths-conflict-p (paths locked-paths)
+  "Return non-nil when PATHS overlap LOCKED-PATHS."
+  (cl-some
+   (lambda (path)
+     (cl-some
+      (lambda (locked)
+        (or (string= (file-truename path) (file-truename locked))
+            (and (file-directory-p path)
+                 (gptel-agent-runtime--path-under-directory-p locked path))
+            (and (file-directory-p locked)
+                 (gptel-agent-runtime--path-under-directory-p path locked))))
+      locked-paths))
+   paths))
 
 (defun gptel-agent-runtime--parallel-safe-step-p (step)
   "Return non-nil when STEP may run as a parallel worker."
-  (let ((tool-name (or (gptel-agent-runtime-plan-step-suggested-tool step)
-                       "direct_response")))
-    (and (member tool-name gptel-agent-runtime-parallel-safe-tool-names)
-         (not (gptel-agent-runtime-risk-at-least-p
-               (or (gptel-agent-runtime-plan-step-risk step) 'safe)
-               'write))
+  (let* ((tool-name (or (gptel-agent-runtime-plan-step-suggested-tool step)
+                        "direct_response"))
+         (risk (or (gptel-agent-runtime-plan-step-risk step) 'safe))
+         (read-safe (and (member tool-name
+                                 gptel-agent-runtime-parallel-safe-tool-names)
+                         (not (gptel-agent-runtime-risk-at-least-p
+                               risk 'write))))
+         (mutation-safe
+          (and gptel-agent-runtime-enable-parallel-mutations
+               (member tool-name
+                       gptel-agent-runtime-parallel-mutation-tool-names)
+               (eq risk 'write)
+               (not (gptel-agent-runtime-confirmation-required-p risk)))))
+    (and (or read-safe mutation-safe)
          (not (gptel-agent-runtime-safety-check-step step)))))
 
 (defun gptel-agent-runtime--launch-parallel-workers (steps session)
