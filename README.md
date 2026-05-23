@@ -10,6 +10,8 @@ for MELPA.
 ## Current Status
 
 - Package-shaped first extraction.
+- Literate source: edit `gptel-agent-runtime.org` first.
+- Generated package artifact: `gptel-agent-runtime.el`.
 - Installs from Git via `package-vc-install`.
 - `main` and `stable` initially point to the same current version.
 - The implementation is still monolithic and keeps compatibility names such as
@@ -27,6 +29,16 @@ for MELPA.
 
 ## Development Notes
 
+- Do not develop directly in `gptel-agent-runtime.el`. It is tangled from
+  `gptel-agent-runtime.org`.
+- After editing the Org source, run:
+
+```sh
+emacs --batch --eval '(require (quote org))' \
+  --eval '(org-babel-tangle-file "gptel-agent-runtime.org")'
+```
+
+- Validate the generated file with `check-parens` and a batch load smoke test.
 - The package currently expects the host config to define personal paths such
   as `my/data-dir` before loading.
 - The next cleanup should split the monolithic file into core, backends,

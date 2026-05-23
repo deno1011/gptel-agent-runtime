@@ -207,8 +207,8 @@ Missing or incomplete pieces:
 
 When behavior seems wrong:
 
-1. Restart Emacs after config changes, or load the tangled
-   `~/emacs/config/gptel-setup.el`.
+1. Restart Emacs after package changes, or load the tangled
+   `~/gptel-agent-runtime/gptel-agent-runtime.el` for a quick smoke test.
 2. Run `C-c G S`.
 3. Confirm the model is the expected Ollama/Qwen model.
 4. Confirm directive is `emacs-local-assistant`.
@@ -219,10 +219,12 @@ When behavior seems wrong:
 
 ## Development Rules
 
-- Edit `~/emacs/config/gptel-setup.org`, not the generated `.el`.
-- Tangle after edits.
+- Edit `~/gptel-agent-runtime/gptel-agent-runtime.org`, not the generated
+  `gptel-agent-runtime.el`.
+- Tangle after edits; the `.el` file is the package artifact consumed by
+  `package-vc-install`.
 - Validate with `check-parens`.
-- Sync `~/.emacs.d/config-readonly/gptel-setup.el` when needed.
+- Run a batch load smoke test before pushing package changes.
 - Record meaningful changes in `~/emacs/notes/gptel-handover.md`.
 - Keep private runtime work on `~/emacs:main`.
 - Use `~/emacs-mac-setup` only for installer/template changes.

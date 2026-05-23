@@ -1,3 +1,53 @@
+#+TITLE: gptel Agent Runtime
+#+AUTHOR: Denis Butic
+#+STARTUP: overview
+#+PROPERTY: header-args:emacs-lisp :tangle gptel-agent-runtime.el :lexical t :comments no
+
+This Org file is the source of truth for the =gptel-agent-runtime=
+package. Edit this file first, then tangle it to produce
+=gptel-agent-runtime.el=. The Elisp file is the package artifact used by
+=package-vc-install= and, later, MELPA.
+
+* Architecture Summary
+
+=gptel-agent-runtime= is an Emacs-native agent runtime layer built on top
+of [[https://github.com/karthink/gptel][gptel]]. gptel remains the transport, chat UI, streaming layer,
+provider abstraction, and native tool interface. This package adds the
+surrounding runtime: backend defaults, local-model behavior, prompts, web
+helpers, response execution, workspace context, tool registration, and an
+experimental planner loop.
+
+The current implementation is still monolithic, but the section boundaries
+below are intentionally aligned with the future module split: core,
+backends, media, web, executor, prompts, context, tools, and agent loop.
+
+** Runtime Flow
+
+#+begin_example
+User prompt in gptel buffer
+  -> gptel-send
+  -> backend/model selection
+  -> directive/system prompt sync
+  -> optional gptel tool schemas
+  -> model response inserted into buffer
+  -> gptel-post-response-functions
+  -> response repair hooks
+  -> Babel/AUTORUN/file-output execution
+  -> org-display-inline-images
+#+end_example
+
+** Development Rule
+
+- Edit =gptel-agent-runtime.org= first.
+- Tangle to =gptel-agent-runtime.el=.
+- Validate the tangled Elisp with =check-parens= and a batch load smoke test.
+- Keep =main= and =stable= synced until =stable= intentionally diverges.
+
+* Package Header, Metadata, and Host Defaults
+
+Package headers, required libraries, customization group, host path fallback, and top-level user options. This is the public configuration surface that should survive future MELPA cleanup.
+
+#+begin_src emacs-lisp
 ;;; gptel-agent-runtime.el --- Emacs-native agent runtime on top of gptel -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2026 Denis Butic
@@ -124,8 +174,14 @@ the server find models downloaded to a non-default location."
 
 (cl-defstruct (gptel-agent-runtime-task
                (:constructor gptel-agent-runtime-task-create))
+#+end_src
 
-"A single high-level task handled by the future agent runtime."
+* Task and Session State
+
+Structs and constructors for high-level tasks and agent sessions. These are the backbone for long-running agent state.
+
+#+begin_src emacs-lisp
+  "A single high-level task handled by the future agent runtime."
   id
   title
   goal
@@ -182,6 +238,13 @@ the server find models downloaded to a non-default location."
      :tool-results nil
      :started-at now
      :updated-at now)))
+#+end_src
+
+* Safety Layer
+
+Risk levels, protected paths, and confirmation policy. This is intentionally conservative because tool execution can modify files and live Emacs state.
+
+#+begin_src emacs-lisp
 
 (defcustom gptel-agent-runtime-protected-paths
   nil
@@ -243,8 +306,14 @@ Allowed values are `safe', `read', `write', `shell', and `destructive'."
 (defun gptel-agent-runtime-confirmation-required-p (risk)
   "Return non-nil when an action with RISK requires confirmation."
   (and gptel-agent-runtime-require-confirmation-for-risky-actions
+#+end_src
 
-(gptel-agent-runtime-risk-at-least-p
+* Tool Registry Abstraction
+
+Package-shaped registry structs for tools and action results. This prepares a cleaner layer above raw gptel tools.
+
+#+begin_src emacs-lisp
+       (gptel-agent-runtime-risk-at-least-p
         risk gptel-agent-runtime-risk-confirmation-level)))
 
 (cl-defstruct (gptel-agent-runtime-tool
@@ -342,8 +411,14 @@ human-readable summary. PLIST may include :package-ready-p, :local-only-p,
 (defun gptel-agent-runtime-result-pending-reflection-p (result)
   "Return non-nil when RESULT should trigger a reflection step."
   (or (eq (gptel-agent-runtime-action-result-status result) 'error)
+#+end_src
 
-(gptel-agent-runtime-action-result-reflection-needed-p result)))
+* Planner Data Model
+
+Plan and plan-step structs plus helper functions for selecting the next actionable step.
+
+#+begin_src emacs-lisp
+      (gptel-agent-runtime-action-result-reflection-needed-p result)))
 
 (cl-defstruct (gptel-agent-runtime-plan-step
                (:constructor gptel-agent-runtime-plan-step-create))
@@ -403,6 +478,13 @@ human-readable summary. PLIST may include :package-ready-p, :local-only-p,
      (not (memq (gptel-agent-runtime-plan-step-status step)
                 '(done skipped cancelled))))
    (gptel-agent-runtime-plan-steps plan)))
+#+end_src
+
+* Memory Layer
+
+Filesystem-backed session memory scaffolding. It currently writes session data as Lisp data and will later become episodic/project memory.
+
+#+begin_src emacs-lisp
 
 (defcustom gptel-agent-runtime-memory-format 'sexp
   "Storage format for future runtime memory files.
@@ -462,6 +544,13 @@ Emacs and safe to evolve while the data model is still changing."
       (prin1 (gptel-agent-runtime--struct-to-data session) (current-buffer))
       (insert "\n"))
     path))
+#+end_src
+
+* gptel Base Setup and Backend Registration
+
+Installs/configures gptel, loads provider modules, registers cloud and local backends, starts/selects Ollama, and prefers the currently active Ollama model when available.
+
+#+begin_src emacs-lisp
 
 (use-package gptel
   :ensure t
@@ -677,6 +766,13 @@ both plist and vector shapes returned by `json-read'."
                     ("DeepSeek R1 (Ollama)"   ,backend . deepseek-r1)
                     ("Qwen 2.5 Coder 7B (Ollama)" ,backend . qwen2.5-coder:7b)
                     ("Qwen 2.5 (Ollama)"      ,backend . qwen2.5))))))
+#+end_src
+
+* Model Switching, Directive Sync, and Status UI
+
+Compatibility helpers for selecting a backend/model, choosing the matching directive, enabling tools, and reporting current gptel state.
+
+#+begin_src emacs-lisp
 
 (defun my/gptel-register-model (name backend model)
   "Register NAME with BACKEND+MODEL in `my/gptel-backends'.
@@ -844,8 +940,14 @@ gptel--known-tools is a two-level alist: (category . ((name . struct) ...))."
                      '("install" "-y" "xclip"))))
          (apply #'start-process "install-xclip" "*install-xclip*" cmd args)
          (message "xclip not found — installing via apt in background. Restart Emacs when done."))
+#+end_src
 
-(error (message "xclip not found — install manually: apt-get install xclip")))))
+* Image Capture and Multimodal Helpers
+
+Clipboard image capture, shrinking, org-download integration, and attaching images to gptel context.
+
+#+begin_src emacs-lisp
+     (error (message "xclip not found — install manually: apt-get install xclip")))))
 
 (defcustom my/gptel-image-dir
   (expand-file-name "gptel-images" user-emacs-directory)
@@ -991,6 +1093,13 @@ next gptel request. Shrinks first if necessary."
 (require 'url)
 (require 'shr)
 (require 'dom)
+#+end_src
+
+* Web and Image Fetch Helpers
+
+HTTP fetch, readable text extraction, DuckDuckGo HTML search, image extraction/download, and inline image insertion helpers.
+
+#+begin_src emacs-lisp
 
 (defcustom my/web-fetch-timeout 30
   "Timeout in seconds for `my/web-fetch'."
@@ -1100,6 +1209,13 @@ In org-mode `org-display-inline-images' is triggered."
     (when (derived-mode-p 'org-mode)
       (org-display-inline-images t t))
     file))
+#+end_src
+
+* Response Executor Compatibility Layer
+
+The executor watches gptel responses, runs Org Babel and AUTORUN blocks, executes file-output blocks for inline images, and repairs some tutorial-style local-model plot responses. The claude-executor prefix remains for compatibility.
+
+#+begin_src emacs-lisp
 
 (use-package gptel
   :ensure t)
@@ -1500,14 +1616,21 @@ Activates the response and AUTORUN hooks on
     (message "Response Executor deactivated.")))
 
 (provide 'claude-executor)
+#+end_src
+
+* Prompt Directives and Runtime Defaults
+
+gptel directives for local assistant, planner, and full assistant modes, plus executor defaults and Babel language activation. Prompt strings contain nested Org examples, so those lines are comma-escaped in this literate source and unescaped during tangling.
+
+#+begin_src emacs-lisp
 
 (setq gptel-directives
       (append gptel-directives
               `((assistant . ,(format "You are an Emacs assistant.
 When the user wants to perform an action in Emacs, respond with a
-#+begin_src elisp :AUTORUN
+,#+begin_src elisp :AUTORUN
 (your-elisp-code-here)
-#+end_src
+,#+end_src
 block. It is executed automatically.
 For org-mode TODO in inbox.org:
   (find-file \"%s\")
@@ -1532,10 +1655,10 @@ MOST IMPORTANT:
 - First produce executable web lookup output. If native tool calling works, call
   web_search and then web_fetch_text. If native tool calling does not work, write
   this exact kind of Org block:
-#+begin_src elisp :results output
+,#+begin_src elisp :results output
 (dolist (r (my/web-search-ddg \"QUERY HERE\" 5))
   (princ (format \"- [[%s][%s]]\\n\" (cdr r) (car r))))
-#+end_src
+,#+end_src
 - After search results are visible, fetch official/primary URLs with
   my/web-text or web_fetch_text and cite the URLs in the answer.
 
@@ -1583,7 +1706,7 @@ INLINE MATH AND GRAPHS:
 Example 3D graph response:
 $f(x,y)=\\sin(\\sqrt{x^2+y^2})$
 
-#+begin_src gnuplot :file graph3d.png
+,#+begin_src gnuplot :file graph3d.png
 set terminal pngcairo size 1200,900 enhanced font \"Arial,12\"
 set samples 160
 set isosamples 160
@@ -1596,9 +1719,9 @@ set xlabel \"x\"
 set ylabel \"y\"
 set zlabel \"f(x,y)\"
 splot [-8:8][-8:8] sin(sqrt(x*x+y*y)) with pm3d title \"f(x,y)=sin(sqrt(x^2+y^2))\"
-#+end_src
+,#+end_src
 
-#+RESULTS:
+,#+RESULTS:
 [[file:graph3d.png]]
 
 WEB SEARCH:
@@ -1607,15 +1730,15 @@ WEB SEARCH:
   lookup before answering.
 - Prefer official sources, then cite the URLs used.
 - Search example when native tool calling is unavailable:
-#+begin_src elisp :results output
+,#+begin_src elisp :results output
 (dolist (r (my/web-search-ddg \"Abitur private Gymnasium München Bayern aktuelle Regeln\" 5))
   (princ (format \"- [[%s][%s]]\\n\" (cdr r) (car r))))
-#+end_src
+,#+end_src
 
 - Fetch example:
-#+begin_src elisp :results output
+,#+begin_src elisp :results output
 (princ (my/web-text \"https://www.km.bayern.de/\" 6000))
-#+end_src
+,#+end_src
 
 ORG FILES:
 - Org directory: ~/emacs-data/data/org/
@@ -1698,6 +1821,13 @@ Never tell the user to run manual M-x commands when Emacs can execute the action
 ;;; --- Activate Mode ------------------------------------------------
 ;; Backend + model is set in the "Multi-Backend Configuration" section.
 (claude-executor-mode 1)
+#+end_src
+
+* Workspace Context Collection
+
+Collectors for current buffer, file, project, git branch/status, and TODO context. The context advice injects workspace context before gptel-send.
+
+#+begin_src emacs-lisp
 
 (defun my/collect-org-todos (&optional limit)
   "Return a list of TODO entries from all org agenda files.
@@ -1801,6 +1931,13 @@ Each entry is a plist with :state :heading :file :deadline :tags."
       (apply orig-fn args))))
 
 (advice-add 'gptel-send :around #'my/gptel--inject-context)
+#+end_src
+
+* Native gptel Tools
+
+Org, code execution, file system, buffer, export, and web tools exposed to models through gptel. Tool activation happens after all tools are registered.
+
+#+begin_src emacs-lisp
 
 (with-eval-after-load 'gptel
   ;; get_todos — return the current TODO list as text
@@ -2185,6 +2322,13 @@ Each entry is a plist with :state :heading :file :deadline :tags."
 
 (defvar gptel-agent-runtime--origin-buffer nil
   "Buffer where the current agent session should render user-visible output.")
+#+end_src
+
+* Experimental Planner Loop and Feature Provide
+
+Observe/plan/act/reflect scaffolding for autonomous agent sessions, final model selection after helpers are available, and package feature provide. This is early infrastructure, not yet a fully reliable agent runtime.
+
+#+begin_src emacs-lisp
 
 (defun gptel-agent-runtime-start (goal &optional role)
   "Start a new autonomous agent session to achieve GOAL with ROLE."
@@ -2375,3 +2519,4 @@ Each entry is a plist with :state :heading :file :deadline :tags."
 (provide 'gptel-agent-runtime)
 
 ;;; gptel-agent-runtime.el ends here
+#+end_src
