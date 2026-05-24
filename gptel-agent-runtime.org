@@ -194,6 +194,21 @@ relaxed by the user."
   :type '(repeat string)
   :group 'gptel-agent-runtime)
 
+(defcustom gptel-agent-runtime-auto-continue-after-raw-tools t
+  "When non-nil, ask the model to continue after raw tool observations.
+This turns local-model raw JSON tool-call output into a small ReAct-style chat
+loop: tool call, Emacs observation, then a natural-language answer."
+  :type 'boolean
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-raw-tool-auto-continue-depth 1
+  "Maximum nested auto-continuations after raw tool observations.
+The default of 1 prevents accidental loops while still making one tool result
+usable by the assistant."
+  :type 'integer
+  :safe #'integerp
+  :group 'gptel-agent-runtime)
+
 (defcustom gptel-agent-runtime-enable-parallel-mutations t
   "When non-nil, allow non-conflicting write-risk tools to run as workers.
 This only applies when the step passes safety checks and confirmation policy
@@ -2648,19 +2663,93 @@ break object detection."
          (format "Tool `%s' failed: %s" name
                  (mapconcat #'gptel--to-string err " "))))))))
 
+(defvar gptel-agent-runtime--raw-tool-continuation-depth 0
+  "Current nested raw tool continuation depth.")
+
+(defun gptel-agent-runtime--raw-tool-success-observation-p (observation)
+  "Return non-nil when OBSERVATION is a successful raw tool observation."
+  (and (stringp observation)
+       (string-prefix-p "Tool `" observation)
+       (string-match-p " observation:\n" observation)))
+
+(defun gptel-agent-runtime--raw-tool-continuation-prompt (observations)
+  "Build a continuation prompt for raw tool OBSERVATIONS."
+  (format (concat "The previous assistant message contained raw JSON tool "
+                  "call(s). Emacs executed the call(s) and produced these "
+                  "observations:\n\n%s\n\nContinue the conversation naturally. "
+                  "Use the observations to answer the user's request. Do not "
+                  "repeat the JSON tool call. If the user asked what you can "
+                  "do in Emacs, summarize the concrete capabilities shown by "
+                  "the tools and mention that code/write actions require "
+                  "confirmation.")
+          (mapconcat #'identity observations "\n\n")))
+
+(defun gptel-agent-runtime--request-raw-tool-continuation (observations)
+  "Ask the model for a natural continuation after OBSERVATIONS."
+  (when (and gptel-agent-runtime-auto-continue-after-raw-tools
+             observations
+             (< gptel-agent-runtime--raw-tool-continuation-depth
+                gptel-agent-runtime-raw-tool-auto-continue-depth)
+             (fboundp 'gptel-request))
+    (let ((buffer (current-buffer))
+          (depth (1+ gptel-agent-runtime--raw-tool-continuation-depth))
+          (prompt (gptel-agent-runtime--raw-tool-continuation-prompt
+                   observations))
+          (system (or (and (boundp 'gptel--system-message)
+                           gptel--system-message)
+                      (alist-get (my/gptel-directive-for-current-runtime)
+                                 gptel-directives)
+                      "You are an Emacs assistant.")))
+      (message "gptel-agent-runtime: continuing after raw tool observation...")
+      (let ((gptel-agent-runtime--raw-tool-continuation-depth depth))
+        (gptel-request
+         prompt
+         :buffer buffer
+         :stream nil
+         :system system
+         :callback
+         (lambda (response _info)
+           (when (and (stringp response)
+                      (buffer-live-p buffer))
+             (with-current-buffer buffer
+               (let ((beg (point-max))
+                     (gptel-agent-runtime--raw-tool-continuation-depth depth))
+                 (goto-char beg)
+                 (unless (bolp) (insert "\n"))
+                 (insert "\nAssistant continuation:\n\n")
+                 (insert response)
+                 (unless (bolp) (insert "\n"))
+                 (run-hook-with-args
+                  'gptel-post-response-functions beg (point)))))))))))
+
 (defun gptel-agent-runtime-execute-raw-tool-calls (beg end)
   "Execute safe raw JSON tool calls emitted as assistant text.
 This is a compatibility shim for local models that know tool-call syntax but do
 not return native gptel tool-call messages."
   (let ((calls (gptel-agent-runtime--raw-tool-calls-in-region beg end)))
     (when calls
-      (goto-char end)
-      (unless (bolp) (insert "\n"))
-      (insert "\nRaw tool observations:\n")
-      (dolist (call calls)
-        (insert "\n#+begin_example\n")
-        (insert (gptel-agent-runtime--execute-raw-tool-call call))
-        (insert "\n#+end_example\n")))))
+      (if (>= gptel-agent-runtime--raw-tool-continuation-depth
+              gptel-agent-runtime-raw-tool-auto-continue-depth)
+          (progn
+            (goto-char end)
+            (unless (bolp) (insert "\n"))
+            (insert "\nRaw tool calls ignored: continuation depth limit reached.\n")
+            nil)
+        (goto-char end)
+        (unless (bolp) (insert "\n"))
+        (insert "\nRaw tool observations:\n")
+        (let (observations)
+          (dolist (call calls)
+            (let ((observation (gptel-agent-runtime--execute-raw-tool-call call)))
+              (push observation observations)
+              (insert "\n#+begin_example\n")
+              (insert observation)
+              (insert "\n#+end_example\n")))
+          (let ((successful (cl-remove-if-not
+                             #'gptel-agent-runtime--raw-tool-success-observation-p
+                             (nreverse observations))))
+            (gptel-agent-runtime--request-raw-tool-continuation successful)
+            successful))))))
 
 (defun claude-executor-response-hook (beg end)
   "Hook for Babel blocks, exec-tags and auto-pattern matching.
