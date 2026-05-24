@@ -3847,6 +3847,12 @@ CRITICAL RULES:
 - If the user asks whether they can teach you a skill, answer conversationally
   about the runtime skill/memory mechanism. Do not create a TODO unless the user
   explicitly asks you to add a task.
+- If the user asks about capabilities, tools, agents, organization,
+  organisational/organizational swarm intelligence, company structure, or what
+  you can do, use the describe_capabilities tool when available. The runtime
+  does include an inspectable organization/swarm scaffold: agents, organization
+  units, policy-gated tools, event traces, memory, and learned playbooks. Do not
+  claim this layer is missing.
 - Never tell the user to press keys, export manually, or run commands manually.
 - Produce executable Org-mode blocks when an action, calculation, graph, file,
   shell command, or Emacs operation is requested.
@@ -4084,6 +4090,18 @@ Each entry is a plist with :state :heading :file :deadline :tags."
   (let ((start (max (point-min) (- (point) 4000))))
     (string-trim (buffer-substring-no-properties start (point)))))
 
+(defun gptel-agent-runtime-capability-question-p (text)
+  "Return non-nil when TEXT asks about runtime capabilities or organization."
+  (let ((case-fold-search t))
+    (and (stringp text)
+         (string-match-p
+          (concat "\\b\\("
+                  "capab\\|what can\\|what.*do\\|tools?\\|agents?\\|"
+                  "organization\\|organisation\\|organizational\\|"
+                  "organisational\\|swarm\\|company structure\\|playbooks?"
+                  "\\)\\b")
+          text))))
+
 (defun my/gptel--inject-context (orig-fn &rest args)
   "Around advice for `gptel-send': route, sync directive, and prepend context."
   (gptel-agent-runtime-cancel-current-job)
@@ -4097,11 +4115,21 @@ Each entry is a plist with :state :heading :file :deadline :tags."
          (gptel-agent-runtime-current-buffer-task-text))
       (my/gptel-sync-directive-for-current-runtime))
     (my/gptel-sync-tools)
-    (let* ((ctx   (my/workspace-context-string))
+    (let* ((task-text (gptel-agent-runtime-current-buffer-task-text))
+           (ctx   (my/workspace-context-string))
+           (capability-context
+            (when (gptel-agent-runtime-capability-question-p task-text)
+              (concat "=== LIVE AGENT CAPABILITY SUMMARY ===\n"
+                      (gptel-agent-runtime-capability-summary)
+                      "\n=== END LIVE AGENT CAPABILITY SUMMARY ===\n")))
            (orig  gptel--system-message)
-           (gptel--system-message (if (and ctx (not (string-empty-p ctx)))
-                                      (concat orig "\n\n" ctx)
-                                    orig)))
+           (gptel--system-message
+            (string-join
+             (delq nil
+                   (list orig
+                         (and ctx (not (string-empty-p ctx)) ctx)
+                         capability-context))
+             "\n\n")))
       (apply orig-fn args))))
 
 (advice-add 'gptel-send :around #'my/gptel--inject-context)
