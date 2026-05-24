@@ -121,6 +121,46 @@ Write, shell, and destructive actions still honor
   :type 'boolean
   :group 'gptel-agent-runtime)
 
+(defcustom gptel-agent-runtime-event-log-enabled t
+  "When non-nil, record runtime events to memory and an append-only file."
+  :type 'boolean
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-event-log-file
+  (expand-file-name "events.el" (expand-file-name "gptel-agent-runtime/" user-emacs-directory))
+  "Append-only event log file used by the event bus scaffold."
+  :type 'file
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-event-log-max-memory 300
+  "Maximum number of recent events kept in memory."
+  :type 'integer
+  :safe #'integerp
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-policy-enabled t
+  "When non-nil, route tool execution through the configurable policy broker."
+  :type 'boolean
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-tool-policy nil
+  "Fine-grained policy alist for runtime tools.
+Each entry is (TOOL . PLIST), where TOOL is a string or symbol. Supported PLIST
+keys include:
+
+  :default allow|deny
+  :confirm nil|always|write|shell|destructive
+  :paths (directories or files allowed for path-like arguments)
+  :agents (agent names allowed to use the tool)
+  :blocked-patterns (regexps checked against command/code arguments)
+  :taint trusted|untrusted
+
+This supplements the built-in safety checks. It does not weaken protected-path
+or blocked-command checks unless the user explicitly customizes those lower
+level lists."
+  :type 'alist
+  :group 'gptel-agent-runtime)
+
 (defcustom gptel-agent-runtime-memory-directory
   (expand-file-name "gptel-agent-runtime/" user-emacs-directory)
   "Directory for future persistent agent memory and session state."
@@ -396,9 +436,115 @@ Structs and constructors for high-level tasks and agent sessions. These are the 
   started-at
   updated-at)
 
+(cl-defstruct (gptel-agent-runtime-event
+               (:constructor gptel-agent-runtime-event-create))
+  "One event in the runtime event bus."
+  id
+  type
+  source
+  session-id
+  parent-id
+  payload
+  taint
+  created-at)
+
+(cl-defstruct (gptel-agent-runtime-policy-decision
+               (:constructor gptel-agent-runtime-policy-decision-create))
+  "Decision returned by the runtime policy broker."
+  allowed-p
+  confirmation-required-p
+  reason
+  policy
+  taint
+  metadata)
+
+(defvar gptel-agent-runtime-event-log nil
+  "Recent in-memory runtime event log.")
+
 (defun gptel-agent-runtime--timestamp ()
   "Return an ISO-like local timestamp for runtime state."
   (format-time-string "%Y-%m-%dT%H:%M:%S%z"))
+
+(defun gptel-agent-runtime--event-log-directory ()
+  "Return the directory containing the append-only event log."
+  (file-name-directory (expand-file-name gptel-agent-runtime-event-log-file)))
+
+(defun gptel-agent-runtime--event-to-data (event)
+  "Convert EVENT to printable data."
+  `(:type event
+    :id ,(gptel-agent-runtime-event-id event)
+    :event-type ,(gptel-agent-runtime-event-type event)
+    :source ,(gptel-agent-runtime-event-source event)
+    :session-id ,(gptel-agent-runtime-event-session-id event)
+    :parent-id ,(gptel-agent-runtime-event-parent-id event)
+    :payload ,(gptel-agent-runtime-event-payload event)
+    :taint ,(gptel-agent-runtime-event-taint event)
+    :created-at ,(gptel-agent-runtime-event-created-at event)))
+
+(cl-defun gptel-agent-runtime-emit-event
+    (type &key source session-id parent-id payload taint)
+  "Emit a runtime event of TYPE and return it.
+SOURCE identifies the component creating the event. SESSION-ID and PARENT-ID
+link the event to an agent session or prior event. PAYLOAD is printable data.
+TAINT is normally `trusted' or `untrusted'."
+  (let* ((event (gptel-agent-runtime-event-create
+                 :id (format "event-%s" (format-time-string "%Y%m%d%H%M%S%N"))
+                 :type type
+                 :source source
+                 :session-id session-id
+                 :parent-id parent-id
+                 :payload payload
+                 :taint (or taint 'trusted)
+                 :created-at (gptel-agent-runtime--timestamp)))
+         (data (gptel-agent-runtime--event-to-data event)))
+    (push event gptel-agent-runtime-event-log)
+    (when (> (length gptel-agent-runtime-event-log)
+             gptel-agent-runtime-event-log-max-memory)
+      (setcdr (nthcdr (1- gptel-agent-runtime-event-log-max-memory)
+                      gptel-agent-runtime-event-log)
+              nil))
+    (when gptel-agent-runtime-event-log-enabled
+      (make-directory (gptel-agent-runtime--event-log-directory) t)
+      (with-temp-buffer
+        (prin1 data (current-buffer))
+        (insert "\n")
+        (append-to-file (point-min) (point-max)
+                        gptel-agent-runtime-event-log-file)))
+    event))
+
+(defun gptel-agent-runtime-list-events (&optional limit)
+  "Return recent runtime events, newest first.
+LIMIT defaults to 50 when called interactively."
+  (interactive "P")
+  (let* ((limit (or (and (numberp limit) limit) 50))
+         (events (cl-subseq gptel-agent-runtime-event-log
+                            0 (min limit (length gptel-agent-runtime-event-log)))))
+    (if (called-interactively-p 'interactive)
+        (with-current-buffer (get-buffer-create "*gptel-agent-events*")
+          (erase-buffer)
+          (dolist (event events)
+            (prin1 (gptel-agent-runtime--event-to-data event) (current-buffer))
+            (insert "\n"))
+          (display-buffer (current-buffer)))
+      events)))
+
+(defun gptel-agent-runtime-route-event (event)
+  "Route EVENT to an agent/skill decision.
+This is the first router scaffold: user-request events reuse the existing
+task router when available; all other events go to the assistant role."
+  (let* ((payload (gptel-agent-runtime-event-payload event))
+         (text (or (plist-get payload :goal)
+                   (plist-get payload :text)
+                   (plist-get payload :title)
+                   "")))
+    (if (and (eq (gptel-agent-runtime-event-type event) 'user-request)
+             (fboundp 'gptel-agent-runtime-route-task))
+        (gptel-agent-runtime-route-task text)
+      (list :agent (or (and (fboundp 'gptel-agent-runtime-find-agent)
+                            (gptel-agent-runtime-find-agent "assistant"))
+                       "assistant")
+            :skills nil
+            :reason "Default event route."))))
 
 (defun gptel-agent-runtime-create-task (title goal &optional parent-id)
   "Create a task object with TITLE, GOAL, and optional PARENT-ID."
@@ -518,6 +664,14 @@ Allowed values are `safe', `read', `write', `shell', and `destructive'."
           (string-match-p pattern command))
         gptel-agent-runtime-blocked-placeholder-patterns)))
 
+(defun gptel-agent-runtime--symbol-name (value)
+  "Return VALUE as a stable string."
+  (cond
+   ((symbolp value) (symbol-name value))
+   ((stringp value) value)
+   ((null value) "")
+   (t (format "%s" value))))
+
 (defun gptel-agent-runtime--plist-values-for-keys (plist keys)
   "Return values from PLIST for KEYS."
   (delq nil
@@ -525,17 +679,140 @@ Allowed values are `safe', `read', `write', `shell', and `destructive'."
                   (plist-get plist key))
                 keys)))
 
-(defun gptel-agent-runtime-safety-check-step (step)
-  "Return nil if STEP is allowed, or an explanatory error string."
+(defun gptel-agent-runtime--policy-for-tool (tool-name)
+  "Return configured policy plist for TOOL-NAME."
+  (let* ((name (gptel-agent-runtime--symbol-name tool-name))
+         (symbol (intern-soft name)))
+    (or (alist-get name gptel-agent-runtime-tool-policy nil nil #'equal)
+        (and symbol
+             (alist-get symbol gptel-agent-runtime-tool-policy)))))
+
+(defun gptel-agent-runtime--policy-default-allows-p (policy)
+  "Return non-nil when POLICY default permits execution."
+  (not (eq (plist-get policy :default) 'deny)))
+
+(defun gptel-agent-runtime--policy-agent-allowed-p (policy agent)
+  "Return non-nil when POLICY allows AGENT."
+  (let ((allowed (plist-get policy :agents)))
+    (or (null allowed)
+        (member (gptel-agent-runtime--symbol-name agent)
+                (mapcar #'gptel-agent-runtime--symbol-name allowed)))))
+
+(defun gptel-agent-runtime--policy-path-allowed-p (policy paths)
+  "Return non-nil when POLICY allows all PATHS."
+  (let ((allowed (plist-get policy :paths)))
+    (or (null allowed)
+        (cl-every
+         (lambda (path)
+           (cl-some
+            (lambda (root)
+              (let ((expanded (expand-file-name path))
+                    (allowed-path (expand-file-name root)))
+                (or (string= (file-truename expanded)
+                             (file-truename allowed-path))
+                    (and (file-directory-p allowed-path)
+                         (gptel-agent-runtime--path-under-directory-p
+                          expanded allowed-path)))))
+            allowed))
+         paths))))
+
+(defun gptel-agent-runtime--policy-command-blocked-p (policy command)
+  "Return non-nil when POLICY blocks COMMAND."
+  (and (stringp command)
+       (cl-some
+        (lambda (pattern)
+          (string-match-p pattern command))
+        (plist-get policy :blocked-patterns))))
+
+(defun gptel-agent-runtime--policy-confirmation-required-p (policy risk)
+  "Return non-nil when POLICY requires confirmation for RISK."
+  (let ((confirm (plist-get policy :confirm)))
+    (cond
+     ((eq confirm 'always) t)
+     ((null confirm) nil)
+     ((memq confirm '(safe read write shell destructive))
+      (gptel-agent-runtime-risk-at-least-p risk confirm))
+     (t nil))))
+
+(defun gptel-agent-runtime-policy-evaluate-step (step &optional context)
+  "Return policy decision for STEP in CONTEXT.
+CONTEXT is a plist that may include :source, :agent, :session-id, and :raw-call."
+  (let* ((tool (or (gptel-agent-runtime-plan-step-suggested-tool step)
+                   "direct_response"))
+         (args (gptel-agent-runtime--normalize-args
+                (gptel-agent-runtime-plan-step-args step)))
+         (risk (or (gptel-agent-runtime-plan-step-risk step) 'safe))
+         (agent (or (plist-get context :agent)
+                    (gptel-agent-runtime-plan-step-agent step)
+                    "assistant"))
+         (policy (and gptel-agent-runtime-policy-enabled
+                      (gptel-agent-runtime--policy-for-tool tool)))
+         (path-values (gptel-agent-runtime--plist-values-for-keys
+                       args '(:path :file :directory)))
+         (command (or (plist-get args :command)
+                      (plist-get args :code)))
+         (reason nil)
+         (allowed t))
+    (when policy
+      (cond
+       ((not (gptel-agent-runtime--policy-default-allows-p policy))
+        (setq allowed nil
+              reason "Tool denied by policy default."))
+       ((not (gptel-agent-runtime--policy-agent-allowed-p policy agent))
+        (setq allowed nil
+              reason (format "Agent `%s' is not allowed to use `%s'."
+                             agent tool)))
+       ((not (gptel-agent-runtime--policy-path-allowed-p policy path-values))
+        (setq allowed nil
+              reason "Tool path is outside policy allow list."))
+       ((gptel-agent-runtime--policy-command-blocked-p policy command)
+        (setq allowed nil
+              reason "Command/code matched a policy blocked pattern."))))
+    (let ((decision
+           (gptel-agent-runtime-policy-decision-create
+            :allowed-p allowed
+            :confirmation-required-p
+            (and allowed
+                 (or (gptel-agent-runtime--policy-confirmation-required-p
+                      policy risk)
+                     (gptel-agent-runtime-confirmation-required-p risk)))
+            :reason reason
+            :policy policy
+            :taint (or (plist-get policy :taint) 'trusted)
+            :metadata (list :tool tool :risk risk :agent agent :context context))))
+      (gptel-agent-runtime-emit-event
+       'policy-decision
+       :source "policy-broker"
+       :session-id (plist-get context :session-id)
+       :payload (list :tool tool
+                      :risk risk
+                      :agent agent
+                      :allowed-p (gptel-agent-runtime-policy-decision-allowed-p
+                                  decision)
+                      :confirmation-required-p
+                      (gptel-agent-runtime-policy-decision-confirmation-required-p
+                       decision)
+                      :reason reason)
+       :taint 'trusted)
+      decision)))
+
+(defun gptel-agent-runtime-safety-check-step (step &optional context)
+  "Return nil if STEP is allowed, or an explanatory error string.
+CONTEXT is passed to the policy broker for audit events."
   (let* ((tool (or (gptel-agent-runtime-plan-step-suggested-tool step) ""))
          (args (gptel-agent-runtime--normalize-args
                 (gptel-agent-runtime-plan-step-args step)))
          (risk (or (gptel-agent-runtime-plan-step-risk step) 'safe))
+         (policy-decision (gptel-agent-runtime-policy-evaluate-step
+                           step context))
          (path-values (gptel-agent-runtime--plist-values-for-keys
                        args '(:path :file :directory)))
          (command (or (plist-get args :command)
                       (plist-get args :code))))
     (cond
+     ((not (gptel-agent-runtime-policy-decision-allowed-p policy-decision))
+      (or (gptel-agent-runtime-policy-decision-reason policy-decision)
+          "Step denied by policy."))
      ((and (member tool '("write_file" "write_org_file" "add_todo"
                           "change_todo_state" "set_deadline" "add_tag"))
            (cl-some #'gptel-agent-runtime-protected-path-p path-values))
@@ -827,6 +1104,16 @@ Emacs and safe to evolve while the data model is still changing."
       :changed-buffers ,(gptel-agent-runtime-action-result-changed-buffers object)
       :reflection-needed-p ,(gptel-agent-runtime-action-result-reflection-needed-p object)
       :metadata ,(gptel-agent-runtime-action-result-metadata object)))
+   ((gptel-agent-runtime-event-p object)
+    (gptel-agent-runtime--event-to-data object))
+   ((gptel-agent-runtime-policy-decision-p object)
+    `(:type policy-decision
+      :allowed-p ,(gptel-agent-runtime-policy-decision-allowed-p object)
+      :confirmation-required-p ,(gptel-agent-runtime-policy-decision-confirmation-required-p object)
+      :reason ,(gptel-agent-runtime-policy-decision-reason object)
+      :policy ,(gptel-agent-runtime-policy-decision-policy object)
+      :taint ,(gptel-agent-runtime-policy-decision-taint object)
+      :metadata ,(gptel-agent-runtime-policy-decision-metadata object)))
    ((gptel-agent-runtime-worker-p object)
     `(:type worker
       :id ,(gptel-agent-runtime-worker-id object)
@@ -1194,13 +1481,6 @@ or strategies the selected agent should apply.
 
 (defvar gptel-agent-runtime-skill-stats nil
   "Alist of persisted skill outcome statistics.")
-
-(defun gptel-agent-runtime--symbol-name (value)
-  "Return a stable string name for VALUE."
-  (cond
-   ((symbolp value) (symbol-name value))
-   ((stringp value) value)
-   (t (format "%s" value))))
 
 (defun gptel-agent-runtime-register-agent
     (name role description &rest plist)
@@ -2655,14 +2935,18 @@ break object detection."
     'write)
    (t 'shell)))
 
-(defun gptel-agent-runtime--raw-tool-call-confirmed-p (call risk)
-  "Return non-nil when raw tool CALL with RISK may execute."
-  (or (not (gptel-agent-runtime-confirmation-required-p risk))
+(defun gptel-agent-runtime--raw-tool-call-confirmed-p (call risk step)
+  "Return non-nil when raw tool CALL with RISK and STEP may execute."
+  (let ((decision (gptel-agent-runtime-policy-evaluate-step
+                   step (list :source "raw-tool" :agent "assistant"
+                              :raw-call t))))
+    (or (not (gptel-agent-runtime-policy-decision-confirmation-required-p
+              decision))
       (and (not noninteractive)
            (yes-or-no-p
             (format "Local model wants to run raw tool %s (%s risk). Continue? "
                     (plist-get call :name)
-                    risk)))))
+                    risk))))))
 
 (defun gptel-agent-runtime--execute-raw-tool-call (call)
   "Execute one safe raw JSON tool CALL and return an observation string."
@@ -2673,18 +2957,26 @@ break object detection."
          (step (gptel-agent-runtime-create-plan-step
                 (format "Raw local tool call: %s" name)
                 "The local model emitted a JSON tool call as assistant text."
-                name risk :args arguments)))
+                name risk :args arguments))
+         (safety-error (gptel-agent-runtime-safety-check-step
+                        step (list :source "raw-tool" :agent "assistant"
+                                   :raw-call t))))
+    (gptel-agent-runtime-emit-event
+     'raw-tool-requested
+     :source "raw-tool-shim"
+     :payload (list :tool name :risk risk :arguments arguments)
+     :taint 'untrusted)
     (cond
      ((not (or (member name gptel-agent-runtime-raw-tool-call-names)
                (member name gptel-agent-runtime-raw-tool-confirmation-names)))
       (format "Skipped raw tool call `%s': tool is not in the raw-call allow lists." name))
      ((not tool)
       (format "Skipped raw tool call `%s': tool is not registered in gptel." name))
-     ((gptel-agent-runtime-safety-check-step step)
+     (safety-error
       (format "Skipped raw tool call `%s': %s"
               name
-              (gptel-agent-runtime-safety-check-step step)))
-     ((not (gptel-agent-runtime--raw-tool-call-confirmed-p call risk))
+              safety-error))
+     ((not (gptel-agent-runtime--raw-tool-call-confirmed-p call risk step))
       (format (concat "Skipped raw tool call `%s': confirmation required. "
                       "Run this from an interactive Emacs session and answer yes, "
                       "or lower `gptel-agent-runtime-require-confirmation-for-risky-actions'.")
@@ -2791,6 +3083,23 @@ break object detection."
                     "Use capabilities in prose for the user. Avoid inventing "
                     "direct Elisp call syntax unless the user asks for code.")
             tool-list safe confirmed)))
+
+(defun gptel-agent-runtime-list-tools ()
+  "Display all currently registered gptel tools and runtime policy metadata."
+  (interactive)
+  (let ((summary (gptel-agent-runtime-capability-summary)))
+    (if (called-interactively-p 'interactive)
+        (with-current-buffer (get-buffer-create "*gptel-agent-tools*")
+          (erase-buffer)
+          (insert summary)
+          (insert "\n\nConfigured tool policies:\n")
+          (if gptel-agent-runtime-tool-policy
+              (dolist (entry gptel-agent-runtime-tool-policy)
+                (prin1 entry (current-buffer))
+                (insert "\n"))
+            (insert "- No custom tool policies configured.\n"))
+          (display-buffer (current-buffer)))
+      summary)))
 
 (defun gptel-agent-runtime--raw-tool-success-observation-p (observation)
   "Return non-nil when OBSERVATION is a successful raw tool observation."
@@ -3880,6 +4189,12 @@ remember -> continue."
     (setq gptel-agent-runtime--current-session session)
     (setq gptel-agent-runtime--origin-buffer (current-buffer))
     (setf (gptel-agent-runtime-task-status task) 'running)
+    (gptel-agent-runtime-emit-event
+     'user-request
+     :source "gptel-agent-runtime-start"
+     :session-id (gptel-agent-runtime-session-id session)
+     :payload (list :goal goal :role (or role gptel-agent-runtime-default-role))
+     :taint 'trusted)
     (push (format "%s session started for: %s"
                   (gptel-agent-runtime--timestamp) goal)
           (gptel-agent-runtime-session-decisions session))
@@ -3945,6 +4260,12 @@ remember -> continue."
     (gptel-agent-runtime--requeue-running-work session)
     (setq gptel-agent-runtime--current-session session)
     (setq gptel-agent-runtime--origin-buffer (current-buffer))
+    (gptel-agent-runtime-emit-event
+     'session-resumed
+     :source "gptel-agent-runtime-resume-session"
+     :session-id (gptel-agent-runtime-session-id session)
+     :payload (list :file file)
+     :taint 'trusted)
     (push (format "%s resumed from %s"
                   (gptel-agent-runtime--timestamp)
                   file)
@@ -4057,11 +4378,24 @@ remember -> continue."
                   (mapconcat #'identity (gptel-agent-runtime--tool-names) ", ")
                   observation)))
     (push observation (gptel-agent-runtime-session-observations session))
+    (gptel-agent-runtime-emit-event
+     'observation
+     :source "workspace"
+     :session-id (gptel-agent-runtime-session-id session)
+     :payload (list :goal goal :route (plist-get route :reason)
+                    :observation observation)
+     :taint 'trusted)
     (push (format "%s planning route: %s"
                   (gptel-agent-runtime--timestamp)
                   (plist-get route :reason))
           (gptel-agent-runtime-session-decisions session))
     (message "Agent [%s] planning..." (gptel-agent-runtime-session-id session))
+    (gptel-agent-runtime-emit-event
+     'plan-requested
+     :source "planner"
+     :session-id (gptel-agent-runtime-session-id session)
+     :payload (list :goal goal :route (plist-get route :reason))
+     :taint 'trusted)
     (gptel-request
      prompt
      :system (gptel-agent-runtime--planner-system)
@@ -4344,6 +4678,17 @@ The preferred format is JSON with a top-level :steps list. A single
                 (or (gptel-agent-runtime-plan-step-suggested-tool step)
                     "direct_response"))
         (gptel-agent-runtime-session-decisions session))
+  (gptel-agent-runtime-emit-event
+   'step-delegated
+   :source "router"
+   :session-id (gptel-agent-runtime-session-id session)
+   :payload (list :step-id (gptel-agent-runtime-plan-step-id step)
+                  :title (gptel-agent-runtime-plan-step-title step)
+                  :agent (or (gptel-agent-runtime-plan-step-agent step)
+                             "assistant")
+                  :tool (or (gptel-agent-runtime-plan-step-suggested-tool step)
+                            "direct_response"))
+   :taint 'trusted)
   (message "Agent [%s] %s -> %s"
            (gptel-agent-runtime-session-id session)
            (or (gptel-agent-runtime-plan-step-agent step) "assistant")
@@ -4416,7 +4761,8 @@ The preferred format is JSON with a top-level :steps list. A single
                (eq risk 'write)
                (not (gptel-agent-runtime-confirmation-required-p risk)))))
     (and (or read-safe mutation-safe)
-         (not (gptel-agent-runtime-safety-check-step step)))))
+         (not (gptel-agent-runtime-safety-check-step
+               step (list :source "parallel-worker"))))))
 
 (defun gptel-agent-runtime--launch-parallel-workers (steps session)
   "Launch STEPS as independent worker requests for SESSION."
@@ -4567,12 +4913,13 @@ The preferred format is JSON with a top-level :steps list. A single
                     (plist-get tool :name)))
            :test #'equal))
 
-(defun gptel-agent-runtime--confirm-action-p (step)
-  "Return non-nil when STEP may execute."
-  (let ((risk (or (gptel-agent-runtime-plan-step-risk step) 'safe)))
-    (or (and gptel-agent-runtime-auto-execute-safe-actions
-             (not (gptel-agent-runtime-risk-at-least-p risk 'write)))
-        (not (gptel-agent-runtime-confirmation-required-p risk))
+(defun gptel-agent-runtime--confirm-action-p (step &optional context)
+  "Return non-nil when STEP may execute.
+CONTEXT is passed to the policy broker."
+  (let* ((risk (or (gptel-agent-runtime-plan-step-risk step) 'safe))
+         (decision (gptel-agent-runtime-policy-evaluate-step step context)))
+    (or (not (gptel-agent-runtime-policy-decision-confirmation-required-p
+              decision))
         (and (not noninteractive)
              (yes-or-no-p
               (format "Agent wants to run %s (%s risk): %s. Continue? "
@@ -4582,17 +4929,31 @@ The preferred format is JSON with a top-level :steps list. A single
 
 (defun gptel-agent-runtime--dispatch-action (step session)
   "Execute STEP for SESSION and continue to reflection."
-  (let ((tool-name (or (gptel-agent-runtime-plan-step-suggested-tool step)
-                       "direct_response")))
+  (let* ((tool-name (or (gptel-agent-runtime-plan-step-suggested-tool step)
+                        "direct_response"))
+         (context (list :source "autonomous-session"
+                        :session-id (gptel-agent-runtime-session-id session)
+                        :agent (or (gptel-agent-runtime-plan-step-agent step)
+                                   "assistant")))
+         (safety-error (gptel-agent-runtime-safety-check-step step context)))
+    (gptel-agent-runtime-emit-event
+     'action-requested
+     :source "tool-broker"
+     :session-id (gptel-agent-runtime-session-id session)
+     :payload (list :step-id (gptel-agent-runtime-plan-step-id step)
+                    :tool tool-name
+                    :agent (plist-get context :agent)
+                    :risk (gptel-agent-runtime-plan-step-risk step))
+     :taint 'trusted)
     (condition-case err
         (cond
-         ((gptel-agent-runtime-safety-check-step step)
+         (safety-error
           (gptel-agent-runtime--observe-result
            step session
            (gptel-agent-runtime-result-error
             :tool tool-name
-            :error (gptel-agent-runtime-safety-check-step step))))
-         ((not (gptel-agent-runtime--confirm-action-p step))
+            :error safety-error)))
+         ((not (gptel-agent-runtime--confirm-action-p step context))
           (gptel-agent-runtime--observe-result
            step session
            (gptel-agent-runtime-result-error
@@ -4670,6 +5031,15 @@ The preferred format is JSON with a top-level :steps list. A single
 
 (defun gptel-agent-runtime--call-native-tool (tool step session)
   "Execute native gptel TOOL for STEP in SESSION."
+  (gptel-agent-runtime-emit-event
+   'tool-call
+   :source "tool-broker"
+   :session-id (gptel-agent-runtime-session-id session)
+   :payload (list :step-id (gptel-agent-runtime-plan-step-id step)
+                  :tool (and (fboundp 'gptel-tool-name)
+                             (gptel-tool-name tool))
+                  :args (gptel-agent-runtime-plan-step-args step))
+   :taint 'trusted)
   (if (and (fboundp 'gptel-tool-async) (gptel-tool-async tool))
       (let* ((args (gptel-agent-runtime--normalize-args
                     (gptel-agent-runtime-plan-step-args step)))
@@ -4787,6 +5157,15 @@ The preferred format is JSON with a top-level :steps list. A single
     (push observation (gptel-agent-runtime-plan-step-observations step))
     (push observation (gptel-agent-runtime-session-observations session))
     (push result (gptel-agent-runtime-session-tool-results session))
+    (gptel-agent-runtime-emit-event
+     'tool-observation
+     :source "tool-broker"
+     :session-id (gptel-agent-runtime-session-id session)
+     :payload (list :step-id (gptel-agent-runtime-plan-step-id step)
+                    :tool (gptel-agent-runtime-action-result-tool result)
+                    :status (gptel-agent-runtime-action-result-status result)
+                    :error (gptel-agent-runtime-action-result-error result))
+     :taint 'untrusted)
     (gptel-agent-runtime--record-step-skill-outcomes
      step
      (eq (gptel-agent-runtime-action-result-status result) 'ok)
