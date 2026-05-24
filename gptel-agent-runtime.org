@@ -28,6 +28,7 @@ User prompt in gptel buffer
   -> gptel-send
   -> backend/model selection
   -> directive/system prompt sync
+  -> optional chat router: direct chat or autonomous swarm session
   -> optional gptel tool schemas
   -> model response inserted into buffer
   -> gptel-post-response-functions
@@ -98,6 +99,29 @@ normal init path.")
 This switch is reserved for the future planner/executor loop. Existing gptel
 chat, tools, and Response Executor behavior do not depend on it yet."
   :type 'boolean
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-chat-router-enabled t
+  "When non-nil, enabled runtimes may route normal gptel sends to swarm mode.
+This option is gated by `gptel-agent-runtime-enabled'. When that master switch
+is nil, normal gptel chat behavior is unchanged."
+  :type 'boolean
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-chat-router-mode 'auto
+  "How normal gptel chat should enter autonomous/swarm mode.
+`auto' starts a runtime session for prompts classified as complex.
+`ask' asks before starting the runtime session.
+`off' never starts a runtime session from normal gptel chat."
+  :type '(choice (const :tag "Auto-start suitable tasks" auto)
+                 (const :tag "Ask before starting" ask)
+                 (const :tag "Off" off))
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-chat-router-min-score 3
+  "Minimum heuristic score needed to route a gptel prompt into swarm mode."
+  :type 'integer
+  :safe #'integerp
   :group 'gptel-agent-runtime)
 
 (defcustom gptel-agent-runtime-max-iterations 8
@@ -3701,6 +3725,8 @@ break object detection."
                     "Learned playbooks: %d.\n\n"
                     "Swarm processes: hierarchical chief clerk, Delphi peer "
                     "review, and direct planner/executor.\n\n"
+                    "Chat router: enabled=%s, mode=%s, threshold=%s. It is "
+                    "active only when `gptel-agent-runtime-enabled' is non-nil.\n\n"
                     "Live swarm activity buffer: `%s`.\n\n"
                     "Raw local-model tool calls may run automatically only for "
                     "safe read/search tools: %s.\n\n"
@@ -3709,6 +3735,10 @@ break object detection."
                     "direct Elisp call syntax unless the user asks for code.")
             tool-list agent-list unit-list
             (length gptel-agent-runtime-playbook-registry)
+            (and gptel-agent-runtime-enabled
+                 gptel-agent-runtime-chat-router-enabled)
+            gptel-agent-runtime-chat-router-mode
+            gptel-agent-runtime-chat-router-min-score
             gptel-agent-runtime-swarm-buffer-name
             safe confirmed)))
 
@@ -3754,6 +3784,9 @@ break object detection."
                     "- Live activity: internal planning, delegation, review, "
                     "tool policy, observations, workers, and memory events are "
                     "shown in `%s`.\n"
+                    "- Chat router: normal gptel sends can be routed into swarm "
+                    "sessions when `gptel-agent-runtime-enabled` is on; current "
+                    "mode is `%s`.\n"
                     "- Tools: I can list registered tools, use safe read/search "
                     "tools automatically, and request confirmation for configured "
                     "write/code/system actions.\n\n"
@@ -3764,7 +3797,8 @@ break object detection."
                     "inside a more structured organization.")
             agent-list unit-list
             (length gptel-agent-runtime-playbook-registry)
-            gptel-agent-runtime-swarm-buffer-name)))
+            gptel-agent-runtime-swarm-buffer-name
+            gptel-agent-runtime-chat-router-mode)))
 
 (defun gptel-agent-runtime-repair-capability-response (beg end)
   "Replace false capability denials in region BEG END with runtime facts.
@@ -4531,6 +4565,128 @@ Each entry is a plist with :state :heading :file :deadline :tags."
                   "\\)\\b")
           text))))
 
+(defun gptel-agent-runtime--latest-request-text (text)
+  "Return the likely latest user request from recent gptel buffer TEXT."
+  (let* ((text (or text ""))
+         (parts (split-string text "\n\\*\\*+\\s-*\\|\\`\\*\\*+\\s-*" t))
+         (last-part (or (car (last parts)) text)))
+    (string-trim last-part)))
+
+(defun gptel-agent-runtime--chat-router-score (text)
+  "Return a heuristic complexity score for routing TEXT into swarm mode."
+  (let ((case-fold-search t)
+        (score 0)
+        (text (or text "")))
+    (dolist (pattern
+             '("\\bimplement\\b" "\\bfix\\b" "\\bdebug\\b" "\\brefactor\\b"
+               "\\bcompare\\b" "\\banaly[sz]e\\b" "\\binvestigate\\b"
+               "\\bproceed\\b" "\\bcontinue\\b" "\\bcleanup\\b"
+               "\\bcommit\\b" "\\bpush\\b" "\\btest\\b" "\\bvalidate\\b"
+               "\\bupdate\\b" "\\bcreate\\b" "\\bbuild\\b" "\\binstall\\b"))
+      (when (string-match-p pattern text)
+        (setq score (1+ score))))
+    (when (string-match-p
+           "\\b\\(swarm\\|agentic\\|autonomous\\|multi-agent\\|delegate\\|delphi\\|planner\\|reviewer\\|chief clerk\\)\\b"
+           text)
+      (setq score (+ score 3)))
+    (when (string-match-p
+           "\\b\\(repo\\|branch\\|github\\|package\\|melpa\\|emacs\\|gptel\\|org\\|tool\\|memory\\|security\\|guardrail\\)\\b"
+           text)
+      (setq score (1+ score)))
+    (when (string-match-p
+           "\\b\\(first\\|then\\|after\\|before\\|all\\|everything\\|end to end\\|multiple\\|parallel\\)\\b"
+           text)
+      (setq score (1+ score)))
+    (when (> (length text) 240)
+      (setq score (1+ score)))
+    score))
+
+(defun gptel-agent-runtime--chat-router-process (text)
+  "Return preferred process symbol for prompt TEXT."
+  (let ((case-fold-search t))
+    (cond
+     ((string-match-p "\\b\\(delphi\\|peer review\\|consensus\\|anonymous review\\)\\b"
+                      text)
+      'delphi)
+     ((string-match-p "\\b\\(simple\\|quick\\|direct\\|just answer\\)\\b" text)
+      'direct)
+     (t 'hierarchical))))
+
+(defun gptel-agent-runtime--chat-capability-request-p (text)
+  "Return non-nil when TEXT asks for a capability answer, not work routing."
+  (let ((case-fold-search t))
+    (and (stringp text)
+         (or (string-match-p
+              "\\b\\(what can you do\\|what are you capable of\\|capabilities\\|list.*tools\\|which tools\\|what tools\\|do you have .*\\(swarm\\|agent\\|tool\\)\\|can you .*\\(use\\|access\\).*\\(tool\\|emacs\\|swarm\\)\\)\\b"
+             text)
+             (and (gptel-agent-runtime-capability-question-p text)
+                  (string-match-p "[?]" text))))))
+
+(defun gptel-agent-runtime-classify-chat-request (text)
+  "Return a plist describing whether TEXT should enter swarm mode."
+  (let* ((request (gptel-agent-runtime--latest-request-text text))
+         (score (gptel-agent-runtime--chat-router-score request))
+         (capability-p (gptel-agent-runtime--chat-capability-request-p request))
+         (process (gptel-agent-runtime--chat-router-process request))
+         (swarm-p (and (not capability-p)
+                       (not (eq process 'direct))
+                       (>= score gptel-agent-runtime-chat-router-min-score))))
+    (list :request request
+          :score score
+          :process process
+          :swarm-p swarm-p
+          :reason (cond
+                   (capability-p "Capability questions stay in chat.")
+                   ((eq process 'direct) "Prompt asked for direct mode.")
+                   (swarm-p (format "Complex task score %d >= %d."
+                                    score
+                                    gptel-agent-runtime-chat-router-min-score))
+                   (t (format "Task score %d below swarm threshold %d."
+                              score
+                              gptel-agent-runtime-chat-router-min-score))))))
+
+(defun gptel-agent-runtime-chat-router-status ()
+  "Show the current chat router decision for recent buffer text."
+  (interactive)
+  (let ((decision (gptel-agent-runtime-classify-chat-request
+                   (gptel-agent-runtime-current-buffer-task-text))))
+    (message "gptel agent chat router: enabled=%s mode=%s decision=%s process=%s score=%s reason=%s"
+             (and gptel-agent-runtime-enabled
+                  gptel-agent-runtime-chat-router-enabled)
+             gptel-agent-runtime-chat-router-mode
+             (plist-get decision :swarm-p)
+             (plist-get decision :process)
+             (plist-get decision :score)
+             (plist-get decision :reason))))
+
+(defun gptel-agent-runtime--maybe-route-chat-to-swarm (task-text)
+  "Maybe start a swarm session from TASK-TEXT and return non-nil if handled."
+  (when (and gptel-agent-runtime-enabled
+             gptel-agent-runtime-chat-router-enabled
+             (not (eq gptel-agent-runtime-chat-router-mode 'off))
+             (or (not gptel-agent-runtime--current-session)
+                 (gptel-agent-runtime--session-complete-p
+                  gptel-agent-runtime--current-session)))
+    (let* ((decision (gptel-agent-runtime-classify-chat-request task-text))
+           (request (plist-get decision :request))
+           (process (plist-get decision :process)))
+      (when (and (plist-get decision :swarm-p)
+                 (not (string-empty-p request))
+                 (or (eq gptel-agent-runtime-chat-router-mode 'auto)
+                     (and (eq gptel-agent-runtime-chat-router-mode 'ask)
+                          (yes-or-no-p
+                           (format "Start swarm session for this task (%s)? "
+                                   process)))))
+        (goto-char (point-max))
+        (unless (bolp) (insert "\n"))
+        (insert (format "[agent router -> %s swarm session; details in %s]\n"
+                        process
+                        gptel-agent-runtime-swarm-buffer-name))
+        (gptel-agent-runtime-start request
+                                   gptel-agent-runtime-default-role
+                                   process)
+        t))))
+
 (defun my/gptel--inject-context (orig-fn &rest args)
   "Around advice for `gptel-send': route, sync directive, and prepend context."
   (gptel-agent-runtime-cancel-current-job)
@@ -4560,7 +4716,8 @@ Each entry is a plist with :state :heading :file :deadline :tags."
                          capability-context))
              "\n\n")))
       (setq-local gptel-agent-runtime--last-user-request-text task-text)
-      (apply orig-fn args))))
+      (unless (gptel-agent-runtime--maybe-route-chat-to-swarm task-text)
+        (apply orig-fn args)))))
 
 (advice-add 'gptel-send :around #'my/gptel--inject-context)
 #+end_src
