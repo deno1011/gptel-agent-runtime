@@ -123,6 +123,18 @@ worker state. Tool mutation remains guarded by safety policy."
   :type '(repeat string)
   :group 'gptel-agent-runtime)
 
+(defcustom gptel-agent-runtime-raw-tool-call-names
+  '("list_buffers" "get_buffer_content" "get_current_buffer_info"
+    "read_file" "read_org_file" "list_directory" "search_files"
+    "get_org_structure" "get_todos"
+    "web_search" "web_fetch_text" "web_extract_images")
+  "Tool names that may be executed from raw JSON emitted by local models.
+Some local models print OpenAI-style JSON tool calls as ordinary assistant text
+instead of returning them through gptel's native tool-call channel. This allow
+list keeps the compatibility shim read/search oriented."
+  :type '(repeat string)
+  :group 'gptel-agent-runtime)
+
 (defcustom gptel-agent-runtime-enable-parallel-mutations t
   "When non-nil, allow non-conflicting write-risk tools to run as workers.
 This only applies when the step passes safety checks and confirmation policy
@@ -1623,7 +1635,7 @@ both plist and vector shapes returned by `json-read'."
   "Register NAME with BACKEND+MODEL in `my/gptel-backends'.
 Overwrites an existing entry with the same name."
   (setq my/gptel-backends
-        (cons (list name backend . model)
+        (cons (cons name (cons backend model))
               (cl-remove name my/gptel-backends
                          :key #'car :test #'equal))))
 
@@ -2357,6 +2369,89 @@ that lack a `:file' output block."
       (insert "#+RESULTS:\n")
       (insert "[[file:graph3d.png]]\n"))))
 
+(defun gptel-agent-runtime--find-gptel-tool (name)
+  "Return the registered gptel tool named NAME, or nil."
+  (when (and (stringp name) (fboundp 'gptel-tool-name))
+    (cl-find-if (lambda (tool)
+                  (and (gptel-tool-p tool)
+                       (equal (gptel-tool-name tool) name)))
+                (or (and (boundp 'gptel-tools) gptel-tools)
+                    (and (fboundp 'my/gptel-tools-all)
+                         (my/gptel-tools-all))))))
+
+(defun gptel-agent-runtime--read-raw-tool-call (text)
+  "Parse TEXT as one raw model-emitted tool call.
+Returns a plist with :name and :arguments, or nil."
+  (when (string-match-p "\\`[[:space:]]*{.*}[[:space:]]*\\'" text)
+    (condition-case nil
+        (let* ((json-object-type 'plist)
+               (json-array-type 'list)
+               (json-key-type 'keyword)
+               (data (json-read-from-string text))
+               (name (or (plist-get data :name)
+                         (plist-get data :tool)))
+               (arguments (or (plist-get data :arguments)
+                              (plist-get data :args)
+                              nil)))
+          (when (and (stringp name)
+                     (or (null arguments)
+                         (listp arguments)))
+            (list :name name :arguments arguments)))
+      (error nil))))
+
+(defun gptel-agent-runtime--raw-tool-calls-in-region (beg end)
+  "Return raw JSON tool calls found between BEG and END."
+  (let (calls)
+    (save-excursion
+      (goto-char beg)
+      (while (< (point) end)
+        (let ((line (string-trim
+                     (buffer-substring-no-properties
+                      (line-beginning-position)
+                      (line-end-position)))))
+          (when-let* ((call (gptel-agent-runtime--read-raw-tool-call line)))
+            (push call calls)))
+        (forward-line 1)))
+    (nreverse calls)))
+
+(defun gptel-agent-runtime--execute-raw-tool-call (call)
+  "Execute one safe raw JSON tool CALL and return an observation string."
+  (let* ((name (plist-get call :name))
+         (arguments (or (plist-get call :arguments) nil))
+         (tool (gptel-agent-runtime--find-gptel-tool name)))
+    (cond
+     ((not (member name gptel-agent-runtime-raw-tool-call-names))
+      (format "Skipped raw tool call `%s': tool is not in the read/search allow list." name))
+     ((not tool)
+      (format "Skipped raw tool call `%s': tool is not registered in gptel." name))
+     ((and (fboundp 'gptel-tool-async) (gptel-tool-async tool))
+      (format "Skipped raw tool call `%s': async raw tool execution is not supported yet." name))
+     ((not (and (fboundp 'gptel--map-tool-args)
+                (fboundp 'gptel-tool-function)))
+      "Skipped raw tool call: this gptel version does not expose the needed tool helpers.")
+     (t
+      (condition-case err
+          (let* ((arg-values (gptel--map-tool-args tool arguments))
+                 (result (apply (gptel-tool-function tool) arg-values)))
+            (format "Tool `%s' observation:\n%s" name (format "%s" result)))
+        (error
+         (format "Tool `%s' failed: %s" name
+                 (mapconcat #'gptel--to-string err " "))))))))
+
+(defun gptel-agent-runtime-execute-raw-tool-calls (beg end)
+  "Execute safe raw JSON tool calls emitted as assistant text.
+This is a compatibility shim for local models that know tool-call syntax but do
+not return native gptel tool-call messages."
+  (let ((calls (gptel-agent-runtime--raw-tool-calls-in-region beg end)))
+    (when calls
+      (goto-char end)
+      (unless (bolp) (insert "\n"))
+      (insert "\nRaw tool observations:\n")
+      (dolist (call calls)
+        (insert "\n#+begin_example\n")
+        (insert (gptel-agent-runtime--execute-raw-tool-call call))
+        (insert "\n#+end_example\n")))))
+
 (defun claude-executor-response-hook (beg end)
   "Hook for Babel blocks, exec-tags and auto-pattern matching.
 Active only when `claude-executor-auto-execute' = t.
@@ -2366,6 +2461,8 @@ Registered in `gptel-post-response-functions'."
       (narrow-to-region beg end)
       ;; 0. Repair obvious tutorial-style plot answers from weaker local models.
       (my/gptel-repair-inline-plot-response (point-min) (point-max))
+      ;; 0b. Execute safe JSON tool calls that local models printed as text.
+      (gptel-agent-runtime-execute-raw-tool-calls (point-min) (point-max))
       ;; 1. Babel blocks
       (dolist (block (claude-executor--find-babel-blocks))
         (claude-executor--execute-babel-block block))
