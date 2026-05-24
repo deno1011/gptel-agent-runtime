@@ -127,7 +127,8 @@ worker state. Tool mutation remains guarded by safety policy."
   '("list_buffers" "get_buffer_content" "get_current_buffer_info"
     "read_file" "read_org_file" "list_directory" "search_files"
     "get_org_structure" "get_todos"
-    "web_search" "web_fetch_text" "web_extract_images")
+    "web_search" "web_fetch_text" "web_extract_images"
+    "describe_capabilities")
   "Tool names that may be executed from raw JSON emitted by local models.
 Some local models print OpenAI-style JSON tool calls as ordinary assistant text
 instead of returning them through gptel's native tool-call channel. This allow
@@ -2537,6 +2538,30 @@ break object detection."
 (defvar gptel-agent-runtime--raw-tool-continuation-depth 0
   "Current nested raw tool continuation depth.")
 
+(defvar-local gptel-agent-runtime--raw-tool-continuation-running nil
+  "Non-nil while a raw tool continuation request is pending in this buffer.")
+
+(defun gptel-agent-runtime-capability-summary ()
+  "Return a deterministic summary of registered Emacs agent capabilities."
+  (let* ((tools (sort (mapcar #'gptel-tool-name (or (my/gptel-tools-all) nil))
+                      #'string<))
+         (tool-list (if tools
+                        (mapconcat (lambda (name) (format "- `%s`" name))
+                                   tools "\n")
+                      "- No gptel tools are currently registered."))
+         (safe (mapconcat (lambda (name) (format "`%s`" name))
+                          gptel-agent-runtime-raw-tool-call-names ", "))
+         (confirmed (mapconcat (lambda (name) (format "`%s`" name))
+                               gptel-agent-runtime-raw-tool-confirmation-names
+                               ", ")))
+    (format (concat "Registered Emacs/gptel tools:\n%s\n\n"
+                    "Raw local-model tool calls may run automatically only for "
+                    "safe read/search tools: %s.\n\n"
+                    "Tools requiring confirmation before raw execution: %s.\n\n"
+                    "Use capabilities in prose for the user. Avoid inventing "
+                    "direct Elisp call syntax unless the user asks for code.")
+            tool-list safe confirmed)))
+
 (defun gptel-agent-runtime--raw-tool-success-observation-p (observation)
   "Return non-nil when OBSERVATION is a successful raw tool observation."
   (and (stringp observation)
@@ -2547,18 +2572,23 @@ break object detection."
   "Build a continuation prompt for raw tool OBSERVATIONS."
   (format (concat "The previous assistant message contained raw JSON tool "
                   "call(s). Emacs executed the call(s) and produced these "
-                  "observations:\n\n%s\n\nContinue the conversation naturally. "
+                  "observations:\n\n%s\n\nCurrent capability summary:\n\n%s\n\n"
+                  "Continue the conversation naturally. "
                   "Use the observations to answer the user's request. Do not "
-                  "repeat the JSON tool call. If the user asked what you can "
-                  "do in Emacs, summarize the concrete capabilities shown by "
-                  "the tools and mention that code/write actions require "
-                  "confirmation.")
-          (mapconcat #'identity observations "\n\n")))
+                  "repeat the JSON tool call. Do not invent direct Elisp "
+                  "function-call syntax for tools. If the user asked what you "
+                  "can do in Emacs, summarize the concrete capabilities from "
+                  "the summary and observations, and mention that code/write "
+                  "actions require confirmation. Do not apologize unless the "
+                  "user-facing task actually failed.")
+          (mapconcat #'identity observations "\n\n")
+          (gptel-agent-runtime-capability-summary)))
 
 (defun gptel-agent-runtime--request-raw-tool-continuation (observations)
   "Ask the model for a natural continuation after OBSERVATIONS."
   (when (and gptel-agent-runtime-auto-continue-after-raw-tools
              observations
+             (not gptel-agent-runtime--raw-tool-continuation-running)
              (< gptel-agent-runtime--raw-tool-continuation-depth
                 gptel-agent-runtime-raw-tool-auto-continue-depth)
              (fboundp 'gptel-request))
@@ -2572,6 +2602,8 @@ break object detection."
                                  gptel-directives)
                       "You are an Emacs assistant.")))
       (message "gptel-agent-runtime: continuing after raw tool observation...")
+      (with-current-buffer buffer
+        (setq-local gptel-agent-runtime--raw-tool-continuation-running t))
       (let ((gptel-agent-runtime--raw-tool-continuation-depth depth))
         (gptel-request
          prompt
@@ -2580,18 +2612,19 @@ break object detection."
          :system system
          :callback
          (lambda (response _info)
-           (when (and (stringp response)
-                      (buffer-live-p buffer))
+           (when (buffer-live-p buffer)
              (with-current-buffer buffer
-               (let ((beg (point-max))
-                     (gptel-agent-runtime--raw-tool-continuation-depth depth))
-                 (goto-char beg)
-                 (unless (bolp) (insert "\n"))
-                 (insert "\nAssistant continuation:\n\n")
-                 (insert response)
-                 (unless (bolp) (insert "\n"))
-                 (run-hook-with-args
-                  'gptel-post-response-functions beg (point)))))))))))
+               (setq-local gptel-agent-runtime--raw-tool-continuation-running nil)
+               (when (stringp response)
+                 (let ((beg (point-max))
+                       (gptel-agent-runtime--raw-tool-continuation-depth depth))
+                   (goto-char beg)
+                   (unless (bolp) (insert "\n"))
+                   (insert "\nAssistant continuation:\n\n")
+                   (insert response)
+                   (unless (bolp) (insert "\n"))
+                   (run-hook-with-args
+                    'gptel-post-response-functions beg (point))))))))))))
 
 (defun gptel-agent-runtime-execute-raw-tool-calls (beg end)
   "Execute safe raw JSON tool calls emitted as assistant text.
@@ -3019,6 +3052,13 @@ Each entry is a plist with :state :heading :file :deadline :tags."
 (advice-add 'gptel-send :around #'my/gptel--inject-context)
 
 (with-eval-after-load 'gptel
+  ;; describe_capabilities — deterministic summary of current runtime tools
+  (gptel-make-tool
+   :name "describe_capabilities"
+   :description "Return the actual registered Emacs agent tools, safety policy, and guidance for describing capabilities."
+   :function (lambda ()
+               (gptel-agent-runtime-capability-summary)))
+
   ;; get_todos — return the current TODO list as text
   (gptel-make-tool
    :name "get_todos"
