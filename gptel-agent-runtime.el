@@ -3310,6 +3310,9 @@ break object detection."
 (defvar-local gptel-agent-runtime--current-raw-tool-job-id nil
   "Current raw tool continuation job id for this gptel buffer.")
 
+(defvar-local gptel-agent-runtime--last-user-request-text nil
+  "Most recent user request text observed before `gptel-send'.")
+
 (defvar-local gptel-agent-runtime--cancelled-raw-tool-job-ids nil
   "Cancelled raw tool continuation job ids for this gptel buffer.")
 
@@ -3403,6 +3406,69 @@ break object detection."
             tool-list agent-list unit-list
             (length gptel-agent-runtime-playbook-registry)
             safe confirmed)))
+
+(defun gptel-agent-runtime--capability-denial-p (text)
+  "Return non-nil when TEXT denies an available runtime capability."
+  (let ((case-fold-search t))
+    (and (stringp text)
+         (string-match-p
+          (concat "\\b\\("
+                  "no,? i do not have\\|"
+                  "i do not have .*\\(swarm\\|agent\\|tool\\|capabil\\)\\|"
+                  "i don't have .*\\(swarm\\|agent\\|tool\\|capabil\\)\\|"
+                  "do not have swarm\\|don't have swarm\\|"
+                  "no swarm abilities\\|"
+                  "don't have direct access.*swarm\\|"
+                  "do not have direct access.*swarm"
+                  "\\)")
+          text))))
+
+(defun gptel-agent-runtime--deterministic-capability-answer ()
+  "Return a model-independent answer for capability and swarm questions."
+  (let* ((agents (sort (mapcar #'gptel-agent-runtime-agent-name
+                               (gptel-agent-runtime-enabled-agents))
+                       #'string<))
+         (units (sort (mapcar #'gptel-agent-runtime-organization-unit-name
+                              (gptel-agent-runtime-enabled-organization-units))
+                      #'string<))
+         (agent-list (if agents
+                         (mapconcat (lambda (name) (format "`%s`" name))
+                                    agents ", ")
+                       "<none>"))
+         (unit-list (if units
+                        (mapconcat (lambda (name) (format "`%s`" name))
+                                   units ", ")
+                      "<none>")))
+    (format (concat "Yes. I have an Emacs-native organizational swarm scaffold "
+                    "available now.\n\n"
+                    "- Agents: %s.\n"
+                    "- Organization units: %s.\n"
+                    "- Swarm processes: hierarchical Chief Clerk routing, "
+                    "Delphi-style peer review, and direct planner/executor mode.\n"
+                    "- Learned playbooks: %d stored strategy pattern(s).\n"
+                    "- Tools: I can list registered tools, use safe read/search "
+                    "tools automatically, and request confirmation for configured "
+                    "write/code/system actions.\n\n"
+                    "The swarm layer is still an Emacs-native scaffold, not "
+                    "separate OS worker processes yet. It routes tasks through "
+                    "roles, policy-gated tools, trace buffers, memory/playbooks, "
+                    "and reviewer/critic steps so weaker local models can work "
+                    "inside a more structured organization.")
+            agent-list unit-list
+            (length gptel-agent-runtime-playbook-registry))))
+
+(defun gptel-agent-runtime-repair-capability-response (beg end)
+  "Replace false capability denials in region BEG END with runtime facts.
+Return non-nil when the region was changed."
+  (let ((text (buffer-substring-no-properties beg end)))
+    (when (and (gptel-agent-runtime-capability-question-p
+                gptel-agent-runtime--last-user-request-text)
+               (not (gptel-agent-runtime--raw-tool-calls-in-region beg end))
+               (gptel-agent-runtime--capability-denial-p text))
+      (delete-region beg end)
+      (goto-char beg)
+      (insert (gptel-agent-runtime--deterministic-capability-answer))
+      t)))
 
 (defun gptel-agent-runtime-list-tools ()
   "Display all currently registered gptel tools and runtime policy metadata."
@@ -3745,6 +3811,8 @@ Registered in `gptel-post-response-functions'."
       (narrow-to-region beg end)
       ;; 0. Repair obvious tutorial-style plot answers from weaker local models.
       (my/gptel-repair-inline-plot-response (point-min) (point-max))
+      ;; 0a. Repair generic local-model denials of live runtime capabilities.
+      (gptel-agent-runtime-repair-capability-response (point-min) (point-max))
       ;; 0b. Execute safe JSON tool calls that local models printed as text.
       (gptel-agent-runtime-execute-raw-tool-calls (point-min) (point-max))
       ;; 1. Babel blocks
@@ -4166,6 +4234,7 @@ Each entry is a plist with :state :heading :file :deadline :tags."
                          (and ctx (not (string-empty-p ctx)) ctx)
                          capability-context))
              "\n\n")))
+      (setq-local gptel-agent-runtime--last-user-request-text task-text)
       (apply orig-fn args))))
 
 (advice-add 'gptel-send :around #'my/gptel--inject-context)
