@@ -2520,7 +2520,8 @@ that lack a `:file' output block."
 (defun gptel-agent-runtime--read-raw-tool-call (text)
   "Parse TEXT as one raw model-emitted tool call.
 Returns a plist with :name and :arguments, or nil."
-  (when (string-match-p "\\`[[:space:]]*{.*}[[:space:]]*\\'" text)
+  (when (and (string-prefix-p "{" (string-trim-left text))
+             (string-suffix-p "}" (string-trim-right text)))
     (condition-case nil
         (let* ((json-object-type 'plist)
                (json-array-type 'list)
@@ -2537,19 +2538,48 @@ Returns a plist with :name and :arguments, or nil."
             (list :name name :arguments arguments)))
       (error nil))))
 
+(defun gptel-agent-runtime--json-object-strings (text)
+  "Return balanced top-level JSON object strings found in TEXT.
+The scanner is small but string-aware, so braces inside JSON strings do not
+break object detection."
+  (let ((idx 0)
+        (len (length text))
+        (depth 0)
+        start
+        in-string
+        escape
+        objects)
+    (while (< idx len)
+      (let ((char (aref text idx)))
+        (cond
+         (escape
+          (setq escape nil))
+         ((and in-string (= char ?\\))
+          (setq escape t))
+         ((= char ?\")
+          (setq in-string (not in-string)))
+         ((not in-string)
+          (cond
+           ((= char ?{)
+            (when (= depth 0)
+              (setq start idx))
+            (setq depth (1+ depth)))
+           ((and (= char ?})
+                 (> depth 0))
+            (setq depth (1- depth))
+            (when (and (= depth 0) start)
+              (push (substring text start (1+ idx)) objects)
+              (setq start nil)))))))
+      (setq idx (1+ idx)))
+    (nreverse objects)))
+
 (defun gptel-agent-runtime--raw-tool-calls-in-region (beg end)
   "Return raw JSON tool calls found between BEG and END."
-  (let (calls)
-    (save-excursion
-      (goto-char beg)
-      (while (< (point) end)
-        (let ((line (string-trim
-                     (buffer-substring-no-properties
-                      (line-beginning-position)
-                      (line-end-position)))))
-          (when-let* ((call (gptel-agent-runtime--read-raw-tool-call line)))
-            (push call calls)))
-        (forward-line 1)))
+  (let ((text (buffer-substring-no-properties beg end))
+        calls)
+    (dolist (object (gptel-agent-runtime--json-object-strings text))
+      (when-let* ((call (gptel-agent-runtime--read-raw-tool-call object)))
+        (push call calls)))
     (nreverse calls)))
 
 (defun gptel-agent-runtime--raw-tool-call-risk (name arguments)
@@ -2596,7 +2626,10 @@ Returns a plist with :name and :arguments, or nil."
               name
               (gptel-agent-runtime-safety-check-step step)))
      ((not (gptel-agent-runtime--raw-tool-call-confirmed-p call risk))
-      (format "Skipped raw tool call `%s': confirmation required." name))
+      (format (concat "Skipped raw tool call `%s': confirmation required. "
+                      "Run this from an interactive Emacs session and answer yes, "
+                      "or lower `gptel-agent-runtime-require-confirmation-for-risky-actions'.")
+              name))
      ((and (fboundp 'gptel-tool-async) (gptel-tool-async tool))
       (format "Skipped raw tool call `%s': async raw tool execution is not supported yet." name))
      ((not (and (fboundp 'gptel--map-tool-args)
