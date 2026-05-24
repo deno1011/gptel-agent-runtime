@@ -1341,7 +1341,8 @@ Returns a plist with :agent, :skills, :all-agents, and :reason."
   "Return a human-readable route summary for TEXT."
   (let* ((route (gptel-agent-runtime-route-task text))
          (agent (plist-get route :agent))
-         (skills (plist-get route :skills)))
+         (skills (gptel-agent-runtime-normalize-skills
+                  (plist-get route :skills))))
     (format "Agent: %s\nRole: %s\nSkills: %s\nReason: %s"
             (if agent (gptel-agent-runtime-agent-name agent) "<none>")
             (if agent (gptel-agent-runtime-agent-role agent) "<none>")
@@ -1355,16 +1356,39 @@ Returns a plist with :agent, :skills, :all-agents, and :reason."
   (interactive "sRoute task: ")
   (message "%s" (gptel-agent-runtime-route-summary text)))
 
-(defun gptel-agent-runtime-agent-directive (agent)
+(defun gptel-agent-runtime-agent-directive-symbol (agent)
   "Return directive symbol for AGENT."
   (or (and agent (gptel-agent-runtime-agent-directive agent))
       (if (my/gptel-local-runtime-p)
           'emacs-local-assistant
         'emacs-assistant)))
 
-(defun gptel-agent-runtime-skill-instructions (skills)
+(defun gptel-agent-runtime-normalize-skills (skills)
+  "Return a flat list of valid skill structs from SKILLS.
+This tolerates stale/nested route values from older loaded runtime versions."
+  (let (result)
+    (cl-labels
+        ((collect
+          (value)
+          (cond
+           ((null value) nil)
+           ((gptel-agent-runtime-skill-p value)
+            (push value result))
+           ((and (or (stringp value) (symbolp value))
+                 (gptel-agent-runtime-find-skill value))
+            (push (gptel-agent-runtime-find-skill value) result))
+           ((listp value)
+            (mapc #'collect value)))))
+      (collect skills))
+    (nreverse
+     (cl-remove-duplicates result
+                           :key #'gptel-agent-runtime-skill-name
+                           :test #'equal))))
+
+(defun gptel-agent-runtime-format-skill-instructions (skills)
   "Return prompt instructions for SKILLS."
-  (when skills
+  (let ((skills (gptel-agent-runtime-normalize-skills skills)))
+    (when skills
     (concat
      "Relevant skills:\n"
      (mapconcat
@@ -1375,7 +1399,7 @@ Returns a plist with :agent, :skills, :all-agents, and :reason."
                 (or (gptel-agent-runtime-skill-instructions skill) "")
                 (or (gptel-agent-runtime-skill-validation skill) "")))
       skills
-      "\n"))))
+      "\n")))))
 
 (defun gptel-agent-runtime-apply-route-to-current-buffer (text)
   "Apply route for TEXT to the current gptel buffer.
@@ -1384,10 +1408,11 @@ system message. It is intentionally lightweight; the planner loop will later
 consume the full route object."
   (let* ((route (gptel-agent-runtime-route-task text))
          (agent (plist-get route :agent))
-         (skills (plist-get route :skills))
-         (directive (gptel-agent-runtime-agent-directive agent))
+         (skills (gptel-agent-runtime-normalize-skills
+                  (plist-get route :skills)))
+         (directive (gptel-agent-runtime-agent-directive-symbol agent))
          (base (alist-get directive gptel-directives))
-         (skill-text (gptel-agent-runtime-skill-instructions skills)))
+         (skill-text (gptel-agent-runtime-format-skill-instructions skills)))
     (when base
       (setq-local gptel--system-message
                   (if skill-text
@@ -3921,7 +3946,7 @@ The preferred format is JSON with a top-level :steps list. A single
   (let* ((task (gptel-agent-runtime-session-current-task session))
          (agent (gptel-agent-runtime-find-agent
                  (gptel-agent-runtime-worker-agent worker)))
-         (directive (gptel-agent-runtime-agent-directive agent))
+         (directive (gptel-agent-runtime-agent-directive-symbol agent))
          (system (or (alist-get directive gptel-directives)
                      (alist-get (my/gptel-directive-for-current-runtime)
                                 gptel-directives)
@@ -4022,12 +4047,12 @@ The preferred format is JSON with a top-level :steps list. A single
          (goal (gptel-agent-runtime-task-goal task))
          (agent (gptel-agent-runtime-find-agent
                  (or (gptel-agent-runtime-plan-step-agent step) "assistant")))
-         (directive (gptel-agent-runtime-agent-directive agent))
+         (directive (gptel-agent-runtime-agent-directive-symbol agent))
          (base-system (or (alist-get directive gptel-directives)
                           (alist-get (my/gptel-directive-for-current-runtime)
                                      gptel-directives)
                           "You are an Emacs assistant."))
-         (skill-text (gptel-agent-runtime-skill-instructions
+         (skill-text (gptel-agent-runtime-format-skill-instructions
                       (cl-remove nil
                                  (mapcar #'gptel-agent-runtime-find-skill
                                          (or (gptel-agent-runtime-plan-step-skills step)
