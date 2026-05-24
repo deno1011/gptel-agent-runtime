@@ -312,6 +312,13 @@ The original raw text is still written to the trace buffer."
   :type 'boolean
   :group 'gptel-agent-runtime)
 
+(defcustom gptel-agent-runtime-execute-raw-tool-calls-in-example-blocks nil
+  "When non-nil, raw JSON tool calls inside source/example blocks may execute.
+The default nil treats JSON inside Org/Markdown blocks as documentation or
+examples, not as live tool requests."
+  :type 'boolean
+  :group 'gptel-agent-runtime)
+
 (defcustom gptel-agent-runtime-enable-parallel-mutations t
   "When non-nil, allow non-conflicting write-risk tools to run as workers.
 This only applies when the step passes safety checks and confirmation policy
@@ -3377,6 +3384,12 @@ Returns a plist with :name and :arguments, or nil."
   "Return balanced top-level JSON object strings found in TEXT.
 The scanner is small but string-aware, so braces inside JSON strings do not
 break object detection."
+  (mapcar (lambda (range) (plist-get range :object))
+          (gptel-agent-runtime--json-object-ranges text)))
+
+(defun gptel-agent-runtime--json-object-ranges (text)
+  "Return balanced JSON objects in TEXT with :start, :end, and :object.
+Positions are zero-based offsets relative to TEXT."
   (let ((idx 0)
         (len (length text))
         (depth 0)
@@ -3403,19 +3416,69 @@ break object detection."
                  (> depth 0))
             (setq depth (1- depth))
             (when (and (= depth 0) start)
-              (push (substring text start (1+ idx)) objects)
+              (push (list :start start
+                          :end (1+ idx)
+                          :object (substring text start (1+ idx)))
+                    objects)
               (setq start nil)))))))
       (setq idx (1+ idx)))
     (nreverse objects)))
 
+(defun gptel-agent-runtime--example-block-ranges (text)
+  "Return ranges in TEXT that are documentation/example blocks."
+  (let (ranges)
+    (with-temp-buffer
+      (insert text)
+      (goto-char (point-min))
+      (let ((case-fold-search t))
+        (while (re-search-forward
+                "^#\\+begin_\\(?:src\\|example\\)\\b\\(?:.*\n\\)"
+                nil t)
+          (let ((start (match-beginning 0)))
+            (when (re-search-forward "^#\\+end_\\(?:src\\|example\\)\\b.*$"
+                                     nil t)
+              (push (cons (1- start) (point)) ranges)))))
+      (goto-char (point-min))
+      (while (re-search-forward "^```.*$" nil t)
+        (let ((start (match-beginning 0)))
+          (when (re-search-forward "^```\\s-*$" nil t)
+            (push (cons (1- start) (point)) ranges)))))
+    (nreverse ranges)))
+
+(defun gptel-agent-runtime--offset-in-ranges-p (offset ranges)
+  "Return non-nil when OFFSET is inside one of RANGES."
+  (cl-some (lambda (range)
+             (and (>= offset (car range))
+                  (< offset (cdr range))))
+           ranges))
+
 (defun gptel-agent-runtime--raw-tool-calls-in-region (beg end)
   "Return raw JSON tool calls found between BEG and END."
   (let ((text (buffer-substring-no-properties beg end))
+        (example-ranges (unless gptel-agent-runtime-execute-raw-tool-calls-in-example-blocks
+                          (gptel-agent-runtime--example-block-ranges
+                           (buffer-substring-no-properties beg end))))
         calls)
-    (dolist (object (gptel-agent-runtime--json-object-strings text))
-      (when-let* ((call (gptel-agent-runtime--read-raw-tool-call object)))
+    (dolist (object-range (gptel-agent-runtime--json-object-ranges text))
+      (when-let* (((not (gptel-agent-runtime--offset-in-ranges-p
+                         (plist-get object-range :start)
+                         example-ranges)))
+                  (call (gptel-agent-runtime--read-raw-tool-call
+                         (plist-get object-range :object))))
         (push call calls)))
     (nreverse calls)))
+
+(defun gptel-agent-runtime--placeholder-argument-p (value)
+  "Return non-nil when VALUE contains placeholder text."
+  (cond
+   ((stringp value)
+    (let ((case-fold-search t))
+      (or (string-match-p "<[A-Z0-9_ -]+>" value)
+          (string-match-p "\\b\\(your[_ -]?api[_ -]?key\\|replace[_ -]?me\\|placeholder\\|URL_FROM_SEARCH_RESULT\\)\\b"
+                          value))))
+   ((consp value)
+    (cl-some #'gptel-agent-runtime--placeholder-argument-p value))
+   (t nil)))
 
 (defun gptel-agent-runtime--raw-tool-call-risk (name arguments)
   "Infer a conservative risk level for raw tool NAME with ARGUMENTS."
@@ -3466,6 +3529,8 @@ break object detection."
      ((not (or (member name gptel-agent-runtime-raw-tool-call-names)
                (member name gptel-agent-runtime-raw-tool-confirmation-names)))
       (format "Skipped raw tool call `%s': tool is not in the raw-call allow lists." name))
+     ((gptel-agent-runtime--placeholder-argument-p arguments)
+      (format "Skipped raw tool call `%s': arguments contain placeholder values." name))
      ((not tool)
       (format "Skipped raw tool call `%s': tool is not registered in gptel." name))
      (safety-error
