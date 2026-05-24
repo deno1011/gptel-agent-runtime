@@ -3662,6 +3662,10 @@ Positions are zero-based offsets relative to TEXT."
                     "review, and direct planner/executor.\n\n"
                     "Chat router: enabled=%s, mode=%s, threshold=%s. It is "
                     "active only when `gptel-agent-runtime-enabled' is non-nil.\n\n"
+                    "Useful commands: `gptel-agent-runtime-toggle-swarm-routing`, "
+                    "`gptel-agent-runtime-set-chat-router-mode`, "
+                    "`gptel-agent-runtime-chat-router-status`, and "
+                    "`gptel-agent-runtime-safe-swarm-self-test`.\n\n"
                     "Live swarm activity buffer: `%s`.\n\n"
                     "Raw local-model tool calls may run automatically only for "
                     "safe read/search tools: %s.\n\n"
@@ -3722,6 +3726,9 @@ Positions are zero-based offsets relative to TEXT."
                     "- Chat router: normal gptel sends can be routed into swarm "
                     "sessions when `gptel-agent-runtime-enabled` is on; current "
                     "mode is `%s`.\n"
+                    "- Controls: use `gptel-agent-runtime-toggle-swarm-routing`, "
+                    "`gptel-agent-runtime-set-chat-router-mode`, and "
+                    "`gptel-agent-runtime-safe-swarm-self-test`.\n"
                     "- Tools: I can list registered tools, use safe read/search "
                     "tools automatically, and request confirmation for configured "
                     "write/code/system actions.\n\n"
@@ -4579,6 +4586,119 @@ Each entry is a plist with :state :heading :file :deadline :tags."
              (plist-get decision :process)
              (plist-get decision :score)
              (plist-get decision :reason))))
+
+(defun gptel-agent-runtime-router-state ()
+  "Return a concise string describing runtime routing state."
+  (format "runtime=%s chat-router=%s mode=%s threshold=%s active=%s"
+          gptel-agent-runtime-enabled
+          gptel-agent-runtime-chat-router-enabled
+          gptel-agent-runtime-chat-router-mode
+          gptel-agent-runtime-chat-router-min-score
+          (and gptel-agent-runtime-enabled
+               gptel-agent-runtime-chat-router-enabled
+               (not (eq gptel-agent-runtime-chat-router-mode 'off)))))
+
+(defun gptel-agent-runtime-enable-swarm-routing ()
+  "Enable autonomous swarm routing for suitable normal gptel prompts."
+  (interactive)
+  (setq gptel-agent-runtime-enabled t)
+  (setq gptel-agent-runtime-chat-router-enabled t)
+  (unless (memq gptel-agent-runtime-chat-router-mode '(auto ask))
+    (setq gptel-agent-runtime-chat-router-mode 'ask))
+  (message "gptel swarm routing enabled: %s"
+           (gptel-agent-runtime-router-state)))
+
+(defun gptel-agent-runtime-disable-swarm-routing ()
+  "Disable autonomous swarm routing from normal gptel prompts."
+  (interactive)
+  (setq gptel-agent-runtime-chat-router-enabled nil)
+  (message "gptel swarm routing disabled: %s"
+           (gptel-agent-runtime-router-state)))
+
+(defun gptel-agent-runtime-toggle-swarm-routing (&optional ask-mode)
+  "Toggle autonomous swarm routing from normal gptel prompts.
+With prefix ASK-MODE, enable routing in `ask' mode."
+  (interactive "P")
+  (if (and gptel-agent-runtime-enabled
+           gptel-agent-runtime-chat-router-enabled
+           (not ask-mode))
+      (gptel-agent-runtime-disable-swarm-routing)
+    (setq gptel-agent-runtime-enabled t)
+    (setq gptel-agent-runtime-chat-router-enabled t)
+    (setq gptel-agent-runtime-chat-router-mode
+          (if ask-mode 'ask gptel-agent-runtime-chat-router-mode))
+    (message "gptel swarm routing enabled: %s"
+             (gptel-agent-runtime-router-state))))
+
+(defun gptel-agent-runtime-set-chat-router-mode (mode)
+  "Set chat router MODE to `auto', `ask', or `off'."
+  (interactive
+   (list (intern
+          (completing-read "Chat router mode: "
+                           '("auto" "ask" "off")
+                           nil t nil nil
+                           (symbol-name gptel-agent-runtime-chat-router-mode)))))
+  (unless (memq mode '(auto ask off))
+    (user-error "Unknown chat router mode: %s" mode))
+  (setq gptel-agent-runtime-chat-router-mode mode)
+  (message "gptel chat router mode set: %s"
+           (gptel-agent-runtime-router-state)))
+
+(defun gptel-agent-runtime-safe-swarm-self-test ()
+  "Run a safe synthetic swarm trace test without web, files, or shell tools."
+  (interactive)
+  (let* ((task (gptel-agent-runtime-create-task
+                "Safe Swarm Self-Test"
+                "Synthetic no-tool self-test of the swarm event path."))
+         (session (gptel-agent-runtime-create-session task "assistant")))
+    (setf (gptel-agent-runtime-session-process session) 'hierarchical)
+    (setf (gptel-agent-runtime-task-status task) 'completed)
+    (gptel-agent-runtime--start-swarm-session-buffer
+     session
+     (gptel-agent-runtime-task-goal task))
+    (gptel-agent-runtime-emit-event
+     'user-request
+     :source "safe-self-test"
+     :session-id (gptel-agent-runtime-session-id session)
+     :payload (list :goal (gptel-agent-runtime-task-goal task)
+                    :process 'hierarchical)
+     :taint 'trusted)
+    (gptel-agent-runtime-emit-event
+     'plan-created
+     :source "planner"
+     :session-id (gptel-agent-runtime-session-id session)
+     :payload (list :step-count 3
+                    :steps '("Route task to planner"
+                             "Delegate to reviewer"
+                             "Write memory summary"))
+     :taint 'trusted)
+    (gptel-agent-runtime-emit-event
+     'step-delegated
+     :source "router"
+     :session-id (gptel-agent-runtime-session-id session)
+     :payload (list :step-id "self-test-step"
+                    :title "Synthetic reviewer check"
+                    :agent "reviewer"
+                    :tool "direct_response")
+     :taint 'trusted)
+    (gptel-agent-runtime-emit-event
+     'reflected
+     :source "reviewer"
+     :session-id (gptel-agent-runtime-session-id session)
+     :payload (list :step "Synthetic reviewer check"
+                    :status 'done
+                    :reflection "The swarm trace path is visible and no tools were executed."
+                    :memory "Use the swarm buffer to inspect routing before enabling automatic work.")
+     :taint 'trusted)
+    (gptel-agent-runtime-emit-event
+     'session-finalized
+     :source "runtime"
+     :session-id (gptel-agent-runtime-session-id session)
+     :payload (list :reason 'done :memory "<not written in safe self-test>")
+     :taint 'trusted)
+    (gptel-agent-runtime-show-swarm)
+    (message "Safe swarm self-test wrote trace to %s without executing tools."
+             gptel-agent-runtime-swarm-buffer-name)))
 
 (defun gptel-agent-runtime--maybe-route-chat-to-swarm (task-text)
   "Maybe start a swarm session from TASK-TEXT and return non-nil if handled."
