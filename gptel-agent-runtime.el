@@ -152,10 +152,10 @@ loop: tool call, Emacs observation, then a natural-language answer."
   :type 'boolean
   :group 'gptel-agent-runtime)
 
-(defcustom gptel-agent-runtime-raw-tool-auto-continue-depth 1
+(defcustom gptel-agent-runtime-raw-tool-auto-continue-depth 2
   "Maximum nested auto-continuations after raw tool observations.
-The default of 1 prevents accidental loops while still making one tool result
-usable by the assistant."
+The default of 2 allows safe read/search chains such as web_search followed by
+web_fetch_text while still preventing accidental long loops."
   :type 'integer
   :safe #'integerp
   :group 'gptel-agent-runtime)
@@ -2671,6 +2671,27 @@ break object detection."
        (not (string-match-p "\n\\s-*\\(?:((null) (null))\\|(null)\\|nil\\|None\\|null\\|Error:\\)\\s-*\\'"
                             observation))))
 
+(defun gptel-agent-runtime--raw-observation-tool-name (observation)
+  "Return the tool name recorded in OBSERVATION, or nil."
+  (when (and (stringp observation)
+             (string-match "^Tool [`‘]\\([^'`’]+\\)['`’] observation:" observation))
+    (match-string 1 observation)))
+
+(defun gptel-agent-runtime--web-search-only-observations-p (observations)
+  "Return non-nil when OBSERVATIONS only contain web_search results."
+  (and observations
+       (cl-every
+        (lambda (observation)
+          (equal (gptel-agent-runtime--raw-observation-tool-name observation)
+                 "web_search"))
+        observations)))
+
+(defun gptel-agent-runtime--recoverable-skip-observation-p (observation)
+  "Return non-nil when OBSERVATION is a skipped raw call worth answering from."
+  (and (stringp observation)
+       (string-prefix-p "Skipped raw tool call " observation)
+       (string-match-p "not in the raw-call allow lists" observation)))
+
 (defun gptel-agent-runtime--recent-user-request-before (position)
   "Return recent likely user request text before POSITION."
   (save-excursion
@@ -2738,9 +2759,20 @@ break object detection."
                   "summary. Do not repeat the JSON tool call. Do not invent "
                   "direct Elisp function-call syntax for tools. If the original "
                   "request asked what you can do in Emacs, summarize concrete "
-                  "capabilities from the summary and observations. If the "
-                  "observation is insufficient for the original request, say "
-                  "what is missing and which safe tool should be used next. "
+                  "capabilities from the summary and observations. If the only "
+                  "observation is web_search links, do not invent factual "
+                  "details from titles. For weather, laws, rules, prices, dates, "
+                  "versions, or other current facts, continue with one raw JSON "
+                  "web_fetch_text call for the best source URL instead of a final "
+                  "answer. If an execute_code observation is `(no output)', treat "
+                  "it as a command that completed without stdout and answer "
+                  "accordingly. If a raw tool call was skipped because it is not "
+                  "in the raw-call allow lists, do not retry that tool; answer the "
+                  "original question conversationally and mention that write/action "
+                  "tools need explicit confirmed execution when relevant. If the "
+                  "observation is insufficient for the "
+                  "original request, say what is missing and which safe tool "
+                  "should be used next. "
                   "Do not apologize unless the user-facing task actually failed.")
           (mapconcat #'identity observations "\n\n")
           (or user-request "")
@@ -2765,7 +2797,11 @@ break object detection."
                                  gptel-directives)
                       "You are an Emacs assistant.")))
       (message "gptel-agent-runtime: continuing after raw tool observation...")
-      (gptel-agent-runtime--trace job-id "requesting model continuation")
+      (gptel-agent-runtime--trace
+       job-id "requesting model continuation%s"
+       (if (gptel-agent-runtime--web-search-only-observations-p observations)
+           " (web_search-only; continuation must fetch before factual answer)"
+         ""))
       (with-current-buffer buffer
         (setq-local gptel-agent-runtime--raw-tool-continuation-running t))
       (let ((gptel-agent-runtime--raw-tool-continuation-depth depth))
@@ -2857,10 +2893,16 @@ not return native gptel tool-call messages."
           (let* ((ordered-observations (nreverse observations))
                  (successful (cl-remove-if-not
                               #'gptel-agent-runtime--raw-tool-success-observation-p
-                              ordered-observations)))
-            (if successful
+                              ordered-observations))
+                 (recoverable-skips
+                  (cl-remove-if-not
+                   #'gptel-agent-runtime--recoverable-skip-observation-p
+                   ordered-observations))
+                 (continuation-observations
+                  (or successful recoverable-skips)))
+            (if continuation-observations
                 (gptel-agent-runtime--request-raw-tool-continuation
-                 successful job-id user-request)
+                 continuation-observations job-id user-request)
               (progn
                 (gptel-agent-runtime--trace
                  job-id "no successful observations; no continuation requested")
@@ -2871,7 +2913,7 @@ not return native gptel tool-call messages."
                  (gptel-agent-runtime--short-observation-reason
                   (car ordered-observations))
                  gptel-agent-runtime-trace-buffer-name)))
-            successful)))))))
+            continuation-observations)))))))
 
 (defun claude-executor-response-hook (beg end)
   "Hook for Babel blocks, exec-tags and auto-pattern matching.
@@ -2997,6 +3039,9 @@ MOST IMPORTANT:
 #+end_src
 - After search results are visible, fetch official/primary URLs with
   my/web-text or web_fetch_text and cite the URLs in the answer.
+- Search result titles alone are not evidence. For weather forecasts,
+  regulations, school rules, prices, dates, versions, or current factual
+  details, use web_fetch_text on a result before giving concrete facts.
 
 CRITICAL RULES:
 - If the user asks to plot, draw, graph, render, show inline, or create a math
@@ -3011,6 +3056,12 @@ CRITICAL RULES:
 - Never say you cannot create, display, execute, or render code/graphs.
 - Never say you cannot browse, search the internet, or access current
   information. Use the web tools or executable Elisp web helpers.
+- Never claim an Emacs/system action failed merely because a shell command
+  returned no stdout. `(no output)' usually means the command completed without
+  printing text.
+- If the user asks whether they can teach you a skill, answer conversationally
+  about the runtime skill/memory mechanism. Do not create a TODO unless the user
+  explicitly asks you to add a task.
 - Never tell the user to press keys, export manually, or run commands manually.
 - Produce executable Org-mode blocks when an action, calculation, graph, file,
   shell command, or Emacs operation is requested.
