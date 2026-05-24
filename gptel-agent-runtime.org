@@ -3935,23 +3935,25 @@ not return native gptel tool-call messages."
   "Hook for Babel blocks, exec-tags and auto-pattern matching.
 Active only when `claude-executor-auto-execute' = t.
 Registered in `gptel-post-response-functions'."
-  (when claude-executor-auto-execute
-    (save-restriction
-      (narrow-to-region beg end)
-      ;; 0. Repair obvious tutorial-style plot answers from weaker local models.
+  (save-restriction
+    (narrow-to-region beg end)
+    ;; 0. Repair generic local-model denials of live runtime capabilities.
+    ;; This is safe text correction, not tool execution, so it stays active even
+    ;; when automatic execution is disabled.
+    (gptel-agent-runtime-repair-capability-response (point-min) (point-max))
+    (when claude-executor-auto-execute
+      ;; 1. Repair obvious tutorial-style plot answers from weaker local models.
       (my/gptel-repair-inline-plot-response (point-min) (point-max))
-      ;; 0a. Repair generic local-model denials of live runtime capabilities.
-      (gptel-agent-runtime-repair-capability-response (point-min) (point-max))
-      ;; 0b. Execute safe JSON tool calls that local models printed as text.
+      ;; 2. Execute safe JSON tool calls that local models printed as text.
       (gptel-agent-runtime-execute-raw-tool-calls (point-min) (point-max))
-      ;; 1. Babel blocks
+      ;; 3. Babel blocks
       (dolist (block (claude-executor--find-babel-blocks))
         (claude-executor--execute-babel-block block))
-      ;; 2. Explicit exec-tags
+      ;; 4. Explicit exec-tags
       (dolist (cmd (claude-executor--find-commands))
         (when (yes-or-no-p (format "Execute command: %s ?" cmd))
           (claude-executor-run-command cmd)))
-      ;; 3. User-defined patterns from claude-executor-auto-commands
+      ;; 5. User-defined patterns from claude-executor-auto-commands
       (dolist (pattern-cmd claude-executor-auto-commands)
         (save-excursion
           (goto-char (point-min))
