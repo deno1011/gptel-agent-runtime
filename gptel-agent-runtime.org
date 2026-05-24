@@ -185,6 +185,15 @@ list keeps the compatibility shim read/search oriented."
   :type '(repeat string)
   :group 'gptel-agent-runtime)
 
+(defcustom gptel-agent-runtime-raw-tool-confirmation-names
+  '("execute_code" "run_elisp" "org_export")
+  "Raw JSON tool-call names that may run only after confirmation.
+This covers useful local-model actions that execute code or produce files. They
+are never auto-executed from raw assistant text unless confirmation policy is
+relaxed by the user."
+  :type '(repeat string)
+  :group 'gptel-agent-runtime)
+
 (defcustom gptel-agent-runtime-enable-parallel-mutations t
   "When non-nil, allow non-conflicting write-risk tools to run as workers.
 This only applies when the step passes safety checks and confirmation policy
@@ -2543,16 +2552,51 @@ Returns a plist with :name and :arguments, or nil."
         (forward-line 1)))
     (nreverse calls)))
 
+(defun gptel-agent-runtime--raw-tool-call-risk (name arguments)
+  "Infer a conservative risk level for raw tool NAME with ARGUMENTS."
+  (cond
+   ((member name gptel-agent-runtime-raw-tool-call-names)
+    'read)
+   ((member name '("execute_code" "run_elisp"))
+    'shell)
+   ((member name '("org_export"))
+    'write)
+   ((or (plist-get arguments :path)
+        (plist-get arguments :file))
+    'write)
+   (t 'shell)))
+
+(defun gptel-agent-runtime--raw-tool-call-confirmed-p (call risk)
+  "Return non-nil when raw tool CALL with RISK may execute."
+  (or (not (gptel-agent-runtime-confirmation-required-p risk))
+      (and (not noninteractive)
+           (yes-or-no-p
+            (format "Local model wants to run raw tool %s (%s risk). Continue? "
+                    (plist-get call :name)
+                    risk)))))
+
 (defun gptel-agent-runtime--execute-raw-tool-call (call)
   "Execute one safe raw JSON tool CALL and return an observation string."
   (let* ((name (plist-get call :name))
          (arguments (or (plist-get call :arguments) nil))
-         (tool (gptel-agent-runtime--find-gptel-tool name)))
+         (tool (gptel-agent-runtime--find-gptel-tool name))
+         (risk (gptel-agent-runtime--raw-tool-call-risk name arguments))
+         (step (gptel-agent-runtime-create-plan-step
+                (format "Raw local tool call: %s" name)
+                "The local model emitted a JSON tool call as assistant text."
+                name risk :args arguments)))
     (cond
-     ((not (member name gptel-agent-runtime-raw-tool-call-names))
-      (format "Skipped raw tool call `%s': tool is not in the read/search allow list." name))
+     ((not (or (member name gptel-agent-runtime-raw-tool-call-names)
+               (member name gptel-agent-runtime-raw-tool-confirmation-names)))
+      (format "Skipped raw tool call `%s': tool is not in the raw-call allow lists." name))
      ((not tool)
       (format "Skipped raw tool call `%s': tool is not registered in gptel." name))
+     ((gptel-agent-runtime-safety-check-step step)
+      (format "Skipped raw tool call `%s': %s"
+              name
+              (gptel-agent-runtime-safety-check-step step)))
+     ((not (gptel-agent-runtime--raw-tool-call-confirmed-p call risk))
+      (format "Skipped raw tool call `%s': confirmation required." name))
      ((and (fboundp 'gptel-tool-async) (gptel-tool-async tool))
       (format "Skipped raw tool call `%s': async raw tool execution is not supported yet." name))
      ((not (and (fboundp 'gptel--map-tool-args)
@@ -2561,6 +2605,10 @@ Returns a plist with :name and :arguments, or nil."
      (t
       (condition-case err
           (let* ((arg-values (gptel--map-tool-args tool arguments))
+                 (org-confirm-babel-evaluate
+                  (if (equal name "execute_code")
+                      nil
+                    org-confirm-babel-evaluate))
                  (result (apply (gptel-tool-function tool) arg-values)))
             (format "Tool `%s' observation:\n%s" name (format "%s" result)))
         (error
