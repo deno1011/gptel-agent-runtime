@@ -256,6 +256,21 @@ web_fetch_text while still preventing accidental long loops."
   :type 'string
   :group 'gptel-agent-runtime)
 
+(defcustom gptel-agent-runtime-swarm-buffer-name "*gptel-agent-swarm*"
+  "Buffer name used for live organizational swarm activity."
+  :type 'string
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-live-swarm-trace t
+  "When non-nil, append agent organization activity to the swarm buffer."
+  :type 'boolean
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-show-swarm-buffer-on-start t
+  "When non-nil, display the swarm buffer when an autonomous session starts."
+  :type 'boolean
+  :group 'gptel-agent-runtime)
+
 (defcustom gptel-agent-runtime-show-chat-status-markers t
   "When non-nil, insert compact agent job status markers in gptel buffers."
   :type 'boolean
@@ -477,6 +492,164 @@ the server find models downloaded to a non-default location."
     :taint ,(gptel-agent-runtime-event-taint event)
     :created-at ,(gptel-agent-runtime-event-created-at event)))
 
+(defun gptel-agent-runtime--shorten (text &optional max)
+  "Return TEXT truncated to MAX characters."
+  (let* ((max (or max 220))
+         (text (string-trim (format "%s" (or text "")))))
+    (if (> (length text) max)
+        (concat (substring text 0 max) "...")
+      text)))
+
+(defun gptel-agent-runtime-swarm-buffer ()
+  "Return the live swarm activity buffer, creating it when needed."
+  (get-buffer-create gptel-agent-runtime-swarm-buffer-name))
+
+(defun gptel-agent-runtime-show-swarm ()
+  "Display the live swarm activity buffer."
+  (interactive)
+  (display-buffer (gptel-agent-runtime-swarm-buffer)))
+
+(defun gptel-agent-runtime--payload-text (payload key &optional max)
+  "Return string value for KEY in PAYLOAD, shortened to MAX."
+  (gptel-agent-runtime--shorten (plist-get payload key) max))
+
+(defun gptel-agent-runtime--format-swarm-event (event)
+  "Return a concise live trace line for EVENT."
+  (let* ((type (gptel-agent-runtime-event-type event))
+         (source (or (gptel-agent-runtime-event-source event) "runtime"))
+         (session (or (gptel-agent-runtime-event-session-id event) "-"))
+         (payload (gptel-agent-runtime-event-payload event))
+         (taint (or (gptel-agent-runtime-event-taint event) 'trusted))
+         (summary
+          (pcase type
+            ('user-request
+             (format "USER -> router: %s"
+                     (gptel-agent-runtime--payload-text payload :goal 260)))
+            ('session-resumed
+             (format "SESSION resumed from %s"
+                     (gptel-agent-runtime--payload-text payload :file 180)))
+            ('observation
+             (format "OBSERVE workspace; route=%s"
+                     (gptel-agent-runtime--payload-text payload :route 180)))
+            ('plan-requested
+             (format "PLANNER requested; route=%s"
+                     (gptel-agent-runtime--payload-text payload :route 180)))
+            ('plan-created
+             (format "PLANNER produced %s step(s)%s"
+                     (or (plist-get payload :step-count) 0)
+                     (let ((steps (plist-get payload :steps)))
+                       (if steps
+                           (concat ": "
+                                   (gptel-agent-runtime--shorten
+                                    (mapconcat #'identity steps " | ") 260))
+                         ""))))
+            ('plan-review-requested
+             (format "REVIEWER checking %s planned step(s)"
+                     (or (plist-get payload :steps) 0)))
+            ('plan-reviewed
+             (format "REVIEWER decision=%s; %s"
+                     (or (plist-get payload :decision) "")
+                     (gptel-agent-runtime--payload-text payload :review 220)))
+            ('step-delegated
+             (format "ROUTER delegated to %s using %s: %s"
+                     (or (plist-get payload :agent) "assistant")
+                     (or (plist-get payload :tool) "direct_response")
+                     (gptel-agent-runtime--payload-text payload :title 220)))
+            ('parallel-workers-launched
+             (format "ROUTER launched %s parallel worker(s)"
+                     (or (plist-get payload :count) 0)))
+            ('worker-started
+             (format "WORKER %s started for %s using %s"
+                     (or (plist-get payload :worker) "")
+                     (or (plist-get payload :agent) "assistant")
+                     (or (plist-get payload :tool) "direct_response")))
+            ('worker-finished
+             (format "WORKER %s finished: %s"
+                     (or (plist-get payload :worker) "")
+                     (or (plist-get payload :status) "")))
+            ('action-requested
+             (format "TOOL-BROKER action requested: %s by %s risk=%s"
+                     (or (plist-get payload :tool) "")
+                     (or (plist-get payload :agent) "")
+                     (or (plist-get payload :risk) "")))
+            ('policy-decision
+             (format "POLICY %s for %s risk=%s confirm=%s%s"
+                     (if (plist-get payload :allowed-p) "allowed" "denied")
+                     (or (plist-get payload :tool) "")
+                     (or (plist-get payload :risk) "")
+                     (or (plist-get payload :confirmation-required-p) nil)
+                     (if (plist-get payload :reason)
+                         (format "; %s" (plist-get payload :reason))
+                       "")))
+            ('tool-call
+             (format "TOOL call: %s args=%s"
+                     (or (plist-get payload :tool) "")
+                     (gptel-agent-runtime--shorten
+                      (prin1-to-string (plist-get payload :args)) 220)))
+            ('tool-observation
+             (format "OBSERVE tool=%s status=%s%s"
+                     (or (plist-get payload :tool) "")
+                     (or (plist-get payload :status) "")
+                     (if (plist-get payload :error)
+                         (format " error=%s"
+                                 (gptel-agent-runtime--payload-text
+                                  payload :error 180))
+                       "")))
+            ('reflection-requested
+             (format "REVIEWER reflecting on: %s"
+                     (gptel-agent-runtime--payload-text payload :step 220)))
+            ('reflected
+             (format "REVIEWER status=%s; %s"
+                     (or (plist-get payload :status) "")
+                     (gptel-agent-runtime--payload-text payload :reflection 220)))
+            ('memory-written
+             (format "MEMORY written: %s"
+                     (gptel-agent-runtime--payload-text payload :path 220)))
+            ('session-finalized
+             (format "SESSION finalized: %s; memory=%s"
+                     (or (plist-get payload :reason) "")
+                     (gptel-agent-runtime--payload-text payload :memory 220)))
+            ('delphi-started
+             (format "DELPHI started with agents=%s"
+                     (gptel-agent-runtime--shorten
+                      (prin1-to-string (plist-get payload :agents)) 180)))
+            ('delphi-draft
+             (format "DELPHI draft from %s (%s chars)"
+                     (or (plist-get payload :agent) "")
+                     (or (plist-get payload :chars) 0)))
+            ('delphi-aggregation
+             (format "DELPHI aggregation for %s draft(s)"
+                     (or (plist-get payload :draft-count) 0)))
+            ('delphi-completed
+             (format "DELPHI completed with %s draft(s), %s chars"
+                     (or (plist-get payload :draft-count) 0)
+                     (or (plist-get payload :chars) 0)))
+            (_
+             (gptel-agent-runtime--shorten (prin1-to-string payload) 260)))))
+    (format "[%s] %s %s/%s taint=%s\n  %s\n"
+            (gptel-agent-runtime-event-created-at event)
+            session source type taint summary)))
+
+(defun gptel-agent-runtime--append-swarm-event (event)
+  "Append EVENT to the live swarm trace buffer."
+  (when gptel-agent-runtime-live-swarm-trace
+    (with-current-buffer (gptel-agent-runtime-swarm-buffer)
+      (goto-char (point-max))
+      (insert (gptel-agent-runtime--format-swarm-event event)))))
+
+(defun gptel-agent-runtime--start-swarm-session-buffer (session goal)
+  "Initialize the live swarm buffer for SESSION and GOAL."
+  (when gptel-agent-runtime-live-swarm-trace
+    (with-current-buffer (gptel-agent-runtime-swarm-buffer)
+      (erase-buffer)
+      (insert (format "gptel-agent-runtime swarm session\nSession: %s\nProcess: %s\nGoal: %s\nStarted: %s\n\n"
+                      (gptel-agent-runtime-session-id session)
+                      (gptel-agent-runtime-session-process session)
+                      goal
+                      (gptel-agent-runtime--timestamp))))
+    (when gptel-agent-runtime-show-swarm-buffer-on-start
+      (gptel-agent-runtime-show-swarm))))
+
 (cl-defun gptel-agent-runtime-emit-event
     (type &key source session-id parent-id payload taint)
   "Emit a runtime event of TYPE and return it.
@@ -506,6 +679,7 @@ TAINT is normally `trusted' or `untrusted'."
         (insert "\n")
         (append-to-file (point-min) (point-max)
                         gptel-agent-runtime-event-log-file)))
+    (gptel-agent-runtime--append-swarm-event event)
     event))
 
 (defun gptel-agent-runtime-list-events (&optional limit)
@@ -3398,6 +3572,7 @@ break object detection."
                     "Learned playbooks: %d.\n\n"
                     "Swarm processes: hierarchical chief clerk, Delphi peer "
                     "review, and direct planner/executor.\n\n"
+                    "Live swarm activity buffer: `%s`.\n\n"
                     "Raw local-model tool calls may run automatically only for "
                     "safe read/search tools: %s.\n\n"
                     "Tools requiring confirmation before raw execution: %s.\n\n"
@@ -3405,6 +3580,7 @@ break object detection."
                     "direct Elisp call syntax unless the user asks for code.")
             tool-list agent-list unit-list
             (length gptel-agent-runtime-playbook-registry)
+            gptel-agent-runtime-swarm-buffer-name
             safe confirmed)))
 
 (defun gptel-agent-runtime--capability-denial-p (text)
@@ -3446,6 +3622,9 @@ break object detection."
                     "- Swarm processes: hierarchical Chief Clerk routing, "
                     "Delphi-style peer review, and direct planner/executor mode.\n"
                     "- Learned playbooks: %d stored strategy pattern(s).\n"
+                    "- Live activity: internal planning, delegation, review, "
+                    "tool policy, observations, workers, and memory events are "
+                    "shown in `%s`.\n"
                     "- Tools: I can list registered tools, use safe read/search "
                     "tools automatically, and request confirmation for configured "
                     "write/code/system actions.\n\n"
@@ -3455,7 +3634,8 @@ break object detection."
                     "and reviewer/critic steps so weaker local models can work "
                     "inside a more structured organization.")
             agent-list unit-list
-            (length gptel-agent-runtime-playbook-registry))))
+            (length gptel-agent-runtime-playbook-registry)
+            gptel-agent-runtime-swarm-buffer-name)))
 
 (defun gptel-agent-runtime-repair-capability-response (beg end)
   "Replace false capability denials in region BEG END with runtime facts.
@@ -4645,6 +4825,7 @@ remember -> continue."
     (setq gptel-agent-runtime--current-session session)
     (setq gptel-agent-runtime--origin-buffer (current-buffer))
     (setf (gptel-agent-runtime-task-status task) 'running)
+    (gptel-agent-runtime--start-swarm-session-buffer session goal)
     (gptel-agent-runtime-emit-event
      'user-request
      :source "gptel-agent-runtime-start"
@@ -4719,6 +4900,10 @@ remember -> continue."
     (gptel-agent-runtime--requeue-running-work session)
     (setq gptel-agent-runtime--current-session session)
     (setq gptel-agent-runtime--origin-buffer (current-buffer))
+    (gptel-agent-runtime--start-swarm-session-buffer
+     session
+     (gptel-agent-runtime-task-goal
+      (gptel-agent-runtime-session-root-task session)))
     (gptel-agent-runtime-emit-event
      'session-resumed
      :source "gptel-agent-runtime-resume-session"
@@ -5245,6 +5430,14 @@ The preferred format is JSON with a top-level :steps list. A single
          (plan (gptel-agent-runtime-create-plan task steps)))
     (setf (gptel-agent-runtime-plan-status plan) 'active)
     (setf (gptel-agent-runtime-task-notes task) plan)
+    (gptel-agent-runtime-emit-event
+     'plan-created
+     :source "planner"
+     :session-id (gptel-agent-runtime-session-id session)
+     :payload (list :step-count (length steps)
+                    :steps (mapcar #'gptel-agent-runtime-plan-step-title
+                                   steps))
+     :taint 'trusted)
     (push (format "%s plan created with %d step(s)."
                   (gptel-agent-runtime--timestamp) (length steps))
           (gptel-agent-runtime-session-decisions session))
@@ -5471,6 +5664,14 @@ The preferred format is JSON with a top-level :steps list. A single
                 (gptel-agent-runtime--timestamp)
                 (length steps))
         (gptel-agent-runtime-session-decisions session))
+  (gptel-agent-runtime-emit-event
+   'parallel-workers-launched
+   :source "router"
+   :session-id (gptel-agent-runtime-session-id session)
+   :payload (list :count (length steps)
+                  :steps (mapcar #'gptel-agent-runtime-plan-step-title
+                                 steps))
+   :taint 'trusted)
   (dolist (step steps)
     (setf (gptel-agent-runtime-plan-step-status step) 'running)
     (let* ((now (gptel-agent-runtime--timestamp))
@@ -5493,6 +5694,16 @@ The preferred format is JSON with a top-level :steps list. A single
   "Run WORKER for STEP in SESSION."
   (let ((tool-name (or (gptel-agent-runtime-plan-step-suggested-tool step)
                        "direct_response")))
+    (gptel-agent-runtime-emit-event
+     'worker-started
+     :source "worker-runner"
+     :session-id (gptel-agent-runtime-session-id session)
+     :payload (list :worker (gptel-agent-runtime-worker-id worker)
+                    :agent (gptel-agent-runtime-worker-agent worker)
+                    :step-id (gptel-agent-runtime-worker-step-id worker)
+                    :step (gptel-agent-runtime-plan-step-title step)
+                    :tool tool-name)
+     :taint 'trusted)
     (if (equal tool-name "direct_response")
         (gptel-agent-runtime--worker-direct-response worker step session)
       (gptel-agent-runtime--worker-tool worker step session))))
@@ -5507,6 +5718,15 @@ The preferred format is JSON with a top-level :steps list. A single
           (setf (gptel-agent-runtime-worker-status worker) 'failed)
           (setf (gptel-agent-runtime-worker-error worker)
                 (format "Unknown tool: %s" tool-name))
+          (gptel-agent-runtime-emit-event
+           'worker-finished
+           :source "worker-runner"
+           :session-id (gptel-agent-runtime-session-id session)
+           :payload (list :worker (gptel-agent-runtime-worker-id worker)
+                          :status 'failed
+                          :tool tool-name
+                          :error (format "Unknown tool: %s" tool-name))
+           :taint 'trusted)
           (gptel-agent-runtime--observe-result
            step session
            (gptel-agent-runtime-result-error
@@ -5526,6 +5746,14 @@ The preferred format is JSON with a top-level :steps list. A single
                      (setf (gptel-agent-runtime-worker-result worker) value)
                      (setf (gptel-agent-runtime-worker-updated-at worker)
                            (gptel-agent-runtime--timestamp))
+                     (gptel-agent-runtime-emit-event
+                      'worker-finished
+                      :source "worker-runner"
+                      :session-id (gptel-agent-runtime-session-id session)
+                      :payload (list :worker (gptel-agent-runtime-worker-id worker)
+                                     :status 'done
+                                     :tool tool-name)
+                      :taint 'trusted)
                      (gptel-agent-runtime--observe-result
                       step session
                       (gptel-agent-runtime-result-ok
@@ -5546,6 +5774,14 @@ The preferred format is JSON with a top-level :steps list. A single
               (setf (gptel-agent-runtime-worker-result worker) value)
               (setf (gptel-agent-runtime-worker-updated-at worker)
                     (gptel-agent-runtime--timestamp))
+              (gptel-agent-runtime-emit-event
+               'worker-finished
+               :source "worker-runner"
+               :session-id (gptel-agent-runtime-session-id session)
+               :payload (list :worker (gptel-agent-runtime-worker-id worker)
+                              :status 'done
+                              :tool tool-name)
+               :taint 'trusted)
               (gptel-agent-runtime--observe-result
                step session
                (gptel-agent-runtime-result-ok
@@ -5557,6 +5793,15 @@ The preferred format is JSON with a top-level :steps list. A single
            (setf (gptel-agent-runtime-worker-status worker) 'failed)
            (setf (gptel-agent-runtime-worker-error worker)
                  (error-message-string err))
+           (gptel-agent-runtime-emit-event
+            'worker-finished
+            :source "worker-runner"
+            :session-id (gptel-agent-runtime-session-id session)
+            :payload (list :worker (gptel-agent-runtime-worker-id worker)
+                           :status 'failed
+                           :tool tool-name
+                           :error (error-message-string err))
+            :taint 'trusted)
            (gptel-agent-runtime--observe-result
             step session
             (gptel-agent-runtime-result-error
@@ -5589,6 +5834,15 @@ The preferred format is JSON with a top-level :steps list. A single
            (progn
              (setf (gptel-agent-runtime-worker-status worker) 'done)
              (setf (gptel-agent-runtime-worker-result worker) response)
+             (gptel-agent-runtime-emit-event
+              'worker-finished
+              :source "worker-runner"
+              :session-id (gptel-agent-runtime-session-id session)
+              :payload (list :worker (gptel-agent-runtime-worker-id worker)
+                             :status 'done
+                             :tool "parallel-direct-response"
+                             :chars (length response))
+              :taint 'trusted)
              (gptel-agent-runtime--observe-result
               step session
               (gptel-agent-runtime-result-ok
@@ -5597,6 +5851,15 @@ The preferred format is JSON with a top-level :steps list. A single
                :metadata (list :worker (gptel-agent-runtime-worker-id worker)))))
          (setf (gptel-agent-runtime-worker-status worker) 'failed)
          (setf (gptel-agent-runtime-worker-error worker) "No response")
+         (gptel-agent-runtime-emit-event
+          'worker-finished
+          :source "worker-runner"
+          :session-id (gptel-agent-runtime-session-id session)
+          :payload (list :worker (gptel-agent-runtime-worker-id worker)
+                         :status 'failed
+                         :tool "parallel-direct-response"
+                         :error "No response")
+          :taint 'trusted)
          (gptel-agent-runtime--observe-result
           step session
           (gptel-agent-runtime-result-error
@@ -5701,6 +5964,17 @@ CONTEXT is passed to the policy broker."
                    base-system)))
     (message "Agent [%s] rendering via %s..."
              (gptel-agent-runtime-session-id session) directive)
+    (gptel-agent-runtime-emit-event
+     'worker-started
+     :source "direct-response"
+     :session-id (gptel-agent-runtime-session-id session)
+     :payload (list :worker "direct-response"
+                    :agent (or (gptel-agent-runtime-plan-step-agent step)
+                               "assistant")
+                    :step-id (gptel-agent-runtime-plan-step-id step)
+                    :step (gptel-agent-runtime-plan-step-title step)
+                    :tool "direct_response")
+     :taint 'trusted)
     (gptel-request
      (format "GOAL:\n%s\n\nSTEP:\n%s\n\nRATIONALE:\n%s\n\nProduce the requested user-visible result now."
              goal
@@ -5710,11 +5984,21 @@ CONTEXT is passed to the policy broker."
      :callback
      (lambda (response _info)
        (if (not response)
-           (gptel-agent-runtime--observe-result
-            step session
-            (gptel-agent-runtime-result-error
-             :tool "direct_response"
-             :error "Direct response returned no output."))
+           (progn
+             (gptel-agent-runtime-emit-event
+              'worker-finished
+              :source "direct-response"
+              :session-id (gptel-agent-runtime-session-id session)
+              :payload (list :worker "direct-response"
+                             :status 'failed
+                             :tool "direct_response"
+                             :error "Direct response returned no output.")
+              :taint 'trusted)
+             (gptel-agent-runtime--observe-result
+              step session
+              (gptel-agent-runtime-result-error
+               :tool "direct_response"
+               :error "Direct response returned no output.")))
          (let ((buffer (or (and (buffer-live-p gptel-agent-runtime--origin-buffer)
                                 gptel-agent-runtime--origin-buffer)
                            (current-buffer))))
@@ -5724,6 +6008,15 @@ CONTEXT is passed to the policy broker."
                (unless (bolp) (insert "\n"))
                (insert response "\n")
                (run-hook-with-args 'gptel-post-response-functions beg (point)))))
+         (gptel-agent-runtime-emit-event
+          'worker-finished
+          :source "direct-response"
+          :session-id (gptel-agent-runtime-session-id session)
+          :payload (list :worker "direct-response"
+                         :status 'done
+                         :tool "direct_response"
+                         :chars (length response))
+          :taint 'trusted)
          (gptel-agent-runtime--observe-result
           step session
           (gptel-agent-runtime-result-ok
@@ -5912,6 +6205,14 @@ CONTEXT is passed to the policy broker."
                   (or (gptel-agent-runtime-action-result-output result) "")
                   (or (gptel-agent-runtime-action-result-error result) ""))))
     (message "Agent [%s] reflecting..." (gptel-agent-runtime-session-id session))
+    (gptel-agent-runtime-emit-event
+     'reflection-requested
+     :source "reviewer"
+     :session-id (gptel-agent-runtime-session-id session)
+     :payload (list :step (gptel-agent-runtime-plan-step-title step)
+                    :tool (gptel-agent-runtime-action-result-tool result)
+                    :status (gptel-agent-runtime-action-result-status result))
+     :taint 'trusted)
     (gptel-request
      prompt
      :system (gptel-agent-runtime--reflection-system)
@@ -5961,6 +6262,15 @@ CONTEXT is passed to the policy broker."
                     (gptel-agent-runtime--timestamp)
                     (string-trim memory))
             (gptel-agent-runtime-session-decisions session)))
+    (gptel-agent-runtime-emit-event
+     'reflected
+     :source "reviewer"
+     :session-id (gptel-agent-runtime-session-id session)
+     :payload (list :step (gptel-agent-runtime-plan-step-title step)
+                    :status status
+                    :reflection (plist-get reflection :reflection)
+                    :memory memory)
+     :taint 'trusted)
     (pcase status
       ('done
        (setf (gptel-agent-runtime-plan-step-status step) 'done)
@@ -5992,6 +6302,18 @@ CONTEXT is passed to the policy broker."
   (when (eq reason 'done)
     (gptel-agent-runtime-record-session-playbook session))
   (let ((path (gptel-agent-runtime-memory-write-session session)))
+    (gptel-agent-runtime-emit-event
+     'session-finalized
+     :source "runtime"
+     :session-id (gptel-agent-runtime-session-id session)
+     :payload (list :reason reason :memory path)
+     :taint 'trusted)
+    (gptel-agent-runtime-emit-event
+     'memory-written
+     :source "memory"
+     :session-id (gptel-agent-runtime-session-id session)
+     :payload (list :path path)
+     :taint 'trusted)
     (message "Agent session %s finished (%s). Memory: %s"
              (gptel-agent-runtime-session-id session)
              reason
