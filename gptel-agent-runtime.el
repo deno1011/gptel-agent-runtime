@@ -123,6 +123,27 @@ level lists."
   :safe #'integerp
   :group 'gptel-agent-runtime)
 
+(defcustom gptel-agent-runtime-enable-organization-routing t
+  "When non-nil, route tasks through organization units before agent selection.
+Organization units are lightweight departments such as research, engineering,
+review, and memory. They make swarm-style routing inspectable without requiring
+separate processes for every role."
+  :type 'boolean
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-enable-playbook-learning t
+  "When non-nil, successful autonomous sessions create reusable playbooks.
+Playbooks are local strategy memories that can be matched during future
+planning so similar tasks need fewer reasoning iterations."
+  :type 'boolean
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-playbook-match-limit 3
+  "Maximum number of matching playbooks injected into a planner prompt."
+  :type 'integer
+  :safe #'integerp
+  :group 'gptel-agent-runtime)
+
 (defcustom gptel-agent-runtime-memory-retrieval-method 'lexical
   "Memory retrieval method.
 `lexical' uses local keyword scoring. `ollama-embeddings' asks Ollama for
@@ -1045,6 +1066,30 @@ Emacs and safe to evolve while the data model is still changing."
       :error ,(gptel-agent-runtime-worker-error object)
       :started-at ,(gptel-agent-runtime-worker-started-at object)
       :updated-at ,(gptel-agent-runtime-worker-updated-at object)))
+   ((gptel-agent-runtime-organization-unit-p object)
+    `(:type organization-unit
+      :name ,(gptel-agent-runtime-organization-unit-name object)
+      :purpose ,(gptel-agent-runtime-organization-unit-purpose object)
+      :triggers ,(gptel-agent-runtime-organization-unit-triggers object)
+      :agent-names ,(gptel-agent-runtime-organization-unit-agent-names object)
+      :parent ,(gptel-agent-runtime-organization-unit-parent object)
+      :escalation ,(gptel-agent-runtime-organization-unit-escalation object)
+      :enabled-p ,(gptel-agent-runtime-organization-unit-enabled-p object)
+      :metadata ,(gptel-agent-runtime-organization-unit-metadata object)))
+   ((gptel-agent-runtime-playbook-p object)
+    `(:type playbook
+      :id ,(gptel-agent-runtime-playbook-id object)
+      :summary ,(gptel-agent-runtime-playbook-summary object)
+      :triggers ,(gptel-agent-runtime-playbook-triggers object)
+      :agent ,(gptel-agent-runtime-playbook-agent object)
+      :skills ,(gptel-agent-runtime-playbook-skills object)
+      :steps ,(gptel-agent-runtime-playbook-steps object)
+      :source-session ,(gptel-agent-runtime-playbook-source-session object)
+      :success-count ,(gptel-agent-runtime-playbook-success-count object)
+      :failure-count ,(gptel-agent-runtime-playbook-failure-count object)
+      :created-at ,(gptel-agent-runtime-playbook-created-at object)
+      :updated-at ,(gptel-agent-runtime-playbook-updated-at object)
+      :metadata ,(gptel-agent-runtime-playbook-metadata object)))
    ((gptel-agent-runtime-session-p object)
     `(:type session
       :id ,(gptel-agent-runtime-session-id object)
@@ -1141,6 +1186,30 @@ Emacs and safe to evolve while the data model is still changing."
         :error (plist-get data :error)
         :started-at (plist-get data :started-at)
         :updated-at (plist-get data :updated-at)))
+      ('organization-unit
+       (gptel-agent-runtime-organization-unit-create
+        :name (plist-get data :name)
+        :purpose (plist-get data :purpose)
+        :triggers (plist-get data :triggers)
+        :agent-names (plist-get data :agent-names)
+        :parent (plist-get data :parent)
+        :escalation (plist-get data :escalation)
+        :enabled-p (plist-get data :enabled-p)
+        :metadata (plist-get data :metadata)))
+      ('playbook
+       (gptel-agent-runtime-playbook-create
+        :id (plist-get data :id)
+        :summary (plist-get data :summary)
+        :triggers (plist-get data :triggers)
+        :agent (plist-get data :agent)
+        :skills (plist-get data :skills)
+        :steps (plist-get data :steps)
+        :source-session (plist-get data :source-session)
+        :success-count (plist-get data :success-count)
+        :failure-count (plist-get data :failure-count)
+        :created-at (plist-get data :created-at)
+        :updated-at (plist-get data :updated-at)
+        :metadata (plist-get data :metadata)))
       ('session
        (gptel-agent-runtime-session-create
         :id (plist-get data :id)
@@ -1375,11 +1444,45 @@ Emacs and safe to evolve while the data model is still changing."
   enabled-p
   metadata)
 
+(cl-defstruct (gptel-agent-runtime-organization-unit
+               (:constructor gptel-agent-runtime-organization-unit-create))
+  "Definition of one inspectable organization unit for routing."
+  name
+  purpose
+  triggers
+  agent-names
+  parent
+  escalation
+  enabled-p
+  metadata)
+
+(cl-defstruct (gptel-agent-runtime-playbook
+               (:constructor gptel-agent-runtime-playbook-create))
+  "Reusable learned strategy from a prior successful task."
+  id
+  summary
+  triggers
+  agent
+  skills
+  steps
+  source-session
+  success-count
+  failure-count
+  created-at
+  updated-at
+  metadata)
+
 (defvar gptel-agent-runtime-agent-registry nil
   "Registered `gptel-agent-runtime-agent' definitions.")
 
 (defvar gptel-agent-runtime-skill-registry nil
   "Registered `gptel-agent-runtime-skill' definitions.")
+
+(defvar gptel-agent-runtime-organization-registry nil
+  "Registered `gptel-agent-runtime-organization-unit' definitions.")
+
+(defvar gptel-agent-runtime-playbook-registry nil
+  "Persisted `gptel-agent-runtime-playbook' definitions.")
 
 (defvar gptel-agent-runtime-last-route nil
   "Most recent route plist returned by `gptel-agent-runtime-route-task'.")
@@ -1467,6 +1570,100 @@ of regexps or keywords matched against a task. PLIST accepts :agent-names,
   (cl-remove-if-not #'gptel-agent-runtime-skill-enabled-p
                     gptel-agent-runtime-skill-registry))
 
+(defun gptel-agent-runtime-register-organization-unit
+    (name purpose triggers &rest plist)
+  "Register an inspectable organization unit.
+NAME is a symbol or string. PURPOSE describes the unit. TRIGGERS is a list of
+regexps or keywords matched against task text. PLIST accepts :agent-names,
+:parent, :escalation, :enabled-p, and :metadata."
+  (let* ((unit-name (gptel-agent-runtime--symbol-name name))
+         (unit (gptel-agent-runtime-organization-unit-create
+                :name unit-name
+                :purpose purpose
+                :triggers triggers
+                :agent-names (plist-get plist :agent-names)
+                :parent (plist-get plist :parent)
+                :escalation (plist-get plist :escalation)
+                :enabled-p (if (plist-member plist :enabled-p)
+                               (plist-get plist :enabled-p)
+                             t)
+                :metadata (plist-get plist :metadata))))
+    (setq gptel-agent-runtime-organization-registry
+          (cons unit
+                (cl-remove unit-name gptel-agent-runtime-organization-registry
+                           :key #'gptel-agent-runtime-organization-unit-name
+                           :test #'equal)))
+    unit))
+
+(defun gptel-agent-runtime-find-organization-unit (name)
+  "Return organization unit NAME, or nil."
+  (let ((unit-name (gptel-agent-runtime--symbol-name name)))
+    (cl-find unit-name gptel-agent-runtime-organization-registry
+             :key #'gptel-agent-runtime-organization-unit-name
+             :test #'equal)))
+
+(defun gptel-agent-runtime-enabled-organization-units ()
+  "Return enabled organization units."
+  (cl-remove-if-not #'gptel-agent-runtime-organization-unit-enabled-p
+                    gptel-agent-runtime-organization-registry))
+
+(defun gptel-agent-runtime--trigger-matches-p (trigger text)
+  "Return non-nil when TRIGGER matches TEXT."
+  (cond
+   ((symbolp trigger)
+    (string-match-p (regexp-quote (symbol-name trigger)) text))
+   ((stringp trigger)
+    (string-match-p trigger text))
+   (t nil)))
+
+(defun gptel-agent-runtime--organization-unit-score (unit text)
+  "Return routing score for organization UNIT and TEXT."
+  (let ((case-fold-search t))
+    (cl-loop for trigger in (gptel-agent-runtime-organization-unit-triggers unit)
+             count (gptel-agent-runtime--trigger-matches-p trigger text))))
+
+(defun gptel-agent-runtime-route-organization (text)
+  "Return best matching organization unit for TEXT."
+  (when gptel-agent-runtime-enable-organization-routing
+    (let* ((units (gptel-agent-runtime-enabled-organization-units))
+           (scored (mapcar
+                    (lambda (unit)
+                      (cons unit
+                            (gptel-agent-runtime--organization-unit-score
+                             unit text)))
+                    units))
+           (best (car (sort scored (lambda (a b) (> (cdr a) (cdr b)))))))
+      (when (and best (> (cdr best) 0))
+        (car best)))))
+
+(defun gptel-agent-runtime-playbook-path ()
+  "Return the playbook store path."
+  (expand-file-name "playbooks.el"
+                    (gptel-agent-runtime-memory-ensure-directory)))
+
+(defun gptel-agent-runtime-load-playbooks ()
+  "Load persisted playbooks from disk."
+  (let ((path (gptel-agent-runtime-playbook-path)))
+    (setq gptel-agent-runtime-playbook-registry
+          (if (file-exists-p path)
+              (with-temp-buffer
+                (insert-file-contents path)
+                (mapcar #'gptel-agent-runtime--data-to-struct
+                        (read (current-buffer))))
+            nil))))
+
+(defun gptel-agent-runtime-save-playbooks ()
+  "Persist playbooks to disk."
+  (let ((path (gptel-agent-runtime-playbook-path))
+        (print-length nil)
+        (print-level nil))
+    (with-temp-file path
+      (prin1 (mapcar #'gptel-agent-runtime--struct-to-data
+                     gptel-agent-runtime-playbook-registry)
+             (current-buffer))
+      (insert "\n"))
+    path))
+
 (defun gptel-agent-runtime-skill-stats-path ()
   "Return the skill stats file path."
   (expand-file-name "skill-stats.el"
@@ -1518,6 +1715,148 @@ recent observation for the skill."
     (gptel-agent-runtime-save-skill-stats)
     stats))
 
+(defun gptel-agent-runtime-register-playbook
+    (summary triggers &rest plist)
+  "Register a learned strategy playbook.
+SUMMARY is a short description. TRIGGERS is a list matched against future
+tasks. PLIST accepts :id, :agent, :skills, :steps, :source-session,
+:success-count, :failure-count, and :metadata."
+  (let* ((id (or (plist-get plist :id)
+                 (format "playbook-%s"
+                         (format-time-string "%Y%m%d%H%M%S%N"))))
+         (existing (cl-find id gptel-agent-runtime-playbook-registry
+                            :key #'gptel-agent-runtime-playbook-id
+                            :test #'equal))
+         (created (or (and existing
+                           (gptel-agent-runtime-playbook-created-at existing))
+                      (gptel-agent-runtime--timestamp)))
+         (playbook (gptel-agent-runtime-playbook-create
+                    :id id
+                    :summary summary
+                    :triggers triggers
+                    :agent (plist-get plist :agent)
+                    :skills (plist-get plist :skills)
+                    :steps (plist-get plist :steps)
+                    :source-session (plist-get plist :source-session)
+                    :success-count (or (plist-get plist :success-count)
+                                       (and existing
+                                            (gptel-agent-runtime-playbook-success-count
+                                             existing))
+                                       1)
+                    :failure-count (or (plist-get plist :failure-count)
+                                       (and existing
+                                            (gptel-agent-runtime-playbook-failure-count
+                                             existing))
+                                       0)
+                    :created-at created
+                    :updated-at (gptel-agent-runtime--timestamp)
+                    :metadata (plist-get plist :metadata))))
+    (setq gptel-agent-runtime-playbook-registry
+          (cons playbook
+                (cl-remove id gptel-agent-runtime-playbook-registry
+                           :key #'gptel-agent-runtime-playbook-id
+                           :test #'equal)))
+    (gptel-agent-runtime-save-playbooks)
+    playbook))
+
+(defun gptel-agent-runtime--tokenize-text (text)
+  "Return simple lowercase tokens for TEXT."
+  (let ((case-fold-search t)
+        tokens)
+    (dolist (token (split-string (or text "") "[^[:alnum:]_:-]+" t))
+      (when (> (length token) 2)
+        (push (downcase token) tokens)))
+    (delete-dups (nreverse tokens))))
+
+(defun gptel-agent-runtime--playbook-score (playbook text)
+  "Return match score for PLAYBOOK and TEXT."
+  (let* ((case-fold-search t)
+         (trigger-score
+          (cl-loop for trigger in (gptel-agent-runtime-playbook-triggers
+                                   playbook)
+                   count (gptel-agent-runtime--trigger-matches-p
+                          trigger text)))
+         (tokens (gptel-agent-runtime--tokenize-text text))
+         (summary (downcase (or (gptel-agent-runtime-playbook-summary
+                                 playbook)
+                                "")))
+         (token-score
+          (cl-loop for token in tokens
+                   count (string-match-p (regexp-quote token) summary)))
+         (success (or (gptel-agent-runtime-playbook-success-count playbook) 0))
+         (failure (or (gptel-agent-runtime-playbook-failure-count playbook) 0)))
+    (+ (* 3 trigger-score)
+       token-score
+       (max -2 (min 2 (- success failure))))))
+
+(defun gptel-agent-runtime-match-playbooks (text)
+  "Return matching playbooks for TEXT, strongest first."
+  (let* ((scored
+          (cl-loop for playbook in gptel-agent-runtime-playbook-registry
+                   for score = (gptel-agent-runtime--playbook-score
+                                playbook text)
+                   when (> score 0)
+                   collect (cons playbook score)))
+         (sorted (sort scored (lambda (a b) (> (cdr a) (cdr b))))))
+    (mapcar #'car
+            (cl-subseq sorted 0 (min (length sorted)
+                                     gptel-agent-runtime-playbook-match-limit)))))
+
+(defun gptel-agent-runtime-format-playbooks (playbooks)
+  "Return planner prompt text for PLAYBOOKS."
+  (if playbooks
+      (mapconcat
+       (lambda (playbook)
+         (format "- %s\n  Agent: %s\n  Skills: %s\n  Steps: %s"
+                 (or (gptel-agent-runtime-playbook-summary playbook) "")
+                 (or (gptel-agent-runtime-playbook-agent playbook) "<none>")
+                 (mapconcat #'identity
+                            (or (gptel-agent-runtime-playbook-skills playbook)
+                                nil)
+                            ", ")
+                 (mapconcat #'identity
+                            (or (gptel-agent-runtime-playbook-steps playbook)
+                                nil)
+                            " -> ")))
+       playbooks
+       "\n")
+    "No matching playbooks."))
+
+(defun gptel-agent-runtime-record-session-playbook (session)
+  "Create a reusable playbook from completed SESSION."
+  (when gptel-agent-runtime-enable-playbook-learning
+    (let* ((task (gptel-agent-runtime-session-current-task session))
+           (goal (and task (gptel-agent-runtime-task-goal task)))
+           (plan (and task (gptel-agent-runtime-task-notes task)))
+           (steps (and plan (gptel-agent-runtime-plan-steps plan)))
+           (route (and goal (gptel-agent-runtime-route-task goal)))
+           (agent (plist-get route :agent))
+           (skills (cl-remove-duplicates
+                    (cl-loop for step in steps
+                             append (or (gptel-agent-runtime-plan-step-skills
+                                         step)
+                                        nil))
+                    :test #'equal))
+           (step-titles (cl-loop for step in steps
+                                 collect
+                                 (or (gptel-agent-runtime-plan-step-title step)
+                                     "Untitled step"))))
+      (when (and goal steps)
+        (gptel-agent-runtime-register-playbook
+         (string-trim (replace-regexp-in-string "[\n\r\t ]+" " " goal))
+         (gptel-agent-runtime--tokenize-text goal)
+         :agent (and agent (gptel-agent-runtime-agent-name agent))
+         :skills skills
+         :steps step-titles
+         :source-session (gptel-agent-runtime-session-id session)
+         :metadata (list :created-from 'completed-session))
+        (gptel-agent-runtime-emit-event
+         'playbook-learned
+         :source "memory-curator"
+         :session-id (gptel-agent-runtime-session-id session)
+         :payload (list :goal goal :steps step-titles :skills skills)
+         :taint 'trusted)))))
+
 (defun gptel-agent-runtime-skill-score-adjustment (skill)
   "Return routing adjustment from historical outcomes for SKILL."
   (let* ((stats (gptel-agent-runtime-skill-stat
@@ -1531,12 +1870,7 @@ recent observation for the skill."
   (let ((case-fold-search t))
     (cl-some
      (lambda (trigger)
-       (cond
-        ((symbolp trigger)
-         (string-match-p (regexp-quote (symbol-name trigger)) text))
-        ((stringp trigger)
-         (string-match-p trigger text))
-        (t nil)))
+       (gptel-agent-runtime--trigger-matches-p trigger text))
      (gptel-agent-runtime-skill-triggers skill))))
 
 (defun gptel-agent-runtime-match-skills (text)
@@ -1574,11 +1908,27 @@ recent observation for the skill."
        skill-score
        skill-history-score)))
 
+(defun gptel-agent-runtime--organization-agent-allowed-p (unit agent)
+  "Return non-nil when UNIT allows AGENT, or no unit restriction exists."
+  (let ((allowed (and unit
+                      (mapcar #'gptel-agent-runtime--symbol-name
+                              (gptel-agent-runtime-organization-unit-agent-names
+                               unit))))
+        (agent-name (and agent (gptel-agent-runtime-agent-name agent))))
+    (or (null allowed)
+        (member agent-name allowed))))
+
 (defun gptel-agent-runtime-route-task (text)
   "Route task TEXT to an agent and matching skills.
 Returns a plist with :agent, :skills, :all-agents, and :reason."
-  (let* ((skills (gptel-agent-runtime-match-skills text))
-         (agents (gptel-agent-runtime-enabled-agents))
+  (let* ((organization (gptel-agent-runtime-route-organization text))
+         (skills (gptel-agent-runtime-match-skills text))
+         (playbooks (gptel-agent-runtime-match-playbooks text))
+         (agents (cl-remove-if-not
+                  (lambda (agent)
+                    (gptel-agent-runtime--organization-agent-allowed-p
+                     organization agent))
+                  (gptel-agent-runtime-enabled-agents)))
          (scored (mapcar
                   (lambda (agent)
                     (cons agent
@@ -1591,11 +1941,18 @@ Returns a plist with :agent, :skills, :all-agents, and :reason."
                     (car agents)))
          (route (list
                  :agent agent
+                 :organization organization
                  :skills skills
+                 :playbooks playbooks
                  :all-agents agents
                  :reason
-                 (format "Matched %d skill(s); selected %s."
+                 (format "Unit %s; matched %d skill(s), %d playbook(s); selected %s."
+                         (if organization
+                             (gptel-agent-runtime-organization-unit-name
+                              organization)
+                           "general")
                          (length skills)
+                         (length playbooks)
                          (if agent
                              (gptel-agent-runtime-agent-name agent)
                            "<none>")))))
@@ -1606,14 +1963,20 @@ Returns a plist with :agent, :skills, :all-agents, and :reason."
   "Return a human-readable route summary for TEXT."
   (let* ((route (gptel-agent-runtime-route-task text))
          (agent (plist-get route :agent))
+         (organization (plist-get route :organization))
          (skills (gptel-agent-runtime-normalize-skills
-                  (plist-get route :skills))))
-    (format "Agent: %s\nRole: %s\nSkills: %s\nReason: %s"
+                  (plist-get route :skills)))
+         (playbooks (plist-get route :playbooks)))
+    (format "Organization: %s\nAgent: %s\nRole: %s\nSkills: %s\nPlaybooks: %d\nReason: %s"
+            (if organization
+                (gptel-agent-runtime-organization-unit-name organization)
+              "general")
             (if agent (gptel-agent-runtime-agent-name agent) "<none>")
             (if agent (gptel-agent-runtime-agent-role agent) "<none>")
             (if skills
                 (mapconcat #'gptel-agent-runtime-skill-name skills ", ")
               "<none>")
+            (length playbooks)
             (plist-get route :reason))))
 
 (defun gptel-agent-runtime-describe-route (text)
@@ -1717,6 +2080,35 @@ extend them later from their private config."
    :directive 'emacs-local-assistant
    :tool-categories '(memory org files))
 
+  (gptel-agent-runtime-register-organization-unit
+   'research
+   "Find, fetch, verify, and summarize current or external information."
+   '("web" "internet" "current" "latest" "today" "rule" "law" "source"
+     "research" "check")
+   :agent-names '("assistant" "planner")
+   :escalation 'reviewer)
+  (gptel-agent-runtime-register-organization-unit
+   'engineering
+   "Inspect repositories, change code/config, run tools, and verify results."
+   '("code" "repo" "implement" "fix" "test" "config" "package" "branch"
+     "emacs" "gptel" "tool")
+   :agent-names '("planner" "executor" "reviewer")
+   :escalation 'reviewer)
+  (gptel-agent-runtime-register-organization-unit
+   'knowledge
+   "Capture durable memory, handover notes, skills, and reusable strategies."
+   '("remember" "memory" "handover" "lesson" "strategy" "skill"
+     "learn" "playbook")
+   :agent-names '("memory-curator" "planner" "assistant")
+   :escalation 'reviewer)
+  (gptel-agent-runtime-register-organization-unit
+   'presentation
+   "Create user-facing Org output, diagrams, plots, exports, and explanations."
+   '("plot" "graph" "diagram" "latex" "inline" "export" "explain"
+     "write" "draft")
+   :agent-names '("assistant" "executor" "reviewer")
+   :escalation 'reviewer)
+
   (gptel-agent-runtime-register-skill
    'inline-rendering
    "Create inline Org output for math, plots, diagrams, and generated files."
@@ -1758,10 +2150,12 @@ extend them later from their private config."
    :instructions "Write concise durable lessons to the appropriate memory or handover file."
    :validation "Memory update is committed or explicitly reported.")
   (list :agents gptel-agent-runtime-agent-registry
+        :organization gptel-agent-runtime-organization-registry
         :skills gptel-agent-runtime-skill-registry))
 
 (gptel-agent-runtime-register-default-agents-and-skills)
 (gptel-agent-runtime-load-skill-stats)
+(gptel-agent-runtime-load-playbooks)
 (gptel-agent-runtime-load-embedding-cache)
 
 (use-package gptel
@@ -2938,22 +3332,41 @@ break object detection."
   "Return a deterministic summary of registered Emacs agent capabilities."
   (let* ((tools (sort (mapcar #'gptel-tool-name (or (my/gptel-tools-all) nil))
                       #'string<))
+         (agents (sort (mapcar #'gptel-agent-runtime-agent-name
+                                (gptel-agent-runtime-enabled-agents))
+                       #'string<))
+         (units (sort (mapcar #'gptel-agent-runtime-organization-unit-name
+                              (gptel-agent-runtime-enabled-organization-units))
+                      #'string<))
          (tool-list (if tools
                         (mapconcat (lambda (name) (format "- `%s`" name))
                                    tools "\n")
                       "- No gptel tools are currently registered."))
+         (agent-list (if agents
+                         (mapconcat (lambda (name) (format "`%s`" name))
+                                    agents ", ")
+                       "<none>"))
+         (unit-list (if units
+                        (mapconcat (lambda (name) (format "`%s`" name))
+                                   units ", ")
+                      "<none>"))
          (safe (mapconcat (lambda (name) (format "`%s`" name))
                           gptel-agent-runtime-raw-tool-call-names ", "))
          (confirmed (mapconcat (lambda (name) (format "`%s`" name))
                                gptel-agent-runtime-raw-tool-confirmation-names
                                ", ")))
     (format (concat "Registered Emacs/gptel tools:\n%s\n\n"
+                    "Agents: %s.\n"
+                    "Organization units: %s.\n"
+                    "Learned playbooks: %d.\n\n"
                     "Raw local-model tool calls may run automatically only for "
                     "safe read/search tools: %s.\n\n"
                     "Tools requiring confirmation before raw execution: %s.\n\n"
                     "Use capabilities in prose for the user. Avoid inventing "
                     "direct Elisp call syntax unless the user asks for code.")
-            tool-list safe confirmed)))
+            tool-list agent-list unit-list
+            (length gptel-agent-runtime-playbook-registry)
+            safe confirmed)))
 
 (defun gptel-agent-runtime-list-tools ()
   "Display all currently registered gptel tools and runtime policy metadata."
@@ -2969,8 +3382,71 @@ break object detection."
                 (prin1 entry (current-buffer))
                 (insert "\n"))
             (insert "- No custom tool policies configured.\n"))
+          (insert "\nOrganization units:\n")
+          (dolist (unit (gptel-agent-runtime-enabled-organization-units))
+            (insert (format "- %s: %s\n"
+                            (gptel-agent-runtime-organization-unit-name unit)
+                            (or (gptel-agent-runtime-organization-unit-purpose
+                                 unit)
+                                ""))))
+          (insert "\nLearned playbooks:\n")
+          (if gptel-agent-runtime-playbook-registry
+              (dolist (playbook gptel-agent-runtime-playbook-registry)
+                (insert (format "- %s: %s\n"
+                                (gptel-agent-runtime-playbook-id playbook)
+                                (or (gptel-agent-runtime-playbook-summary
+                                     playbook)
+                                    ""))))
+            (insert "- No learned playbooks yet.\n"))
           (display-buffer (current-buffer)))
       summary)))
+
+(defun gptel-agent-runtime-list-organization ()
+  "Display the current agent organization and learned playbooks."
+  (interactive)
+  (with-current-buffer (get-buffer-create "*gptel-agent-organization*")
+    (erase-buffer)
+    (insert "Agents\n")
+    (dolist (agent (gptel-agent-runtime-enabled-agents))
+      (insert (format "- %s (%s): %s\n"
+                      (gptel-agent-runtime-agent-name agent)
+                      (gptel-agent-runtime-agent-role agent)
+                      (or (gptel-agent-runtime-agent-description agent) ""))))
+    (insert "\nOrganization units\n")
+    (dolist (unit (gptel-agent-runtime-enabled-organization-units))
+      (insert (format "- %s: %s\n  agents: %s\n  escalation: %s\n"
+                      (gptel-agent-runtime-organization-unit-name unit)
+                      (or (gptel-agent-runtime-organization-unit-purpose unit)
+                          "")
+                      (mapconcat #'identity
+                                 (or (gptel-agent-runtime-organization-unit-agent-names
+                                      unit)
+                                     nil)
+                                 ", ")
+                      (or (gptel-agent-runtime-organization-unit-escalation
+                           unit)
+                          "<none>"))))
+    (insert "\nSkills\n")
+    (dolist (skill (gptel-agent-runtime-enabled-skills))
+      (insert (format "- %s: %s\n"
+                      (gptel-agent-runtime-skill-name skill)
+                      (or (gptel-agent-runtime-skill-summary skill) ""))))
+    (insert "\nLearned playbooks\n")
+    (if gptel-agent-runtime-playbook-registry
+        (dolist (playbook gptel-agent-runtime-playbook-registry)
+          (insert (format "- %s: %s\n  agent: %s\n  skills: %s\n"
+                          (gptel-agent-runtime-playbook-id playbook)
+                          (or (gptel-agent-runtime-playbook-summary playbook)
+                              "")
+                          (or (gptel-agent-runtime-playbook-agent playbook)
+                              "<none>")
+                          (mapconcat #'identity
+                                     (or (gptel-agent-runtime-playbook-skills
+                                          playbook)
+                                         nil)
+                                     ", "))))
+      (insert "- No learned playbooks yet.\n"))
+    (display-buffer (current-buffer))))
 
 (defun gptel-agent-runtime--raw-tool-success-observation-p (observation)
   "Return non-nil when OBSERVATION is a successful raw tool observation."
@@ -3634,7 +4110,7 @@ Each entry is a plist with :state :heading :file :deadline :tags."
   ;; describe_capabilities — deterministic summary of current runtime tools
   (gptel-make-tool
    :name "describe_capabilities"
-   :description "Return the actual registered Emacs agent tools, safety policy, and guidance for describing capabilities."
+   :description "Return the actual registered Emacs agent tools, agent roles, organization units, learned playbooks, safety policy, and guidance for describing capabilities."
    :function (lambda ()
                (gptel-agent-runtime-capability-summary)))
 
@@ -4213,10 +4689,13 @@ remember -> continue."
          (route (gptel-agent-runtime-route-task goal))
          (observation (gptel-agent-runtime--workspace-observation))
          (memory (gptel-agent-runtime-memory-context goal))
+         (playbooks (gptel-agent-runtime-format-playbooks
+                     (plist-get route :playbooks)))
          (prompt (format
-                  "GOAL:\n%s\n\nROUTE:\n%s\n\nRELEVANT PRIOR MEMORY:\n%s\n\nAVAILABLE TOOLS:\n%s\n\nOBSERVATIONS:\n%s\n\nCreate the next executable plan."
+                  "GOAL:\n%s\n\nROUTE:\n%s\n\nMATCHING PLAYBOOKS:\n%s\n\nRELEVANT PRIOR MEMORY:\n%s\n\nAVAILABLE TOOLS:\n%s\n\nOBSERVATIONS:\n%s\n\nCreate the next executable plan. Prefer a matching playbook when it applies, but adapt it to the current task."
                   goal
                   (gptel-agent-runtime-route-summary goal)
+                  playbooks
                   memory
                   (mapconcat #'identity (gptel-agent-runtime--tool-names) ", ")
                   observation)))
@@ -5131,6 +5610,8 @@ CONTEXT is passed to the policy broker."
         (if (eq reason 'done) 'completed reason))
   (setf (gptel-agent-runtime-session-updated-at session)
         (gptel-agent-runtime--timestamp))
+  (when (eq reason 'done)
+    (gptel-agent-runtime-record-session-playbook session))
   (let ((path (gptel-agent-runtime-memory-write-session session)))
     (message "Agent session %s finished (%s). Memory: %s"
              (gptel-agent-runtime-session-id session)
