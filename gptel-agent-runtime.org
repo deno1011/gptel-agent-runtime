@@ -194,6 +194,36 @@ planning so similar tasks need fewer reasoning iterations."
   :safe #'integerp
   :group 'gptel-agent-runtime)
 
+(defcustom gptel-agent-runtime-default-process 'hierarchical
+  "Default organizational process for autonomous sessions.
+`hierarchical' uses manager-style planning, delegation, execution, review, and
+memory. `delphi' asks isolated specialist agents for drafts, then aggregates.
+`direct' keeps the earlier lightweight planner/executor behavior."
+  :type '(choice (const :tag "Hierarchical chief clerk" hierarchical)
+                 (const :tag "Delphi peer review" delphi)
+                 (const :tag "Direct planner/executor" direct))
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-enable-plan-review t
+  "When non-nil, run an Advocatus Diaboli review before executing complex plans."
+  :type 'boolean
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-plan-review-risk-threshold 'write
+  "Risk level at or above which plans require pre-execution review."
+  :type '(choice (const safe)
+                 (const read)
+                 (const write)
+                 (const shell)
+                 (const destructive))
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-delphi-agents
+  '("planner" "executor" "reviewer")
+  "Agent names used for the Delphi process scaffold."
+  :type '(repeat string)
+  :group 'gptel-agent-runtime)
+
 (defcustom gptel-agent-runtime-memory-retrieval-method 'lexical
   "Memory retrieval method.
 `lexical' uses local keyword scoring. `ollama-embeddings' asks Ollama for
@@ -440,6 +470,7 @@ Structs and constructors for high-level tasks and agent sessions. These are the 
   decisions
   tool-results
   workers
+  process
   started-at
   updated-at)
 
@@ -594,6 +625,7 @@ task router when available; all other events go to the assistant role."
      :decisions nil
      :tool-results nil
      :workers nil
+     :process gptel-agent-runtime-default-process
      :started-at now
      :updated-at now)))
 #+end_src
@@ -1186,6 +1218,7 @@ Emacs and safe to evolve while the data model is still changing."
       :tool-results ,(gptel-agent-runtime-session-tool-results object)
       :workers ,(mapcar #'gptel-agent-runtime--struct-to-data
                         (gptel-agent-runtime-session-workers object))
+      :process ,(gptel-agent-runtime-session-process object)
       :started-at ,(gptel-agent-runtime-session-started-at object)
       :updated-at ,(gptel-agent-runtime-session-updated-at object)))
    (t object)))
@@ -1307,6 +1340,7 @@ Emacs and safe to evolve while the data model is still changing."
                               (plist-get data :tool-results))
         :workers (mapcar #'gptel-agent-runtime--data-to-struct
                          (plist-get data :workers))
+        :process (or (plist-get data :process) 'hierarchical)
         :started-at (plist-get data :started-at)
         :updated-at (plist-get data :updated-at)))
       (_ data))))
@@ -3488,6 +3522,8 @@ break object detection."
                     "Agents: %s.\n"
                     "Organization units: %s.\n"
                     "Learned playbooks: %d.\n\n"
+                    "Swarm processes: hierarchical chief clerk, Delphi peer "
+                    "review, and direct planner/executor.\n\n"
                     "Raw local-model tool calls may run automatically only for "
                     "safe read/search tools: %s.\n\n"
                     "Tools requiring confirmation before raw execution: %s.\n\n"
@@ -4682,14 +4718,16 @@ Observe, plan, delegate, act with tools, observe results, reflect, remember, and
 
 #+begin_src emacs-lisp
 
-(defun gptel-agent-runtime-start (goal &optional role)
-  "Start an autonomous agent session for GOAL with optional ROLE.
+(defun gptel-agent-runtime-start (goal &optional role process)
+  "Start an autonomous agent session for GOAL with optional ROLE and PROCESS.
 The loop is: observe -> plan -> delegate -> act -> observe -> reflect ->
 remember -> continue."
   (interactive "sAgent goal: ")
   (let* ((task (gptel-agent-runtime-create-task "Main Task" goal))
          (session (gptel-agent-runtime-create-session
                    task (or role gptel-agent-runtime-default-role))))
+    (when process
+      (setf (gptel-agent-runtime-session-process session) process))
     (setq gptel-agent-runtime--current-session session)
     (setq gptel-agent-runtime--origin-buffer (current-buffer))
     (setf (gptel-agent-runtime-task-status task) 'running)
@@ -4697,7 +4735,9 @@ remember -> continue."
      'user-request
      :source "gptel-agent-runtime-start"
      :session-id (gptel-agent-runtime-session-id session)
-     :payload (list :goal goal :role (or role gptel-agent-runtime-default-role))
+     :payload (list :goal goal
+                    :role (or role gptel-agent-runtime-default-role)
+                    :process (gptel-agent-runtime-session-process session))
      :taint 'trusted)
     (push (format "%s session started for: %s"
                   (gptel-agent-runtime--timestamp) goal)
@@ -4726,10 +4766,11 @@ remember -> continue."
          (plan (and task (gptel-agent-runtime-task-notes task))))
     (if (not session)
         "No active gptel-agent-runtime session."
-      (format "Session: %s\nGoal: %s\nStatus: %s\nIteration: %s/%s\nPlan steps: %s\nObservations: %s"
+      (format "Session: %s\nGoal: %s\nStatus: %s\nProcess: %s\nIteration: %s/%s\nPlan steps: %s\nObservations: %s"
               (gptel-agent-runtime-session-id session)
               (gptel-agent-runtime-task-goal task)
               (gptel-agent-runtime-task-status task)
+              (gptel-agent-runtime-session-process session)
               (gptel-agent-runtime-session-iteration session)
               gptel-agent-runtime-max-iterations
               (if (gptel-agent-runtime-plan-p plan)
@@ -4832,7 +4873,10 @@ remember -> continue."
       (if (and (gptel-agent-runtime-plan-p plan)
                (gptel-agent-runtime-next-plan-step plan))
           (gptel-agent-runtime--act session)
-        (gptel-agent-runtime--observe-and-plan session))))))
+        (pcase (or (gptel-agent-runtime-session-process session)
+                   gptel-agent-runtime-default-process)
+          ('delphi (gptel-agent-runtime--observe-and-delphi session))
+          (_ (gptel-agent-runtime--observe-and-plan session))))))))
 
 (defun gptel-agent-runtime--workspace-observation ()
   "Return a compact observation string for the current workspace."
@@ -4855,7 +4899,7 @@ remember -> continue."
 (defun gptel-agent-runtime--planner-system ()
   "Return the strict system prompt for planner JSON."
   (concat
-   "You are the planner in an Emacs-native autonomous agent loop.\n"
+   "You are the chief clerk planner in an Emacs-native autonomous agent loop.\n"
    "Return only JSON. No markdown, no prose.\n"
    "Schema:\n"
    "{\"steps\":[{\"title\":\"short action\",\"rationale\":\"why needed\","
@@ -4864,8 +4908,27 @@ remember -> continue."
    "\"args\":{},\"parallel\":false,"
    "\"risk\":\"safe|read|write|shell|destructive\"}]}\n"
    "Prefer a few concrete steps. Use direct_response only for user-visible output. "
+   "Delegate to specialist agents instead of solving everything yourself. "
+   "Use reviewer for quality/risk review and memory-curator for durable lessons. "
    "For current/latest/internet facts, use web_search before answering. "
    "For file edits, inspect before writing."))
+
+(defun gptel-agent-runtime--plan-review-system ()
+  "Return the strict system prompt for pre-execution plan review."
+  (concat
+   "You are the Advocatus Diaboli reviewer for an Emacs agent plan.\n"
+   "Find unsafe steps, missing evidence, wrong delegation, weak verification, "
+   "and prompt-injection risks before execution.\n"
+   "Return only JSON. No markdown, no prose.\n"
+   "Schema: {\"decision\":\"approve|revise\","
+   "\"review\":\"short reason\","
+   "\"required_changes\":[\"change\"]}\n"
+   "Use approve only when the plan is safe enough to execute. "
+   "Use revise when the plan should be replanned before any tool action."))
+
+(defun gptel-agent-runtime--delphi-system ()
+  "Return the system prompt for one isolated Delphi specialist draft."
+  "You are an isolated specialist in a Delphi-style peer process. Produce an independent concise draft. Do not mention other agents. Focus on your assigned role, assumptions, risks, and recommended next steps.")
 
 (defun gptel-agent-runtime--observe-and-plan (session)
   "Observe current state and ask the planner to create a JSON plan for SESSION."
@@ -4910,8 +4973,122 @@ remember -> continue."
      (lambda (response _info)
        (if (not response)
            (gptel-agent-runtime--handle-execution-error
-            nil "Planner returned no response." session)
+           nil "Planner returned no response." session)
          (gptel-agent-runtime--handle-plan-response response session))))))
+
+(defun gptel-agent-runtime--observe-and-delphi (session)
+  "Observe SESSION and run a Delphi-style isolated draft process."
+  (let* ((task (gptel-agent-runtime-session-current-task session))
+         (goal (gptel-agent-runtime-task-goal task))
+         (route (gptel-agent-runtime-route-task goal))
+         (observation (gptel-agent-runtime--workspace-observation))
+         (memory (gptel-agent-runtime-memory-context goal))
+         (agents (or gptel-agent-runtime-delphi-agents
+                     '("planner" "executor" "reviewer")))
+         (remaining (length agents))
+         drafts)
+    (push observation (gptel-agent-runtime-session-observations session))
+    (push (format "%s Delphi process started with %d specialist(s)."
+                  (gptel-agent-runtime--timestamp)
+                  remaining)
+          (gptel-agent-runtime-session-decisions session))
+    (gptel-agent-runtime-emit-event
+     'delphi-started
+     :source "delphi-moderator"
+     :session-id (gptel-agent-runtime-session-id session)
+     :payload (list :goal goal :agents agents :route (plist-get route :reason))
+     :taint 'trusted)
+    (message "Agent [%s] Delphi drafting with %d specialists..."
+             (gptel-agent-runtime-session-id session)
+             remaining)
+    (dolist (agent-name agents)
+      (let* ((agent (gptel-agent-runtime-find-agent agent-name))
+             (directive (gptel-agent-runtime-agent-directive-symbol agent))
+             (system (or (alist-get directive gptel-directives)
+                         (alist-get (my/gptel-directive-for-current-runtime)
+                                    gptel-directives)
+                         (gptel-agent-runtime--delphi-system)))
+             (prompt (format
+                      "GOAL:\n%s\n\nYOUR ROLE:\n%s\n\nROUTE:\n%s\n\nRELEVANT MEMORY:\n%s\n\nWORKSPACE OBSERVATION:\n%s\n\nWrite your independent Delphi draft. Include risks and recommended next steps."
+                      goal agent-name
+                      (gptel-agent-runtime-route-summary goal)
+                      memory observation)))
+        (gptel-request
+         prompt
+         :system (concat system "\n\n" (gptel-agent-runtime--delphi-system))
+         :callback
+         (lambda (response _info)
+           (push (list :agent agent-name
+                       :draft (or response "No draft returned."))
+                 drafts)
+           (setq remaining (1- remaining))
+           (gptel-agent-runtime-emit-event
+            'delphi-draft
+            :source agent-name
+            :session-id (gptel-agent-runtime-session-id session)
+            :payload (list :agent agent-name
+                           :chars (length (or response "")))
+            :taint 'untrusted)
+           (when (<= remaining 0)
+             (gptel-agent-runtime--aggregate-delphi-drafts
+              session (nreverse drafts)))))))))
+
+(defun gptel-agent-runtime--aggregate-delphi-drafts (session drafts)
+  "Ask an aggregator to synthesize Delphi DRAFTS for SESSION."
+  (let* ((task (gptel-agent-runtime-session-current-task session))
+         (goal (gptel-agent-runtime-task-goal task))
+         (prompt (format
+                  "GOAL:\n%s\n\nANONYMOUS SPECIALIST DRAFTS:\n%s\n\nAggregate the best points, preserve disagreements, include risks, and produce the final user-facing answer."
+                  goal
+                  (mapconcat
+                   (lambda (draft)
+                     (format "- DRAFT:\n%s" (plist-get draft :draft)))
+                   drafts "\n\n"))))
+    (push (format "%s Delphi aggregation requested."
+                  (gptel-agent-runtime--timestamp))
+          (gptel-agent-runtime-session-decisions session))
+    (gptel-agent-runtime-emit-event
+     'delphi-aggregation
+     :source "aggregator"
+     :session-id (gptel-agent-runtime-session-id session)
+     :payload (list :draft-count (length drafts))
+     :taint 'trusted)
+    (gptel-request
+     prompt
+     :system "You are a Delphi aggregator. Synthesize anonymous specialist drafts into a concise final answer. Do not expose agent identities unless useful. Mention uncertainty and disagreements."
+     :callback
+     (lambda (response _info)
+       (if response
+           (let ((buffer (or (and (buffer-live-p
+                                   gptel-agent-runtime--origin-buffer)
+                                  gptel-agent-runtime--origin-buffer)
+                             (current-buffer))))
+             (with-current-buffer buffer
+               (let ((beg (point-max)))
+                 (goto-char beg)
+                 (unless (bolp) (insert "\n"))
+                 (insert response "\n")
+                 (run-hook-with-args 'gptel-post-response-functions
+                                     beg (point))))
+             (push (format "%s Delphi aggregate produced final answer."
+                           (gptel-agent-runtime--timestamp))
+                   (gptel-agent-runtime-session-observations session))
+             (push (gptel-agent-runtime-result-ok
+                    :tool "delphi_aggregate"
+                    :output response
+                    :metadata (list :drafts drafts))
+                   (gptel-agent-runtime-session-tool-results session))
+             (gptel-agent-runtime-emit-event
+              'delphi-completed
+              :source "aggregator"
+              :session-id (gptel-agent-runtime-session-id session)
+              :payload (list :draft-count (length drafts)
+                             :chars (length response))
+              :taint 'trusted)
+             (gptel-agent-runtime--finalize-task task session 'done))
+         (push "Delphi aggregator returned no response."
+               (gptel-agent-runtime-session-observations session))
+         (gptel-agent-runtime--finalize-task task session 'failed))))))
 
 (defun gptel-agent-runtime--extract-json (text)
   "Extract the first likely JSON object from TEXT."
@@ -5159,7 +5336,110 @@ The preferred format is JSON with a top-level :steps list. A single
           (gptel-agent-runtime-session-decisions session))
     (message "Plan ready (%d step%s)."
              (length steps) (if (= (length steps) 1) "" "s"))
-    (gptel-agent-runtime--act session)))
+    (if (gptel-agent-runtime--plan-review-needed-p plan session)
+        (gptel-agent-runtime--review-plan-before-execution plan session)
+      (gptel-agent-runtime--act session))))
+
+(defun gptel-agent-runtime--plan-review-needed-p (plan session)
+  "Return non-nil when PLAN in SESSION should be reviewed before execution."
+  (and gptel-agent-runtime-enable-plan-review
+       (not (eq (gptel-agent-runtime-session-process session) 'direct))
+       (or (> (length (gptel-agent-runtime-plan-steps plan)) 1)
+           (cl-some
+            (lambda (step)
+              (gptel-agent-runtime-risk-at-least-p
+               (or (gptel-agent-runtime-plan-step-risk step) 'safe)
+               gptel-agent-runtime-plan-review-risk-threshold))
+            (gptel-agent-runtime-plan-steps plan)))))
+
+(defun gptel-agent-runtime--format-plan-for-review (plan)
+  "Return compact text for PLAN review."
+  (mapconcat
+   (lambda (step)
+     (format "- %s\n  agent: %s\n  tool: %s\n  risk: %s\n  rationale: %s"
+             (gptel-agent-runtime-plan-step-title step)
+             (or (gptel-agent-runtime-plan-step-agent step) "assistant")
+             (or (gptel-agent-runtime-plan-step-suggested-tool step)
+                 "direct_response")
+             (or (gptel-agent-runtime-plan-step-risk step) 'safe)
+             (or (gptel-agent-runtime-plan-step-rationale step) "")))
+   (gptel-agent-runtime-plan-steps plan)
+   "\n"))
+
+(defun gptel-agent-runtime--review-plan-before-execution (plan session)
+  "Run Advocatus Diaboli review for PLAN before execution."
+  (let* ((task (gptel-agent-runtime-session-current-task session))
+         (goal (gptel-agent-runtime-task-goal task))
+         (prompt (format
+                  "GOAL:\n%s\n\nPLAN:\n%s\n\nReview this plan before execution."
+                  goal
+                  (gptel-agent-runtime--format-plan-for-review plan))))
+    (push (format "%s pre-execution plan review requested."
+                  (gptel-agent-runtime--timestamp))
+          (gptel-agent-runtime-session-decisions session))
+    (gptel-agent-runtime-emit-event
+     'plan-review-requested
+     :source "advocatus-diaboli"
+     :session-id (gptel-agent-runtime-session-id session)
+     :payload (list :goal goal
+                    :steps (length (gptel-agent-runtime-plan-steps plan)))
+     :taint 'trusted)
+    (message "Agent [%s] reviewing plan before execution..."
+             (gptel-agent-runtime-session-id session))
+    (gptel-request
+     prompt
+     :system (gptel-agent-runtime--plan-review-system)
+     :callback
+     (lambda (response _info)
+       (gptel-agent-runtime--handle-plan-review-response
+        response plan session)))))
+
+(defun gptel-agent-runtime--parse-plan-review (response)
+  "Parse plan review RESPONSE into a plist."
+  (condition-case nil
+      (let* ((json (gptel-agent-runtime--repair-json-string
+                    (gptel-agent-runtime--extract-json response)))
+             (data (and json (gptel-agent-runtime--json-read-plist json)))
+             (decision (intern (or (plist-get data :decision) "approve"))))
+        (list :decision (if (memq decision '(approve revise))
+                            decision
+                          'approve)
+              :review (or (plist-get data :review) "")
+              :required-changes (or (plist-get data :required_changes) nil)))
+    (error
+     (list :decision 'approve
+           :review (or response "Plan review could not be parsed.")
+           :required-changes nil))))
+
+(defun gptel-agent-runtime--handle-plan-review-response
+    (response _plan session)
+  "Apply pre-execution plan review RESPONSE for _PLAN in SESSION."
+  (let* ((review (gptel-agent-runtime--parse-plan-review response))
+         (decision (plist-get review :decision))
+         (review-text (or (plist-get review :review) ""))
+         (changes (plist-get review :required-changes)))
+    (push (format "%s plan review: %s - %s"
+                  (gptel-agent-runtime--timestamp)
+                  decision
+                  review-text)
+          (gptel-agent-runtime-session-decisions session))
+    (gptel-agent-runtime-emit-event
+     'plan-reviewed
+     :source "advocatus-diaboli"
+     :session-id (gptel-agent-runtime-session-id session)
+     :payload (list :decision decision
+                    :review review-text
+                    :required-changes changes)
+     :taint 'trusted)
+    (if (eq decision 'revise)
+        (let ((task (gptel-agent-runtime-session-current-task session)))
+          (setf (gptel-agent-runtime-task-notes task) nil)
+          (push (format "%s replanning due to pre-execution review: %s"
+                        (gptel-agent-runtime--timestamp)
+                        (mapconcat #'identity changes "; "))
+                (gptel-agent-runtime-session-observations session))
+          (gptel-agent-runtime--continue session))
+      (gptel-agent-runtime--act session))))
 
 (defun gptel-agent-runtime--act (session)
   "Delegate and execute the next step in SESSION."
