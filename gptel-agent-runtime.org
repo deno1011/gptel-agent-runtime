@@ -210,6 +210,29 @@ usable by the assistant."
   :safe #'integerp
   :group 'gptel-agent-runtime)
 
+(defcustom gptel-agent-runtime-trace-buffer-name "*gptel-agent-trace*"
+  "Buffer name used for internal agent trace output."
+  :type 'string
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-show-chat-status-markers t
+  "When non-nil, insert compact agent job status markers in gptel buffers."
+  :type 'boolean
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-show-raw-tool-observations-in-chat nil
+  "When non-nil, also insert raw tool observations in the gptel chat buffer.
+By default observations are written to `gptel-agent-runtime-trace-buffer-name'
+and only the final continuation is inserted in chat."
+  :type 'boolean
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-hide-raw-tool-calls-in-chat t
+  "When non-nil, remove handled raw JSON tool-call text from gptel chat.
+The original raw text is still written to the trace buffer."
+  :type 'boolean
+  :group 'gptel-agent-runtime)
+
 (defcustom gptel-agent-runtime-enable-parallel-mutations t
   "When non-nil, allow non-conflicting write-risk tools to run as workers.
 This only applies when the step passes safety checks and confirmation policy
@@ -2670,6 +2693,64 @@ break object detection."
 (defvar-local gptel-agent-runtime--raw-tool-continuation-running nil
   "Non-nil while a raw tool continuation request is pending in this buffer.")
 
+(defvar gptel-agent-runtime--job-sequence 0
+  "Monotonic sequence for lightweight chat jobs.")
+
+(defvar-local gptel-agent-runtime--current-raw-tool-job-id nil
+  "Current raw tool continuation job id for this gptel buffer.")
+
+(defvar-local gptel-agent-runtime--cancelled-raw-tool-job-ids nil
+  "Cancelled raw tool continuation job ids for this gptel buffer.")
+
+(defun gptel-agent-runtime-trace-buffer ()
+  "Return the agent trace buffer, creating it when needed."
+  (get-buffer-create gptel-agent-runtime-trace-buffer-name))
+
+(defun gptel-agent-runtime-show-trace ()
+  "Display the agent trace buffer."
+  (interactive)
+  (display-buffer (gptel-agent-runtime-trace-buffer)))
+
+(defun gptel-agent-runtime--trace (job-id format-string &rest args)
+  "Append a trace line for JOB-ID using FORMAT-STRING and ARGS."
+  (with-current-buffer (gptel-agent-runtime-trace-buffer)
+    (goto-char (point-max))
+    (insert (format "[%s] %s %s\n"
+                    (format-time-string "%Y-%m-%d %H:%M:%S")
+                    (or job-id "agent")
+                    (apply #'format format-string args)))))
+
+(defun gptel-agent-runtime--next-job-id ()
+  "Return a new lightweight agent job id."
+  (setq gptel-agent-runtime--job-sequence
+        (1+ gptel-agent-runtime--job-sequence))
+  (format "agent-job-%s-%04d"
+          (format-time-string "%Y%m%d%H%M%S")
+          gptel-agent-runtime--job-sequence))
+
+(defun gptel-agent-runtime--job-cancelled-p (job-id)
+  "Return non-nil when JOB-ID has been cancelled in the current buffer."
+  (member job-id gptel-agent-runtime--cancelled-raw-tool-job-ids))
+
+(defun gptel-agent-runtime-cancel-current-job ()
+  "Cancel the current raw tool continuation job in this buffer."
+  (interactive)
+  (when gptel-agent-runtime--current-raw-tool-job-id
+    (push gptel-agent-runtime--current-raw-tool-job-id
+          gptel-agent-runtime--cancelled-raw-tool-job-ids)
+    (gptel-agent-runtime--trace
+     gptel-agent-runtime--current-raw-tool-job-id
+     "cancelled because a newer user request started")
+    (setq-local gptel-agent-runtime--raw-tool-continuation-running nil)
+    (setq-local gptel-agent-runtime--current-raw-tool-job-id nil)))
+
+(defun gptel-agent-runtime--chat-status (format-string &rest args)
+  "Insert a compact agent status line in the current chat buffer."
+  (when gptel-agent-runtime-show-chat-status-markers
+    (goto-char (point-max))
+    (unless (bolp) (insert "\n"))
+    (insert (apply #'format format-string args) "\n")))
+
 (defun gptel-agent-runtime-capability-summary ()
   "Return a deterministic summary of registered Emacs agent capabilities."
   (let* ((tools (sort (mapcar #'gptel-tool-name (or (my/gptel-tools-all) nil))
@@ -2694,7 +2775,7 @@ break object detection."
 (defun gptel-agent-runtime--raw-tool-success-observation-p (observation)
   "Return non-nil when OBSERVATION is a successful raw tool observation."
   (and (stringp observation)
-       (string-prefix-p "Tool `" observation)
+       (string-prefix-p "Tool " observation)
        (string-match-p " observation:\n" observation)))
 
 (defun gptel-agent-runtime--raw-tool-continuation-prompt (observations)
@@ -2713,7 +2794,7 @@ break object detection."
           (mapconcat #'identity observations "\n\n")
           (gptel-agent-runtime-capability-summary)))
 
-(defun gptel-agent-runtime--request-raw-tool-continuation (observations)
+(defun gptel-agent-runtime--request-raw-tool-continuation (observations job-id)
   "Ask the model for a natural continuation after OBSERVATIONS."
   (when (and gptel-agent-runtime-auto-continue-after-raw-tools
              observations
@@ -2731,6 +2812,7 @@ break object detection."
                                  gptel-directives)
                       "You are an Emacs assistant.")))
       (message "gptel-agent-runtime: continuing after raw tool observation...")
+      (gptel-agent-runtime--trace job-id "requesting model continuation")
       (with-current-buffer buffer
         (setq-local gptel-agent-runtime--raw-tool-continuation-running t))
       (let ((gptel-agent-runtime--raw-tool-continuation-depth depth))
@@ -2744,45 +2826,81 @@ break object detection."
            (when (buffer-live-p buffer)
              (with-current-buffer buffer
                (setq-local gptel-agent-runtime--raw-tool-continuation-running nil)
-               (when (stringp response)
+               (cond
+                ((gptel-agent-runtime--job-cancelled-p job-id)
+                 (gptel-agent-runtime--trace
+                  job-id "discarded late continuation because job is cancelled"))
+                ((not (equal job-id gptel-agent-runtime--current-raw-tool-job-id))
+                 (gptel-agent-runtime--trace
+                  job-id "discarded late continuation because another job is active"))
+                ((stringp response)
                  (let ((beg (point-max))
                        (gptel-agent-runtime--raw-tool-continuation-depth depth))
+                   (gptel-agent-runtime--trace
+                    job-id "received continuation (%d chars)" (length response))
                    (goto-char beg)
                    (unless (bolp) (insert "\n"))
-                   (insert "\nAssistant continuation:\n\n")
                    (insert response)
                    (unless (bolp) (insert "\n"))
+                   (setq-local gptel-agent-runtime--current-raw-tool-job-id nil)
+                   (gptel-agent-runtime--trace job-id "done")
                    (run-hook-with-args
-                    'gptel-post-response-functions beg (point))))))))))))
+                    'gptel-post-response-functions beg (point))))
+                (t
+                 (gptel-agent-runtime--trace
+                  job-id "continuation returned no string response")))))))))))
 
 (defun gptel-agent-runtime-execute-raw-tool-calls (beg end)
   "Execute safe raw JSON tool calls emitted as assistant text.
 This is a compatibility shim for local models that know tool-call syntax but do
 not return native gptel tool-call messages."
-  (let ((calls (gptel-agent-runtime--raw-tool-calls-in-region beg end)))
+  (let ((calls (gptel-agent-runtime--raw-tool-calls-in-region beg end))
+        (raw-response (buffer-substring-no-properties beg end)))
     (when calls
+      (let ((job-id (or gptel-agent-runtime--current-raw-tool-job-id
+                        (gptel-agent-runtime--next-job-id))))
+        (setq-local gptel-agent-runtime--current-raw-tool-job-id job-id)
+        (gptel-agent-runtime--trace
+         job-id "detected %d raw tool call(s)" (length calls))
+        (gptel-agent-runtime--trace job-id "raw assistant text:\n%s" raw-response)
+        (when gptel-agent-runtime-hide-raw-tool-calls-in-chat
+          (delete-region beg end)
+          (setq end beg))
       (if (>= gptel-agent-runtime--raw-tool-continuation-depth
               gptel-agent-runtime-raw-tool-auto-continue-depth)
           (progn
-            (goto-char end)
-            (unless (bolp) (insert "\n"))
-            (insert "\nRaw tool calls ignored: continuation depth limit reached.\n")
+            (gptel-agent-runtime--trace
+             job-id "raw tool calls ignored: continuation depth limit reached")
+            (when gptel-agent-runtime-show-raw-tool-observations-in-chat
+              (goto-char end)
+              (unless (bolp) (insert "\n"))
+              (insert "\nRaw tool calls ignored: continuation depth limit reached.\n"))
             nil)
         (goto-char end)
-        (unless (bolp) (insert "\n"))
-        (insert "\nRaw tool observations:\n")
+        (gptel-agent-runtime--chat-status
+         "[agent %s running raw tool(s); details in %s]"
+         job-id gptel-agent-runtime-trace-buffer-name)
+        (when gptel-agent-runtime-show-raw-tool-observations-in-chat
+          (unless (bolp) (insert "\n"))
+          (insert "\nRaw tool observations:\n"))
         (let (observations)
           (dolist (call calls)
+            (gptel-agent-runtime--trace
+             job-id "calling raw tool `%s' with args %S"
+             (plist-get call :name)
+             (plist-get call :arguments))
             (let ((observation (gptel-agent-runtime--execute-raw-tool-call call)))
               (push observation observations)
-              (insert "\n#+begin_example\n")
-              (insert observation)
-              (insert "\n#+end_example\n")))
+              (gptel-agent-runtime--trace job-id "%s" observation)
+              (when gptel-agent-runtime-show-raw-tool-observations-in-chat
+                (insert "\n#+begin_example\n")
+                (insert observation)
+                (insert "\n#+end_example\n"))))
           (let ((successful (cl-remove-if-not
                              #'gptel-agent-runtime--raw-tool-success-observation-p
                              (nreverse observations))))
-            (gptel-agent-runtime--request-raw-tool-continuation successful)
-            successful))))))
+            (gptel-agent-runtime--request-raw-tool-continuation successful job-id)
+            successful)))))))
 
 (defun claude-executor-response-hook (beg end)
   "Hook for Babel blocks, exec-tags and auto-pattern matching.
@@ -3175,6 +3293,7 @@ Each entry is a plist with :state :heading :file :deadline :tags."
 
 (defun my/gptel--inject-context (orig-fn &rest args)
   "Around advice for `gptel-send': route, sync directive, and prepend context."
+  (gptel-agent-runtime-cancel-current-job)
   (if (not my/gptel-context-enabled)
       (progn
         (my/gptel-sync-directive-for-current-runtime)
