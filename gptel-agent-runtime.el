@@ -227,6 +227,15 @@ The command must accept: COMMAND --schemafile SCHEMA INSTANCE."
   :type '(repeat regexp)
   :group 'gptel-agent-runtime)
 
+(defcustom gptel-agent-runtime-blocked-placeholder-patterns
+  '("\\byour[_-]?api[_-]?key\\b"
+    "\\bYOUR[_-]?API[_-]?KEY\\b"
+    "\\breplace[[:space:]]+.*api[[:space:]_-]*key\\b"
+    "\\bapi[_-]?key=your")
+  "Regexps for placeholder credentials that must not be executed."
+  :type '(repeat regexp)
+  :group 'gptel-agent-runtime)
+
 (defcustom gptel-agent-runtime-allowed-write-roots
   nil
   "Directories where autonomous write tools may write without extra policy errors.
@@ -438,6 +447,14 @@ Allowed values are `safe', `read', `write', `shell', and `destructive'."
           (string-match-p pattern command))
         gptel-agent-runtime-blocked-shell-patterns)))
 
+(defun gptel-agent-runtime-placeholder-command-p (command)
+  "Return non-nil when COMMAND contains placeholder credentials."
+  (and (stringp command)
+       (cl-some
+        (lambda (pattern)
+          (string-match-p pattern command))
+        gptel-agent-runtime-blocked-placeholder-patterns)))
+
 (defun gptel-agent-runtime--plist-values-for-keys (plist keys)
   "Return values from PLIST for KEYS."
   (delq nil
@@ -469,6 +486,9 @@ Allowed values are `safe', `read', `write', `shell', and `destructive'."
            (gptel-agent-runtime-risk-at-least-p risk 'shell)
            (gptel-agent-runtime-blocked-shell-command-p command))
       "Step contains a blocked shell/destructive command pattern.")
+     ((and (member tool '("execute_code" "run_elisp"))
+           (gptel-agent-runtime-placeholder-command-p command))
+      "Step contains placeholder credentials/API keys and was not executed.")
      ((and (member tool '("execute_code"))
            (stringp (plist-get args :language))
            (member (downcase (plist-get args :language)) '("bash" "sh"))
@@ -2647,25 +2667,87 @@ break object detection."
   "Return non-nil when OBSERVATION is a successful raw tool observation."
   (and (stringp observation)
        (string-prefix-p "Tool " observation)
-       (string-match-p " observation:\n" observation)))
+       (string-match-p " observation:\n" observation)
+       (not (string-match-p "\n\\s-*\\(?:((null) (null))\\|(null)\\|nil\\|None\\|null\\|Error:\\)\\s-*\\'"
+                            observation))))
 
-(defun gptel-agent-runtime--raw-tool-continuation-prompt (observations)
+(defun gptel-agent-runtime--recent-user-request-before (position)
+  "Return recent likely user request text before POSITION."
+  (save-excursion
+    (save-restriction
+      (widen)
+      (let* ((end (copy-marker position))
+             (start (max (point-min) (- position 2500)))
+             (text (buffer-substring-no-properties start end))
+             (lines (split-string text "\n" t "[[:space:]]+")))
+        (string-trim
+         (or (cl-find-if
+              (lambda (line)
+                (and (not (string-prefix-p "[agent " line))
+                     (not (string-prefix-p "#+begin" line))
+                     (not (string-prefix-p "#+end" line))
+                     (not (string-prefix-p "{\"name\"" (string-trim-left line)))
+                     (> (length (string-trim line)) 8)))
+              (reverse lines))
+             text))))))
+
+(defun gptel-agent-runtime--raw-response-user-text (raw-response)
+  "Return likely user-facing text from RAW-RESPONSE, excluding JSON objects."
+  (let ((text raw-response))
+    (dolist (object (gptel-agent-runtime--json-object-strings raw-response))
+      (setq text (replace-regexp-in-string
+                  (regexp-quote object) "" text t t)))
+    (string-trim
+     (mapconcat
+      #'identity
+      (cl-remove-if
+       (lambda (line)
+         (let ((trimmed (string-trim line)))
+           (or (string-empty-p trimmed)
+               (string-prefix-p "Please replace" trimmed)
+               (string-prefix-p "Raw tool" trimmed))))
+       (split-string text "\n"))
+      "\n"))))
+
+(defun gptel-agent-runtime--short-observation-reason (observation)
+  "Return a compact one-line reason extracted from OBSERVATION."
+  (let* ((line (car (split-string (or observation "") "\n" t)))
+         (line (or line "tool observation was not usable")))
+    (cond
+     ((string-match-p "\n\\s-*\\(?:((null) (null))\\|(null)\\|nil\\|None\\|null\\)\\s-*\\'"
+                      (or observation ""))
+      "tool returned an empty/null observation")
+     ((string-match-p "^Tool `[^']+' observation:\\s-*$" line)
+      "tool observation was empty")
+     (t
+      (string-trim
+       (if (> (length line) 140)
+           (concat (substring line 0 137) "...")
+         line))))))
+
+(defun gptel-agent-runtime--raw-tool-continuation-prompt
+    (observations user-request)
   "Build a continuation prompt for raw tool OBSERVATIONS."
   (format (concat "The previous assistant message contained raw JSON tool "
                   "call(s). Emacs executed the call(s) and produced these "
-                  "observations:\n\n%s\n\nCurrent capability summary:\n\n%s\n\n"
+                  "observations:\n\n%s\n\nOriginal user request:\n\n%s\n\n"
+                  "Current capability summary:\n\n%s\n\n"
                   "Continue the conversation naturally. "
-                  "Use the observations to answer the user's request. Do not "
-                  "repeat the JSON tool call. Do not invent direct Elisp "
-                  "function-call syntax for tools. If the user asked what you "
-                  "can do in Emacs, summarize the concrete capabilities from "
-                  "the summary and observations, and mention that code/write "
-                  "actions require confirmation. Do not apologize unless the "
-                  "user-facing task actually failed.")
+                  "Answer the original user request, not a generic capability "
+                  "question. Use only successful observations and the capability "
+                  "summary. Do not repeat the JSON tool call. Do not invent "
+                  "direct Elisp function-call syntax for tools. If the original "
+                  "request asked what you can do in Emacs, summarize concrete "
+                  "capabilities from the summary and observations. If the "
+                  "observation is insufficient for the original request, say "
+                  "what is missing and which safe tool should be used next. "
+                  "Do not apologize unless the user-facing task actually failed.")
           (mapconcat #'identity observations "\n\n")
+          (or user-request "")
           (gptel-agent-runtime-capability-summary)))
 
-(defun gptel-agent-runtime--request-raw-tool-continuation (observations job-id)
+(defun gptel-agent-runtime--request-raw-tool-continuation
+    (observations job-id user-request)
   "Ask the model for a natural continuation after OBSERVATIONS."
   (when (and gptel-agent-runtime-auto-continue-after-raw-tools
              observations
@@ -2676,7 +2758,7 @@ break object detection."
     (let ((buffer (current-buffer))
           (depth (1+ gptel-agent-runtime--raw-tool-continuation-depth))
           (prompt (gptel-agent-runtime--raw-tool-continuation-prompt
-                   observations))
+                   observations user-request))
           (system (or (and (boundp 'gptel--system-message)
                            gptel--system-message)
                       (alist-get (my/gptel-directive-for-current-runtime)
@@ -2725,14 +2807,19 @@ break object detection."
   "Execute safe raw JSON tool calls emitted as assistant text.
 This is a compatibility shim for local models that know tool-call syntax but do
 not return native gptel tool-call messages."
-  (let ((calls (gptel-agent-runtime--raw-tool-calls-in-region beg end))
-        (raw-response (buffer-substring-no-properties beg end)))
+  (let* ((calls (gptel-agent-runtime--raw-tool-calls-in-region beg end))
+         (raw-response (buffer-substring-no-properties beg end))
+         (recent-request (gptel-agent-runtime--recent-user-request-before beg))
+         (user-request (if (string-empty-p recent-request)
+                           (gptel-agent-runtime--raw-response-user-text raw-response)
+                         recent-request)))
     (when calls
       (let ((job-id (or gptel-agent-runtime--current-raw-tool-job-id
                         (gptel-agent-runtime--next-job-id))))
         (setq-local gptel-agent-runtime--current-raw-tool-job-id job-id)
         (gptel-agent-runtime--trace
          job-id "detected %d raw tool call(s)" (length calls))
+        (gptel-agent-runtime--trace job-id "original user request: %s" user-request)
         (gptel-agent-runtime--trace job-id "raw assistant text:\n%s" raw-response)
         (when gptel-agent-runtime-hide-raw-tool-calls-in-chat
           (delete-region beg end)
@@ -2767,10 +2854,23 @@ not return native gptel tool-call messages."
                 (insert "\n#+begin_example\n")
                 (insert observation)
                 (insert "\n#+end_example\n"))))
-          (let ((successful (cl-remove-if-not
-                             #'gptel-agent-runtime--raw-tool-success-observation-p
-                             (nreverse observations))))
-            (gptel-agent-runtime--request-raw-tool-continuation successful job-id)
+          (let* ((ordered-observations (nreverse observations))
+                 (successful (cl-remove-if-not
+                              #'gptel-agent-runtime--raw-tool-success-observation-p
+                              ordered-observations)))
+            (if successful
+                (gptel-agent-runtime--request-raw-tool-continuation
+                 successful job-id user-request)
+              (progn
+                (gptel-agent-runtime--trace
+                 job-id "no successful observations; no continuation requested")
+                (setq-local gptel-agent-runtime--current-raw-tool-job-id nil)
+                (gptel-agent-runtime--chat-status
+                 "[agent %s stopped: %s; details in %s]"
+                 job-id
+                 (gptel-agent-runtime--short-observation-reason
+                  (car ordered-observations))
+                 gptel-agent-runtime-trace-buffer-name)))
             successful)))))))
 
 (defun claude-executor-response-hook (beg end)
