@@ -128,6 +128,14 @@ Write, shell, and destructive actions still honor
   :safe #'integerp
   :group 'gptel-agent-runtime)
 
+(defcustom gptel-agent-runtime-event-log-ignore-write-errors t
+  "When non-nil, keep running if the append-only event log cannot be written.
+This prevents parallel batch tests or multiple Emacs processes from failing the
+agent runtime because of transient file locks or filesystem write errors. The
+in-memory event log and live swarm buffer still receive the event."
+  :type 'boolean
+  :group 'gptel-agent-runtime)
+
 (defcustom gptel-agent-runtime-policy-enabled t
   "When non-nil, route tool execution through the configurable policy broker."
   :type 'boolean
@@ -586,6 +594,22 @@ the server find models downloaded to a non-default location."
     :taint ,(gptel-agent-runtime-event-taint event)
     :created-at ,(gptel-agent-runtime-event-created-at event)))
 
+(defun gptel-agent-runtime--append-event-log-data (data)
+  "Append printable event DATA to `gptel-agent-runtime-event-log-file'."
+  (condition-case err
+      (let ((create-lockfiles nil))
+        (make-directory (gptel-agent-runtime--event-log-directory) t)
+        (with-temp-buffer
+          (prin1 data (current-buffer))
+          (insert "\n")
+          (append-to-file (point-min) (point-max)
+                          gptel-agent-runtime-event-log-file)))
+    (file-error
+     (if gptel-agent-runtime-event-log-ignore-write-errors
+         (message "gptel-agent-runtime: event log append skipped: %s"
+                  (error-message-string err))
+       (signal (car err) (cdr err))))))
+
 (defun gptel-agent-runtime--shorten (text &optional max)
   "Return TEXT truncated to MAX characters."
   (let* ((max (or max 220))
@@ -767,12 +791,7 @@ TAINT is normally `trusted' or `untrusted'."
                       gptel-agent-runtime-event-log)
               nil))
     (when gptel-agent-runtime-event-log-enabled
-      (make-directory (gptel-agent-runtime--event-log-directory) t)
-      (with-temp-buffer
-        (prin1 data (current-buffer))
-        (insert "\n")
-        (append-to-file (point-min) (point-max)
-                        gptel-agent-runtime-event-log-file)))
+      (gptel-agent-runtime--append-event-log-data data))
     (gptel-agent-runtime--append-swarm-event event)
     event))
 
