@@ -6885,6 +6885,80 @@ CONTEXT is passed to the policy broker."
         :tool (gptel-tool-name tool)
         :output (format "%s" result))))))
 
+(defun gptel-agent-runtime--local-output-path (path)
+  "Return expanded local output PATH, or nil for remote/URL-like paths."
+  (when (and (stringp path)
+             (not (string-empty-p (string-trim path)))
+             (not (string-match-p "\\`[a-z][a-z0-9+.-]*:" path)))
+    (expand-file-name (string-trim path))))
+
+(defun gptel-agent-runtime--extract-exported-path (output)
+  "Return exported file path parsed from tool OUTPUT, or nil."
+  (when (and (stringp output)
+             (string-match "Exported to:[[:space:]]*\\(.+\\)" output))
+    (gptel-agent-runtime--local-output-path (match-string 1 output))))
+
+(defun gptel-agent-runtime--extract-inline-output-paths (text)
+  "Return local file paths referenced by Org links or :file headers in TEXT."
+  (let (paths)
+    (when (stringp text)
+      (with-temp-buffer
+        (insert text)
+        (goto-char (point-min))
+        (while (re-search-forward "\\[\\[file:\\([^]\n]+\\)\\]\\]" nil t)
+          (let ((path (gptel-agent-runtime--local-output-path
+                       (match-string-no-properties 1))))
+            (when path (push path paths))))
+        (goto-char (point-min))
+        (while (re-search-forward
+                "^[[:space:]]*#\\+begin_src\\b.*[[:space:]]:file[[:space:]]+\\(\"[^\"]+\"\\|'[^']+'\\|[^[:space:]\n]+\\)"
+                nil t)
+          (let* ((raw (match-string-no-properties 1))
+                 (unquoted (string-trim raw "[\"']" "[\"']"))
+                 (path (gptel-agent-runtime--local-output-path unquoted)))
+            (when path (push path paths))))))
+    (delete-dups (nreverse paths))))
+
+(defun gptel-agent-runtime--file-content-equal-p (path content)
+  "Return non-nil when PATH exists and its full contents equal CONTENT."
+  (and (stringp path)
+       (file-exists-p path)
+       (stringp content)
+       (with-temp-buffer
+         (insert-file-contents path)
+         (string= (buffer-string) content))))
+
+(defun gptel-agent-runtime--org-heading-state-tags-deadline
+    (file heading &optional state tag deadline)
+  "Return non-nil when FILE contains HEADING with optional STATE, TAG, DEADLINE."
+  (and (stringp file)
+       (file-exists-p file)
+       (stringp heading)
+       (with-temp-buffer
+         (insert-file-contents file)
+         (org-mode)
+         (let (found)
+           (org-map-entries
+            (lambda ()
+              (when (string= (org-get-heading t t t t) heading)
+                (let ((state-ok (or (null state)
+                                    (string-empty-p state)
+                                    (equal (org-get-todo-state) state)))
+                      (tag-ok (or (null tag)
+                                  (string-empty-p tag)
+                                  (member tag (org-get-tags nil t))))
+                      (deadline-ok
+                       (or (null deadline)
+                           (string-empty-p deadline)
+                           (let ((value (org-entry-get nil "DEADLINE")))
+                             (and value
+                                  (string-match-p
+                                   (regexp-quote deadline) value))))))
+                  (when (and state-ok tag-ok deadline-ok)
+                    (setq found t)))))
+            nil nil)
+           found))))
+
 (defun gptel-agent-runtime--verify-step-result (step result)
   "Return nil when RESULT verifies for STEP, or a failure reason."
   (let* ((tool (or (gptel-agent-runtime-action-result-tool result) ""))
@@ -6906,6 +6980,15 @@ CONTEXT is passed to the policy broker."
                     (string-match-p "\\\\(" output)
                     (string-match-p "\\$[^$]+\\$" output))))
       "Inline-rendering response did not contain Org source, file link, or math.")
+     ((and (member "inline-rendering" skills)
+           (member tool '("direct_response" "parallel-direct-response"))
+           (let ((paths (gptel-agent-runtime--extract-inline-output-paths
+                         output)))
+             (and paths
+                  (cl-some (lambda (path)
+                             (not (file-exists-p path)))
+                           paths))))
+      "Inline-rendering response referenced an image/output file that does not exist.")
      ((and (member "web-research" skills)
            (member tool '("direct_response" "parallel-direct-response"))
            (not (string-match-p "\\(https?://\\|\\[\\[https?://\\)" output)))
@@ -6923,13 +7006,62 @@ CONTEXT is passed to the policy broker."
            (plist-get args :path)
            (not (file-exists-p (expand-file-name (plist-get args :path)))))
       "Write tool reported success but target file does not exist.")
+     ((and (member tool '("write_file" "write_org_file"))
+           (plist-get args :path)
+           (plist-get args :content)
+           (not (gptel-agent-runtime--file-content-equal-p
+                 (expand-file-name (plist-get args :path))
+                 (plist-get args :content))))
+      "Write tool target content does not match requested content.")
      ((and (member tool '("add_todo" "change_todo_state" "set_deadline"
                           "add_tag"))
            (string-match-p "\\(not found\\|Error\\)" output))
       "Org mutation tool reported a failed mutation.")
+     ((and (equal tool "add_todo")
+           (plist-get args :file)
+           (plist-get args :heading)
+           (not (gptel-agent-runtime--org-heading-state-tags-deadline
+                 (expand-file-name (plist-get args :file))
+                 (plist-get args :heading)
+                 (plist-get args :state))))
+      "add_todo did not create the requested Org heading/state.")
+     ((and (equal tool "change_todo_state")
+           (plist-get args :file)
+           (plist-get args :heading)
+           (plist-get args :state)
+           (not (gptel-agent-runtime--org-heading-state-tags-deadline
+                 (expand-file-name (plist-get args :file))
+                 (plist-get args :heading)
+                 (plist-get args :state))))
+      "change_todo_state did not leave the heading in the requested state.")
+     ((and (equal tool "set_deadline")
+           (plist-get args :file)
+           (plist-get args :heading)
+           (plist-get args :date)
+           (not (gptel-agent-runtime--org-heading-state-tags-deadline
+                 (expand-file-name (plist-get args :file))
+                 (plist-get args :heading)
+                 nil nil
+                 (plist-get args :date))))
+      "set_deadline did not leave the requested deadline on the heading.")
+     ((and (equal tool "add_tag")
+           (plist-get args :file)
+           (plist-get args :heading)
+           (plist-get args :tag)
+           (not (gptel-agent-runtime--org-heading-state-tags-deadline
+                 (expand-file-name (plist-get args :file))
+                 (plist-get args :heading)
+                 nil
+                 (plist-get args :tag))))
+      "add_tag did not leave the requested tag on the heading.")
      ((and (equal tool "org_export")
            (not (string-match-p "\\(Exported to:\\|Export error\\)" output)))
       "Org export output did not report export status.")
+     ((and (equal tool "org_export")
+           (string-match-p "Exported to:" output)
+           (not (let ((path (gptel-agent-runtime--extract-exported-path output)))
+                  (and path (file-exists-p path)))))
+      "Org export reported an output file that does not exist.")
      ((and (equal tool "execute_code")
            (string-match-p "\\`Error:" output))
       "Code execution reported an error.")
