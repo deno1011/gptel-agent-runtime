@@ -734,6 +734,9 @@ the server find models downloaded to a non-default location."
              (format "WORKER %s finished: %s"
                      (or (plist-get payload :worker) "")
                      (or (plist-get payload :status) "")))
+            ('parallel-workers-completed
+             (format "ROUTER completed worker batch: %s"
+                     (gptel-agent-runtime--payload-text payload :summary 260)))
             ('action-requested
              (format "TOOL-BROKER action requested: %s by %s risk=%s"
                      (or (plist-get payload :tool) "")
@@ -7322,6 +7325,57 @@ CONTEXT is passed to the policy broker."
            '(queued running requeued)))
    (gptel-agent-runtime-session-workers session)))
 
+(defun gptel-agent-runtime--worker-result-line (worker)
+  "Return one compact result line for WORKER."
+  (let ((result (gptel-agent-runtime-worker-result worker)))
+    (format "- [%s] %s via %s attempts=%s/%s%s%s"
+            (gptel-agent-runtime-worker-status worker)
+            (or (gptel-agent-runtime-worker-step-title worker)
+                (gptel-agent-runtime-worker-step-id worker)
+                "")
+            (or (gptel-agent-runtime-worker-tool worker) "")
+            (or (gptel-agent-runtime-worker-attempts worker) 0)
+            (or (gptel-agent-runtime-worker-max-retries worker) 0)
+            (if (gptel-agent-runtime-worker-error worker)
+                (format " error=%s"
+                        (gptel-agent-runtime--shorten
+                         (gptel-agent-runtime-worker-error worker) 180))
+              "")
+            (if result
+                (format "\n  result=%s"
+                        (gptel-agent-runtime--shorten
+                         (if (gptel-agent-runtime-action-result-p result)
+                             (or (gptel-agent-runtime-action-result-output result)
+                                 (gptel-agent-runtime-action-result-error result)
+                                 "")
+                           result)
+                         260))
+              ""))))
+
+(defun gptel-agent-runtime--worker-results-summary (session)
+  "Return aggregate status for SESSION workers."
+  (let ((workers (reverse (gptel-agent-runtime-session-workers session))))
+    (if workers
+        (mapconcat #'gptel-agent-runtime--worker-result-line workers "\n")
+      "No worker results.")))
+
+(defun gptel-agent-runtime--complete-parallel-worker-batch (session)
+  "Record aggregate worker results for SESSION before reviewer reflection."
+  (let ((summary (gptel-agent-runtime--worker-results-summary session)))
+    (push (format "%s parallel worker batch completed:\n%s"
+                  (gptel-agent-runtime--timestamp)
+                  summary)
+          (gptel-agent-runtime-session-decisions session))
+    (gptel-agent-runtime-emit-event
+     'parallel-workers-completed
+     :source "worker-queue"
+     :session-id (gptel-agent-runtime-session-id session)
+     :payload (list :summary summary
+                    :workers (length (gptel-agent-runtime-session-workers
+                                      session)))
+     :taint 'trusted)
+    summary))
+
 (defun gptel-agent-runtime--observe-result (step session result)
   "Record RESULT for STEP, then ask the reviewer to reflect."
   (let* ((verification-error
@@ -7371,6 +7425,8 @@ CONTEXT is passed to the policy broker."
                   'failed))
           (gptel-agent-runtime-memory-write-session session)
           (message "Worker finished; waiting for remaining parallel workers."))
+      (when worker-p
+        (gptel-agent-runtime--complete-parallel-worker-batch session))
       (gptel-agent-runtime--reflect step result session))))
 
 (defun gptel-agent-runtime--reflection-system ()
@@ -7391,8 +7447,12 @@ CONTEXT is passed to the policy broker."
   "Reflect on RESULT of STEP in SESSION and decide how to continue."
   (let* ((task (gptel-agent-runtime-session-current-task session))
          (plan (gptel-agent-runtime-task-notes task))
+         (worker-summary
+          (when (plist-get (gptel-agent-runtime-action-result-metadata result)
+                           :worker)
+            (gptel-agent-runtime--worker-results-summary session)))
          (prompt (format
-                  "GOAL:\n%s\n\nPLAN STATUS:\n%s\n\nSTEP:\n%s\n\nRESULT STATUS: %s\nOUTPUT:\n%s\nERROR:\n%s\n\nDecide the next loop state."
+                  "GOAL:\n%s\n\nPLAN STATUS:\n%s\n\nSTEP:\n%s\n\nRESULT STATUS: %s\nOUTPUT:\n%s\nERROR:\n%s%s\n\nDecide the next loop state."
                   (gptel-agent-runtime-task-goal task)
                   (mapconcat
                    (lambda (s)
@@ -7412,7 +7472,14 @@ CONTEXT is passed to the policy broker."
                    "tool error"
                    (or (gptel-agent-runtime-action-result-error result) "")
                    (or (gptel-agent-runtime-action-result-tool result)
-                       "tool")))))
+                       "tool"))
+                  (if worker-summary
+                      (format "\n\nPARALLEL WORKER RESULTS:\n%s"
+                              (gptel-agent-runtime-untrusted-context
+                               "parallel worker results"
+                               worker-summary
+                               "worker-queue"))
+                    ""))))
     (message "Agent [%s] reflecting..." (gptel-agent-runtime-session-id session))
     (gptel-agent-runtime-emit-event
      'reflection-requested
