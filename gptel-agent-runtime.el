@@ -3721,6 +3721,8 @@ Positions are zero-based offsets relative to TEXT."
                     "`gptel-agent-runtime-set-chat-router-mode`, "
                     "`gptel-agent-runtime-chat-router-status`, and "
                     "`gptel-agent-runtime-safe-swarm-self-test`.\n"
+                    "Command center: `gptel-agent-runtime-command-center` "
+                    "or `C-c G A`.\n"
                     "Guardrail dashboard: "
                     "`gptel-agent-runtime-show-guardrails`.\n\n"
                     "Live swarm activity buffer: `%s`.\n\n"
@@ -3786,6 +3788,8 @@ Positions are zero-based offsets relative to TEXT."
                     "- Controls: use `gptel-agent-runtime-toggle-swarm-routing`, "
                     "`gptel-agent-runtime-set-chat-router-mode`, and "
                     "`gptel-agent-runtime-safe-swarm-self-test`.\n"
+                    "- Command center: `gptel-agent-runtime-command-center` "
+                    "or `C-c G A`.\n"
                     "- Guardrails: inspect active safety policy with "
                     "`gptel-agent-runtime-show-guardrails`.\n"
                     "- Tools: I can list registered tools, use safe read/search "
@@ -4862,6 +4866,30 @@ With prefix ASK-MODE, enable routing in `ask' mode."
     (gptel-agent-runtime-show-swarm)
     (message "Safe swarm self-test wrote trace to %s without executing tools."
              gptel-agent-runtime-swarm-buffer-name)))
+
+(defun gptel-agent-runtime-command-center ()
+  "Open a compact command menu for the Emacs agent runtime."
+  (interactive)
+  (message (concat "Agent runtime: [t]est [s]warm [g]uardrails [r]outer "
+                   "[e]nable [d]isable [m]ode [l]tools [o]rganization "
+                   "[p]resume [x]stop [q]uit"))
+  (pcase (read-char-choice
+          "Agent runtime command: "
+          '(?t ?s ?g ?r ?e ?d ?m ?l ?o ?p ?x ?q))
+    (?t (gptel-agent-runtime-safe-swarm-self-test))
+    (?s (gptel-agent-runtime-show-swarm))
+    (?g (gptel-agent-runtime-show-guardrails))
+    (?r (gptel-agent-runtime-chat-router-status))
+    (?e (gptel-agent-runtime-enable-swarm-routing))
+    (?d (gptel-agent-runtime-disable-swarm-routing))
+    (?m (call-interactively #'gptel-agent-runtime-set-chat-router-mode))
+    (?l (gptel-agent-runtime-list-tools))
+    (?o (gptel-agent-runtime-list-organization))
+    (?p (gptel-agent-runtime-resume-last-session))
+    (?x (gptel-agent-runtime-stop))
+    (?q (message "Agent runtime command center closed."))))
+
+(global-set-key (kbd "C-c G A") #'gptel-agent-runtime-command-center)
 
 (defun gptel-agent-runtime--maybe-route-chat-to-swarm (task-text)
   "Maybe start a swarm session from TASK-TEXT and return non-nil if handled."
