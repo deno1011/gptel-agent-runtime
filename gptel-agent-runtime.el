@@ -80,10 +80,12 @@ The limit prevents runaway loops once the planner/executor loop is added."
   :safe #'integerp
   :group 'gptel-agent-runtime)
 
-(defcustom gptel-agent-runtime-require-confirmation-for-risky-actions t
+(defcustom gptel-agent-runtime-require-confirmation-for-risky-actions nil
   "When non-nil, require confirmation before risky tool actions.
-Risk classification will be implemented in the safety layer. The default is
-intentionally conservative for package-readiness."
+The package default is open so local testing, raw-tool shims, and maximum
+functionality are not blocked by interactive prompts. Set this to non-nil in a
+personal or site config when you want confirmation for write, shell, or
+destructive actions."
   :type 'boolean
   :group 'gptel-agent-runtime)
 
@@ -148,25 +150,31 @@ level lists."
   :group 'gptel-agent-runtime)
 
 (defcustom gptel-agent-runtime-default-tool-policy
-  '(("execute_code" . (:confirm always :taint untrusted))
-    ("run_elisp" . (:confirm always :taint untrusted))
-    ("org_export" . (:confirm write :taint trusted))
-    ("write_file" . (:confirm write :taint trusted))
-    ("write_org_file" . (:confirm write :taint trusted))
-    ("add_todo" . (:confirm write :taint trusted))
-    ("change_todo_state" . (:confirm write :taint trusted))
-    ("set_deadline" . (:confirm write :taint trusted))
-    ("add_tag" . (:confirm write :taint trusted))
+  '(("execute_code" . (:taint untrusted))
+    ("run_elisp" . (:taint untrusted))
+    ("org_export" . (:taint trusted))
+    ("write_file" . (:taint trusted))
+    ("write_org_file" . (:taint trusted))
+    ("add_todo" . (:taint trusted))
+    ("change_todo_state" . (:taint trusted))
+    ("set_deadline" . (:taint trusted))
+    ("add_tag" . (:taint trusted))
     ("web_search" . (:taint untrusted))
     ("web_fetch_text" . (:taint untrusted))
     ("web_extract_images" . (:taint untrusted))
-    ("web_fetch_image" . (:confirm write :taint untrusted))
+    ("web_fetch_image" . (:taint untrusted))
     ("read_file" . (:taint untrusted))
     ("read_org_file" . (:taint untrusted))
     ("get_buffer_content" . (:taint untrusted)))
-  "Built-in default policies for high-risk and untrusted tools.
+  "Open built-in default policies for runtime tools.
 Entries use the same format as `gptel-agent-runtime-tool-policy'. User policies
-in `gptel-agent-runtime-tool-policy' override these defaults per tool."
+in `gptel-agent-runtime-tool-policy' override these defaults per tool.
+
+These defaults intentionally avoid extra :confirm or :default deny rules so
+tests and local experimentation keep maximum functionality. They mainly mark
+external/tool-derived data as trusted or untrusted evidence. Hardened setups
+should add confirmation, path, agent, or deny rules in
+`gptel-agent-runtime-tool-policy'."
   :type 'alist
   :group 'gptel-agent-runtime)
 
@@ -3755,9 +3763,9 @@ Positions are zero-based offsets relative to TEXT."
                     "Raw local-model tool calls may run automatically only for "
                     "safe read/search tools: %s.\n\n"
                     "Tools requiring confirmation before raw execution: %s.\n\n"
-                    "Default tool policies require confirmation for code, Elisp, "
-                    "write/export, Org mutation, and image-download actions; "
-                    "web/file/buffer reads are tainted as untrusted evidence.\n\n"
+                    "Default tool policies are open for testing: they add taint "
+                    "metadata but no extra confirmation or deny rules. Harden "
+                    "them with `gptel-agent-runtime-tool-policy` when needed.\n\n"
                     "Use capabilities in prose for the user. Avoid inventing "
                     "direct Elisp call syntax unless the user asks for code.")
             tool-list agent-list unit-list
