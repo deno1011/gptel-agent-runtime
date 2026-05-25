@@ -67,6 +67,21 @@ is nil, normal gptel chat behavior is unchanged."
                  (const :tag "Off" off))
   :group 'gptel-agent-runtime)
 
+(defcustom gptel-agent-runtime-chat-router-startup-mode 'off
+  "Startup mode for normal gptel chat routing.
+`off' keeps normal gptel sends as direct chat unless routing is enabled
+interactively.
+`ask' enables the runtime and asks before complex prompts enter swarm mode.
+`auto' enables the runtime and starts swarm sessions for prompts classified as
+complex.
+
+This setting is applied when the package loads and can be changed with
+`gptel-agent-runtime-set-chat-router-startup-mode'."
+  :type '(choice (const :tag "Off" off)
+                 (const :tag "Ask before starting" ask)
+                 (const :tag "Auto-start suitable tasks" auto))
+  :group 'gptel-agent-runtime)
+
 (defcustom gptel-agent-runtime-chat-router-min-score 3
   "Minimum heuristic score needed to route a gptel prompt into swarm mode."
   :type 'integer
@@ -4803,14 +4818,35 @@ Each entry is a plist with :state :heading :file :deadline :tags."
 
 (defun gptel-agent-runtime-router-state ()
   "Return a concise string describing runtime routing state."
-  (format "runtime=%s chat-router=%s mode=%s threshold=%s active=%s"
+  (format "runtime=%s chat-router=%s mode=%s startup=%s threshold=%s active=%s"
           gptel-agent-runtime-enabled
           gptel-agent-runtime-chat-router-enabled
           gptel-agent-runtime-chat-router-mode
+          gptel-agent-runtime-chat-router-startup-mode
           gptel-agent-runtime-chat-router-min-score
           (and gptel-agent-runtime-enabled
                gptel-agent-runtime-chat-router-enabled
                (not (eq gptel-agent-runtime-chat-router-mode 'off)))))
+
+(defun gptel-agent-runtime-apply-chat-router-startup-mode ()
+  "Apply `gptel-agent-runtime-chat-router-startup-mode' to live routing state."
+  (interactive)
+  (unless (memq gptel-agent-runtime-chat-router-startup-mode '(off ask auto))
+    (setq gptel-agent-runtime-chat-router-startup-mode 'off))
+  (pcase gptel-agent-runtime-chat-router-startup-mode
+    ('off
+     (setq gptel-agent-runtime-enabled nil)
+     (setq gptel-agent-runtime-chat-router-enabled nil)
+     (setq gptel-agent-runtime-chat-router-mode 'off))
+    ((or 'ask 'auto)
+     (setq gptel-agent-runtime-enabled t)
+     (setq gptel-agent-runtime-chat-router-enabled t)
+     (setq gptel-agent-runtime-chat-router-mode
+           gptel-agent-runtime-chat-router-startup-mode)))
+  (when (called-interactively-p 'interactive)
+    (message "Applied gptel chat router startup: %s"
+             (gptel-agent-runtime-router-state)))
+  gptel-agent-runtime-chat-router-startup-mode)
 
 (defun gptel-agent-runtime-enable-swarm-routing ()
   "Enable autonomous swarm routing for suitable normal gptel prompts."
@@ -4826,6 +4862,7 @@ Each entry is a plist with :state :heading :file :deadline :tags."
   "Disable autonomous swarm routing from normal gptel prompts."
   (interactive)
   (setq gptel-agent-runtime-chat-router-enabled nil)
+  (setq gptel-agent-runtime-chat-router-mode 'off)
   (message "gptel swarm routing disabled: %s"
            (gptel-agent-runtime-router-state)))
 
@@ -4857,6 +4894,28 @@ With prefix ASK-MODE, enable routing in `ask' mode."
   (setq gptel-agent-runtime-chat-router-mode mode)
   (message "gptel chat router mode set: %s"
            (gptel-agent-runtime-router-state)))
+
+(defun gptel-agent-runtime-set-chat-router-startup-mode (mode &optional save)
+  "Set chat router startup MODE to `off', `ask', or `auto'.
+With prefix SAVE, persist the preference through Customize."
+  (interactive
+   (list (intern
+          (completing-read "Chat router startup mode: "
+                           '("off" "ask" "auto")
+                           nil t nil nil
+                           (symbol-name
+                            gptel-agent-runtime-chat-router-startup-mode)))
+         current-prefix-arg))
+  (unless (memq mode '(off ask auto))
+    (user-error "Unknown chat router startup mode: %s" mode))
+  (if save
+      (customize-save-variable
+       'gptel-agent-runtime-chat-router-startup-mode mode)
+    (setq gptel-agent-runtime-chat-router-startup-mode mode))
+  (gptel-agent-runtime-apply-chat-router-startup-mode)
+  (message "gptel chat router startup mode set: %s%s"
+           (gptel-agent-runtime-router-state)
+           (if save " (saved)" "")))
 
 (defun gptel-agent-runtime-safe-swarm-self-test ()
   "Run a safe synthetic swarm trace test without web, files, or shell tools."
@@ -4918,11 +4977,11 @@ With prefix ASK-MODE, enable routing in `ask' mode."
   "Open a compact command menu for the Emacs agent runtime."
   (interactive)
   (message (concat "Agent runtime: [t]est [s]warm [g]uardrails [r]outer "
-                   "[e]nable [d]isable [m]ode [l]tools [o]rganization "
+                   "[e]nable [d]isable [m]ode start[u]p [l]tools [o]rganization "
                    "[p]resume [x]stop [q]uit"))
   (pcase (read-char-choice
           "Agent runtime command: "
-          '(?t ?s ?g ?r ?e ?d ?m ?l ?o ?p ?x ?q))
+          '(?t ?s ?g ?r ?e ?d ?m ?u ?l ?o ?p ?x ?q))
     (?t (gptel-agent-runtime-safe-swarm-self-test))
     (?s (gptel-agent-runtime-show-swarm))
     (?g (gptel-agent-runtime-show-guardrails))
@@ -4930,6 +4989,8 @@ With prefix ASK-MODE, enable routing in `ask' mode."
     (?e (gptel-agent-runtime-enable-swarm-routing))
     (?d (gptel-agent-runtime-disable-swarm-routing))
     (?m (call-interactively #'gptel-agent-runtime-set-chat-router-mode))
+    (?u (call-interactively
+         #'gptel-agent-runtime-set-chat-router-startup-mode))
     (?l (gptel-agent-runtime-list-tools))
     (?o (gptel-agent-runtime-list-organization))
     (?p (gptel-agent-runtime-resume-last-session))
@@ -4937,6 +4998,8 @@ With prefix ASK-MODE, enable routing in `ask' mode."
     (?q (message "Agent runtime command center closed."))))
 
 (global-set-key (kbd "C-c G A") #'gptel-agent-runtime-command-center)
+
+(gptel-agent-runtime-apply-chat-router-startup-mode)
 
 (defun gptel-agent-runtime--maybe-route-chat-to-swarm (task-text)
   "Maybe start a swarm session from TASK-TEXT and return non-nil if handled."
