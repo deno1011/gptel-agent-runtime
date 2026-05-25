@@ -3980,6 +3980,10 @@ Positions are zero-based offsets relative to TEXT."
                     "`gptel-agent-runtime-set-chat-router-mode`, "
                     "`gptel-agent-runtime-chat-router-status`, and "
                     "`gptel-agent-runtime-safe-swarm-self-test`.\n"
+                    "Worker commands: `gptel-agent-runtime-worker-self-test`, "
+                    "`gptel-agent-runtime-list-workers`, "
+                    "`gptel-agent-runtime-cancel-worker`, and "
+                    "`gptel-agent-runtime-retry-worker`.\n"
                     "Command center: `gptel-agent-runtime-command-center` "
                     "or `C-c G A`.\n"
                     "Guardrail dashboard: "
@@ -4050,6 +4054,10 @@ Positions are zero-based offsets relative to TEXT."
                     "- Controls: use `gptel-agent-runtime-toggle-swarm-routing`, "
                     "`gptel-agent-runtime-set-chat-router-mode`, and "
                     "`gptel-agent-runtime-safe-swarm-self-test`.\n"
+                    "- Worker lifecycle: use "
+                    "`gptel-agent-runtime-worker-self-test` to create visible "
+                    "synthetic runtime workers, then inspect them with "
+                    "`gptel-agent-runtime-list-workers` or `C-c G A` -> `w`.\n"
                     "- Command center: `gptel-agent-runtime-command-center` "
                     "or `C-c G A`.\n"
                     "- Guardrails: inspect active safety policy with "
@@ -4057,11 +4065,10 @@ Positions are zero-based offsets relative to TEXT."
                     "- Tools: I can list registered tools, use safe read/search "
                     "tools automatically, and request confirmation for configured "
                     "write/code/system actions.\n\n"
-                    "The swarm layer is still an Emacs-native scaffold, not "
-                    "separate OS worker processes yet. It routes tasks through "
-                    "roles, policy-gated tools, trace buffers, memory/playbooks, "
-                    "and reviewer/critic steps so weaker local models can work "
-                    "inside a more structured organization.")
+                    "The swarm layer uses Emacs-native runtime worker jobs, not "
+                    "raw Emacs Lisp `detached-thread` threads. Workers are "
+                    "queued/running/done/failed/cancelled objects with trace, "
+                    "retry, cancellation, and batch aggregation.")
             agent-list unit-list
             (length gptel-agent-runtime-playbook-registry)
             gptel-agent-runtime-swarm-buffer-name
@@ -5197,16 +5204,99 @@ With prefix SAVE, persist the preference through Customize."
     (message "Safe swarm self-test wrote trace to %s without executing tools."
              gptel-agent-runtime-swarm-buffer-name)))
 
+(defun gptel-agent-runtime-worker-self-test (&optional count)
+  "Create COUNT synthetic visible swarm workers without running tools."
+  (interactive "p")
+  (let* ((count (max 1 (or count 3)))
+         (task (gptel-agent-runtime-create-task
+                "Worker Lifecycle Self-Test"
+                "Synthetic no-tool worker lifecycle test."))
+         (session (gptel-agent-runtime-create-session task "assistant"))
+         (plan (gptel-agent-runtime-create-plan task))
+         steps)
+    (dotimes (i count)
+      (push (gptel-agent-runtime-create-plan-step
+             (format "Synthetic worker %d" (1+ i))
+             "No-tool lifecycle demonstration worker."
+             "direct_response"
+             'safe
+             :agent "assistant"
+             :parallel-p t)
+            steps))
+    (setq steps (nreverse steps))
+    (setf (gptel-agent-runtime-plan-steps plan) steps)
+    (setf (gptel-agent-runtime-task-notes task) plan)
+    (setf (gptel-agent-runtime-session-process session) 'hierarchical)
+    (setf (gptel-agent-runtime-task-status task) 'running)
+    (setq gptel-agent-runtime--current-session session)
+    (gptel-agent-runtime--start-swarm-session-buffer
+     session
+     (gptel-agent-runtime-task-goal task))
+    (gptel-agent-runtime-emit-event
+     'user-request
+     :source "worker-self-test"
+     :session-id (gptel-agent-runtime-session-id session)
+     :payload (list :goal (gptel-agent-runtime-task-goal task)
+                    :process 'hierarchical
+                    :worker-count count)
+     :taint 'trusted)
+    (gptel-agent-runtime-emit-event
+     'plan-created
+     :source "planner"
+     :session-id (gptel-agent-runtime-session-id session)
+     :payload (list :step-count count
+                    :steps (mapcar #'gptel-agent-runtime-plan-step-title
+                                   steps))
+     :taint 'trusted)
+    (dolist (step steps)
+      (setf (gptel-agent-runtime-plan-step-status step) 'queued)
+      (let* ((now (gptel-agent-runtime--timestamp))
+             (worker (gptel-agent-runtime-worker-create
+                      :id (format "worker-test-%d" (1+ (length
+                                                        (gptel-agent-runtime-session-workers
+                                                         session))))
+                      :session-id (gptel-agent-runtime-session-id session)
+                      :agent "assistant"
+                      :step-id (gptel-agent-runtime-plan-step-id step)
+                      :step-title (gptel-agent-runtime-plan-step-title step)
+                      :tool "direct_response"
+                      :status 'queued
+                      :prompt (gptel-agent-runtime-plan-step-title step)
+                      :result nil
+                      :error nil
+                      :attempts 0
+                      :max-retries gptel-agent-runtime-worker-max-retries
+                      :queued-at now
+                      :started-at nil
+                      :updated-at now)))
+        (push worker (gptel-agent-runtime-session-workers session))
+        (gptel-agent-runtime-emit-event
+         'worker-queued
+         :source "worker-self-test"
+         :session-id (gptel-agent-runtime-session-id session)
+         :payload (list :worker (gptel-agent-runtime-worker-id worker)
+                        :agent (gptel-agent-runtime-worker-agent worker)
+                        :step-id (gptel-agent-runtime-worker-step-id worker)
+                        :step (gptel-agent-runtime-worker-step-title worker)
+                        :tool (gptel-agent-runtime-worker-tool worker))
+         :taint 'trusted)))
+    (gptel-agent-runtime-list-workers)
+    (gptel-agent-runtime-show-swarm)
+    (message "Created %d synthetic queued swarm worker(s). Inspect %s or %s."
+             count
+             gptel-agent-runtime-workers-buffer-name
+             gptel-agent-runtime-swarm-buffer-name)))
+
 (defun gptel-agent-runtime-command-center ()
   "Open a compact command menu for the Emacs agent runtime."
   (interactive)
   (message (concat "Agent runtime: [t]est [s]warm [g]uardrails [r]outer "
                    "[e]nable [d]isable [m]ode start[u]p policy-[v]iew "
-                   "[l]tools [w]orkers [o]rganization "
+                   "[l]tools [w]orkers worker-[T]est [o]rganization "
                    "[p]resume [x]stop [q]uit"))
   (pcase (read-char-choice
           "Agent runtime command: "
-          '(?t ?s ?g ?r ?e ?d ?m ?u ?v ?l ?w ?o ?p ?x ?q))
+          '(?t ?s ?g ?r ?e ?d ?m ?u ?v ?l ?w ?T ?o ?p ?x ?q))
     (?t (gptel-agent-runtime-safe-swarm-self-test))
     (?s (gptel-agent-runtime-show-swarm))
     (?g (gptel-agent-runtime-show-guardrails))
@@ -5219,6 +5309,7 @@ With prefix SAVE, persist the preference through Customize."
     (?v (call-interactively #'gptel-agent-runtime-set-policy-preset))
     (?l (gptel-agent-runtime-list-tools))
     (?w (gptel-agent-runtime-list-workers))
+    (?T (call-interactively #'gptel-agent-runtime-worker-self-test))
     (?o (gptel-agent-runtime-list-organization))
     (?p (gptel-agent-runtime-resume-last-session))
     (?x (gptel-agent-runtime-stop))
