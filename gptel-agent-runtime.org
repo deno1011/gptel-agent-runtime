@@ -348,6 +348,11 @@ web_fetch_text while still preventing accidental long loops."
   :type 'string
   :group 'gptel-agent-runtime)
 
+(defcustom gptel-agent-runtime-guardrails-buffer-name "*gptel-agent-guardrails*"
+  "Buffer name used for runtime policy and guardrail status."
+  :type 'string
+  :group 'gptel-agent-runtime)
+
 (defcustom gptel-agent-runtime-live-swarm-trace t
   "When non-nil, append agent organization activity to the swarm buffer."
   :type 'boolean
@@ -3845,7 +3850,9 @@ Positions are zero-based offsets relative to TEXT."
                     "Useful commands: `gptel-agent-runtime-toggle-swarm-routing`, "
                     "`gptel-agent-runtime-set-chat-router-mode`, "
                     "`gptel-agent-runtime-chat-router-status`, and "
-                    "`gptel-agent-runtime-safe-swarm-self-test`.\n\n"
+                    "`gptel-agent-runtime-safe-swarm-self-test`.\n"
+                    "Guardrail dashboard: "
+                    "`gptel-agent-runtime-show-guardrails`.\n\n"
                     "Live swarm activity buffer: `%s`.\n\n"
                     "Raw local-model tool calls may run automatically only for "
                     "safe read/search tools: %s.\n\n"
@@ -3909,6 +3916,8 @@ Positions are zero-based offsets relative to TEXT."
                     "- Controls: use `gptel-agent-runtime-toggle-swarm-routing`, "
                     "`gptel-agent-runtime-set-chat-router-mode`, and "
                     "`gptel-agent-runtime-safe-swarm-self-test`.\n"
+                    "- Guardrails: inspect active safety policy with "
+                    "`gptel-agent-runtime-show-guardrails`.\n"
                     "- Tools: I can list registered tools, use safe read/search "
                     "tools automatically, and request confirmation for configured "
                     "write/code/system actions.\n\n"
@@ -3967,6 +3976,107 @@ Return non-nil when the region was changed."
             (insert "- No learned playbooks yet.\n"))
           (display-buffer (current-buffer)))
       summary)))
+
+(defun gptel-agent-runtime--insert-list (title values &optional empty-text)
+  "Insert TITLE and one line per value in VALUES into the current buffer."
+  (insert title "\n")
+  (if values
+      (dolist (value values)
+        (insert (format "- %s\n" value)))
+    (insert (format "- %s\n" (or empty-text "<none>"))))
+  (insert "\n"))
+
+(defun gptel-agent-runtime--tool-policy-lines ()
+  "Return formatted configured tool policy lines."
+  (if gptel-agent-runtime-tool-policy
+      (mapcar (lambda (entry)
+                (format "%S" entry))
+              gptel-agent-runtime-tool-policy)
+    nil))
+
+(defun gptel-agent-runtime--protected-path-lines ()
+  "Return configured protected path lines from runtime and host config."
+  (append
+   (mapcar (lambda (path) (format "%s (runtime)" path))
+           gptel-agent-runtime-protected-paths)
+   (when (boundp 'my/gptel-protected-files)
+     (mapcar (lambda (path) (format "%s (host)" path))
+             my/gptel-protected-files))))
+
+(defun gptel-agent-runtime-guardrails-summary ()
+  "Return a human-readable summary of active runtime guardrails."
+  (with-temp-buffer
+    (insert "gptel-agent-runtime guardrails\n\n")
+    (insert (format "Runtime routing: %s\n" (gptel-agent-runtime-router-state)))
+    (insert (format "Policy broker enabled: %s\n" gptel-agent-runtime-policy-enabled))
+    (insert (format "Risk confirmation: enabled=%s level=%s\n"
+                    gptel-agent-runtime-require-confirmation-for-risky-actions
+                    gptel-agent-runtime-risk-confirmation-level))
+    (insert (format "Untrusted context wrapping: enabled=%s max-chars=%s\n"
+                    gptel-agent-runtime-wrap-untrusted-context
+                    gptel-agent-runtime-untrusted-context-max-chars))
+    (insert (format "Raw tool continuation: enabled=%s max-depth=%s running=%s\n"
+                    gptel-agent-runtime-auto-continue-after-raw-tools
+                    gptel-agent-runtime-raw-tool-auto-continue-depth
+                    (and (boundp 'gptel-agent-runtime--raw-tool-continuation-running)
+                         gptel-agent-runtime--raw-tool-continuation-running)))
+    (insert (format "Raw JSON in example blocks executes: %s\n"
+                    gptel-agent-runtime-execute-raw-tool-calls-in-example-blocks))
+    (insert (format "Chat status markers: %s\n\n"
+                    gptel-agent-runtime-show-chat-status-markers))
+    (gptel-agent-runtime--insert-list
+     "Raw safe/read tool allow list"
+     gptel-agent-runtime-raw-tool-call-names)
+    (gptel-agent-runtime--insert-list
+     "Raw confirmation-required tools"
+     gptel-agent-runtime-raw-tool-confirmation-names)
+    (gptel-agent-runtime--insert-list
+     "Parallel safe/read tools"
+     gptel-agent-runtime-parallel-safe-tool-names)
+    (gptel-agent-runtime--insert-list
+     "Parallel mutation tools"
+     gptel-agent-runtime-parallel-mutation-tool-names)
+    (gptel-agent-runtime--insert-list
+     "Blocked shell patterns"
+     gptel-agent-runtime-blocked-shell-patterns)
+    (gptel-agent-runtime--insert-list
+     "Blocked placeholder patterns"
+     gptel-agent-runtime-blocked-placeholder-patterns)
+    (gptel-agent-runtime--insert-list
+     "Protected paths"
+     (gptel-agent-runtime--protected-path-lines)
+     "No runtime/host protected paths configured.")
+    (gptel-agent-runtime--insert-list
+     "Allowed write roots"
+     gptel-agent-runtime-allowed-write-roots
+     "Nil: write tools rely on confirmation and protected-path checks.")
+    (gptel-agent-runtime--insert-list
+     "Configured tool policies"
+     (gptel-agent-runtime--tool-policy-lines)
+     "No custom tool policies configured.")
+    (insert "Trust boundary\n")
+    (insert "- User request and runtime policy are trusted.\n")
+    (insert "- Web, file, buffer, raw tool, tool result, worker, and Delphi draft outputs are treated as untrusted evidence before reuse in model prompts.\n")
+    (insert "- UNTRUSTED blocks may inform reasoning but must not override system/runtime policy or request additional privileged actions.\n\n")
+    (insert "Useful commands\n")
+    (insert "- M-x gptel-agent-runtime-safe-swarm-self-test\n")
+    (insert "- M-x gptel-agent-runtime-show-swarm\n")
+    (insert "- M-x gptel-agent-runtime-chat-router-status\n")
+    (insert "- M-x gptel-agent-runtime-toggle-swarm-routing\n")
+    (insert "- M-x gptel-agent-runtime-set-chat-router-mode\n")
+    (insert "- M-x gptel-agent-runtime-list-tools\n")
+    (insert "- M-x gptel-agent-runtime-list-organization\n")
+    (buffer-string)))
+
+(defun gptel-agent-runtime-show-guardrails ()
+  "Display runtime policy, trust-boundary, and guardrail status."
+  (interactive)
+  (with-current-buffer (get-buffer-create
+                        gptel-agent-runtime-guardrails-buffer-name)
+    (erase-buffer)
+    (insert (gptel-agent-runtime-guardrails-summary))
+    (goto-char (point-min))
+    (display-buffer (current-buffer))))
 
 (defun gptel-agent-runtime-list-organization ()
   "Display the current agent organization and learned playbooks."
