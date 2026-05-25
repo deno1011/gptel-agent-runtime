@@ -533,6 +533,56 @@ the server find models downloaded to a non-default location."
                  directory)
   :group 'gptel-agent-runtime)
 
+(defcustom gptel-agent-runtime-model-router-enabled nil
+  "When non-nil, select backend/model automatically before gptel sends.
+The router scores the current request for complexity, introspection, tool risk,
+context size, web/current-fact needs, privacy, creativity, and speed/cost. It
+then selects the best registered backend matching the chosen profile patterns.
+Manual `C-c M' selection still works when this option is nil."
+  :type 'boolean
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-model-router-default-profile 'local-balanced
+  "Fallback model-router profile when no specialist rule matches."
+  :type 'symbol
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-model-router-profiles
+  '((local-fast
+     :description "Fast/private local model for simple edits and low-risk chat."
+     :patterns ("Qwen 2.5 Coder" "Llama 3.2" "Mistral (Ollama)" "Gemma 3")
+     :local t)
+    (local-balanced
+     :description "Default private local model for normal coding/tool work."
+     :patterns ("Qwen 2.5 Coder" "Qwen3" "Ministral" "DeepSeek" "Gemma")
+     :local t)
+    (local-reasoning
+     :description "Local reasoning model for planning, debugging, and introspection."
+     :patterns ("Ministral" "DeepSeek" "Qwen3" "Gemma 4" "Qwen")
+     :local t)
+    (cloud-balanced
+     :description "Cloud model for complex work when privacy/cost allow it."
+     :patterns ("Claude Sonnet" "GPT-4o" "Gemini 2.5 Pro")
+     :local nil)
+    (cloud-deep
+     :description "Strongest available model for high-complexity reasoning."
+     :patterns ("Claude Opus" "o3" "o4" "Gemini 2.5 Pro" "Claude Sonnet")
+     :local nil)
+    (long-context
+     :description "Large-context model for long buffers, docs, and repositories."
+     :patterns ("Gemini 2.5 Pro" "Claude Sonnet" "Claude Opus" "GPT-4o")
+     :local nil)
+    (cheap
+     :description "Cheap model for low-risk summarization and simple drafting."
+     :patterns ("GPT-4o-mini" "Claude Haiku" "Gemma 3" "Llama 3.2")
+     :local nil))
+  "Model-router profile definitions.
+Each profile is (NAME . PLIST). PLIST currently supports :description,
+:patterns, and :local. Patterns are matched against display names and model ids
+from `my/gptel-backends'."
+  :type 'alist
+  :group 'gptel-agent-runtime)
+
 (cl-defstruct (gptel-agent-runtime-task
                (:constructor gptel-agent-runtime-task-create))
 
@@ -677,6 +727,12 @@ the server find models downloaded to a non-default location."
             ('user-request
              (format "USER -> router: %s"
                      (gptel-agent-runtime--payload-text payload :goal 260)))
+            ('model-routed
+             (format "MODEL router selected %s / %s; analysis=%s"
+                     (or (plist-get payload :profile) "")
+                     (or (plist-get payload :model) "")
+                     (gptel-agent-runtime--shorten
+                      (prin1-to-string (plist-get payload :analysis)) 220)))
             ('session-resumed
              (format "SESSION resumed from %s"
                      (gptel-agent-runtime--payload-text payload :file 180)))
@@ -2988,6 +3044,191 @@ gptel--known-tools is a two-level alist: (category . ((name . struct) ...))."
     (setq-local gptel-use-tools t)
     (setq-local gptel-tools (my/gptel-tools-all))))
 
+(defun gptel-agent-runtime--model-router-count-matches (patterns text)
+  "Return number of PATTERNS matching TEXT."
+  (let ((case-fold-search t)
+        (count 0))
+    (dolist (pattern patterns count)
+      (when (string-match-p pattern text)
+        (setq count (1+ count))))))
+
+(defun gptel-agent-runtime-model-router-analyze (text)
+  "Return model-router feature scores for TEXT."
+  (let* ((text (or text ""))
+         (lower (downcase text))
+         (length-score (cond ((> (length text) 12000) 3)
+                             ((> (length text) 4000) 2)
+                             ((> (length text) 1200) 1)
+                             (t 0)))
+         (code-score
+          (gptel-agent-runtime--model-router-count-matches
+           '("\\bimplement\\b" "\\bdebug\\b" "\\brefactor\\b" "\\btest\\b"
+             "\\bcompile\\b" "\\bbranch\\b" "\\bgit\\b" "\\bpackage\\b"
+             "\\belisp\\b" "\\bemacs\\b" "\\borg\\b" "\\bgptel\\b"
+             "\\btool\\b" "\\bagent\\b")
+           lower))
+         (introspection-score
+          (gptel-agent-runtime--model-router-count-matches
+           '("\\bwhy\\b" "\\barchitecture\\b" "\\bdesign\\b"
+             "\\bintrospect\\b" "\\breflect\\b" "\\bstrategy\\b"
+             "\\bself[- ]?improv\\|\\blearn\\b" "\\bswarm\\b")
+           lower))
+         (creativity-score
+          (gptel-agent-runtime--model-router-count-matches
+           '("\\bcreative\\b" "\\bnovel\\b" "\\binvent\\b" "\\bexplore\\b"
+             "\\bbrainstorm\\b" "\\bopen[- ]ended\\b" "\\bunknown\\b"
+             "\\bnew strategy\\b" "\\breorganize\\b" "\\bswarm intelligence\\b")
+           lower))
+         (tool-risk-score
+          (gptel-agent-runtime--model-router-count-matches
+           '("\\bexecute\\b" "\\bshell\\b" "\\brun\\b" "\\bwrite\\b"
+             "\\bdelete\\b" "\\binstall\\b" "\\bpush\\b" "\\bcommit\\b"
+             "\\btoken\\b" "\\bsecret\\b" "\\bcredential\\b")
+           lower))
+         (web-score
+          (gptel-agent-runtime--model-router-count-matches
+           '("\\binternet\\b" "\\bweb\\b" "\\bcurrent\\b" "\\blatest\\b"
+             "\\btoday\\b" "\\bnow\\b" "\\bnews\\b" "\\bprice\\b"
+             "\\brules\\b" "\\blaw\\b" "\\bdocs\\b")
+           lower))
+         (privacy-score
+          (gptel-agent-runtime--model-router-count-matches
+           '("\\bprivate\\b" "\\blocal\\b" "\\boffline\\b" "\\bsecret\\b"
+             "\\btoken\\b" "\\bcredential\\b" "\\bpersonal\\b"
+             "\\bhome\\b" "\\bprivate repo\\b")
+           lower))
+         (speed-score
+          (gptel-agent-runtime--model-router-count-matches
+           '("\\bquick\\b" "\\bfast\\b" "\\bcheap\\b" "\\bsimple\\b"
+             "\\bsmall\\b" "\\bjust\\b")
+           lower))
+         (complexity (+ length-score
+                        (min 4 code-score)
+                        (min 4 introspection-score)
+                        (min 3 creativity-score)
+                        (min 3 tool-risk-score)
+                        (if (> web-score 0) 1 0))))
+    (list :complexity complexity
+          :context length-score
+          :code code-score
+          :introspection introspection-score
+          :creativity creativity-score
+          :tool-risk tool-risk-score
+          :web web-score
+          :privacy privacy-score
+          :speed speed-score)))
+
+(defun gptel-agent-runtime-model-router-profile-for-analysis (analysis)
+  "Return model profile symbol for ANALYSIS."
+  (let ((complexity (plist-get analysis :complexity))
+        (context (plist-get analysis :context))
+        (code (plist-get analysis :code))
+        (introspection (plist-get analysis :introspection))
+        (creativity (plist-get analysis :creativity))
+        (tool-risk (plist-get analysis :tool-risk))
+        (web (plist-get analysis :web))
+        (privacy (plist-get analysis :privacy))
+        (speed (plist-get analysis :speed)))
+    (cond
+     ((and (> privacy 0)
+           (< complexity 7))
+      'local-reasoning)
+     ((>= context 3)
+      'long-context)
+     ((or (>= complexity 9)
+          (>= introspection 4)
+          (>= creativity 3)
+          (>= tool-risk 4))
+      'cloud-deep)
+     ((or (>= complexity 5)
+          (> web 0))
+      'cloud-balanced)
+     ((>= speed 2)
+      'cheap)
+     ((or (> introspection 0)
+          (> code 2))
+      'local-reasoning)
+     (t gptel-agent-runtime-model-router-default-profile))))
+
+(defun gptel-agent-runtime--model-entry-text (entry)
+  "Return searchable text for backend ENTRY."
+  (format "%s %S" (car entry) (my/gptel-model-id (cddr entry))))
+
+(defun gptel-agent-runtime-model-router-find-entry (profile)
+  "Return the best available `my/gptel-backends' entry for PROFILE."
+  (let* ((settings (alist-get profile
+                              gptel-agent-runtime-model-router-profiles))
+         (patterns (plist-get settings :patterns)))
+    (or
+     (cl-some
+      (lambda (pattern)
+        (let ((case-fold-search t))
+          (cl-find-if
+           (lambda (entry)
+             (string-match-p pattern
+                             (gptel-agent-runtime--model-entry-text entry)))
+           my/gptel-backends)))
+      patterns)
+     (car-safe my/gptel-backends))))
+
+(defun gptel-agent-runtime-model-router-classify (text)
+  "Return a routing decision plist for TEXT."
+  (let* ((analysis (gptel-agent-runtime-model-router-analyze text))
+         (profile
+          (gptel-agent-runtime-model-router-profile-for-analysis analysis))
+         (entry (gptel-agent-runtime-model-router-find-entry profile)))
+    (list :profile profile
+          :analysis analysis
+          :entry entry
+          :model (and entry (my/gptel-model-id (cddr entry)))
+          :backend (and entry (cadr entry))
+          :display-name (and entry (car entry)))))
+
+(defun gptel-agent-runtime-apply-model-route (text &optional force)
+  "Apply model-router decision for TEXT.
+When FORCE is nil, do nothing unless `gptel-agent-runtime-model-router-enabled'
+is non-nil. Return the routing decision plist."
+  (let ((decision (gptel-agent-runtime-model-router-classify text)))
+    (when (and (or force gptel-agent-runtime-model-router-enabled)
+               (plist-get decision :entry))
+      (let* ((entry (plist-get decision :entry))
+             (backend (cadr entry))
+             (model (my/gptel-model-id (cddr entry))))
+        (setq gptel-backend backend
+              gptel-model model)
+        (setq-local gptel-backend backend
+                    gptel-model model)
+        (my/gptel-sync-directive-for-current-runtime)
+        (gptel-agent-runtime-emit-event
+         'model-routed
+         :source "model-router"
+         :payload (list :profile (plist-get decision :profile)
+                        :display-name (plist-get decision :display-name)
+                        :model model
+                        :analysis (plist-get decision :analysis))
+         :taint 'trusted)))
+    decision))
+
+(defun gptel-agent-runtime-model-router-preview (&optional text)
+  "Preview the model-router decision for TEXT or current buffer request."
+  (interactive)
+  (let* ((text (or text (gptel-agent-runtime-current-buffer-task-text)))
+         (decision (gptel-agent-runtime-model-router-classify text)))
+    (message "model-router profile=%s model=%s choice=%s analysis=%S"
+             (plist-get decision :profile)
+             (plist-get decision :model)
+             (plist-get decision :display-name)
+             (plist-get decision :analysis))
+    decision))
+
+(defun gptel-agent-runtime-toggle-model-router ()
+  "Toggle automatic model routing before normal gptel sends."
+  (interactive)
+  (setq gptel-agent-runtime-model-router-enabled
+        (not gptel-agent-runtime-model-router-enabled))
+  (message "gptel model router enabled=%s"
+           gptel-agent-runtime-model-router-enabled))
+
 (defun my/gptel-select-model ()
   "Select backend+model — sets globally AND in the active gptel buffer."
   (interactive)
@@ -3976,10 +4217,17 @@ Positions are zero-based offsets relative to TEXT."
                     "review, and direct planner/executor.\n\n"
                     "Chat router: enabled=%s, mode=%s, threshold=%s. It is "
                     "active only when `gptel-agent-runtime-enabled' is non-nil.\n\n"
+                    "Model router: enabled=%s. It scores complexity, "
+                    "introspection, context size, code/tool risk, web/current "
+                    "facts, privacy, creativity, and speed/cost before choosing "
+                    "an available profile/backend.\n\n"
                     "Useful commands: `gptel-agent-runtime-toggle-swarm-routing`, "
                     "`gptel-agent-runtime-set-chat-router-mode`, "
                     "`gptel-agent-runtime-chat-router-status`, and "
                     "`gptel-agent-runtime-safe-swarm-self-test`.\n"
+                    "Model router commands: "
+                    "`gptel-agent-runtime-toggle-model-router` and "
+                    "`gptel-agent-runtime-model-router-preview`.\n"
                     "Worker commands: `gptel-agent-runtime-worker-self-test`, "
                     "`gptel-agent-runtime-list-workers`, "
                     "`gptel-agent-runtime-cancel-worker`, and "
@@ -4003,6 +4251,7 @@ Positions are zero-based offsets relative to TEXT."
                  gptel-agent-runtime-chat-router-enabled)
             gptel-agent-runtime-chat-router-mode
             gptel-agent-runtime-chat-router-min-score
+            gptel-agent-runtime-model-router-enabled
             gptel-agent-runtime-swarm-buffer-name
             safe confirmed)))
 
@@ -4157,6 +4406,9 @@ Return non-nil when the region was changed."
   (with-temp-buffer
     (insert "gptel-agent-runtime guardrails\n\n")
     (insert (format "Runtime routing: %s\n" (gptel-agent-runtime-router-state)))
+    (insert (format "Model router: enabled=%s default-profile=%s\n"
+                    gptel-agent-runtime-model-router-enabled
+                    gptel-agent-runtime-model-router-default-profile))
     (insert (format "Policy preset: %s - %s\n"
                     gptel-agent-runtime-policy-preset
                     (or (gptel-agent-runtime-policy-preset-description
@@ -4228,6 +4480,8 @@ Return non-nil when the region was changed."
     (insert "- M-x gptel-agent-runtime-chat-router-status\n")
     (insert "- M-x gptel-agent-runtime-toggle-swarm-routing\n")
     (insert "- M-x gptel-agent-runtime-set-chat-router-mode\n")
+    (insert "- M-x gptel-agent-runtime-model-router-preview\n")
+    (insert "- M-x gptel-agent-runtime-toggle-model-router\n")
     (insert "- M-x gptel-agent-runtime-list-tools\n")
     (insert "- M-x gptel-agent-runtime-list-workers\n")
     (insert "- M-x gptel-agent-runtime-cancel-worker\n")
@@ -5292,11 +5546,12 @@ With prefix SAVE, persist the preference through Customize."
   (interactive)
   (message (concat "Agent runtime: [t]est [s]warm [g]uardrails [r]outer "
                    "[e]nable [d]isable [m]ode start[u]p policy-[v]iew "
+                   "model-[R]oute "
                    "[l]tools [w]orkers worker-[T]est [o]rganization "
                    "[p]resume [x]stop [q]uit"))
   (pcase (read-char-choice
           "Agent runtime command: "
-          '(?t ?s ?g ?r ?e ?d ?m ?u ?v ?l ?w ?T ?o ?p ?x ?q))
+          '(?t ?s ?g ?r ?e ?d ?m ?u ?v ?R ?l ?w ?T ?o ?p ?x ?q))
     (?t (gptel-agent-runtime-safe-swarm-self-test))
     (?s (gptel-agent-runtime-show-swarm))
     (?g (gptel-agent-runtime-show-guardrails))
@@ -5307,6 +5562,7 @@ With prefix SAVE, persist the preference through Customize."
     (?u (call-interactively
          #'gptel-agent-runtime-set-chat-router-startup-mode))
     (?v (call-interactively #'gptel-agent-runtime-set-policy-preset))
+    (?R (gptel-agent-runtime-model-router-preview))
     (?l (gptel-agent-runtime-list-tools))
     (?w (gptel-agent-runtime-list-workers))
     (?T (call-interactively #'gptel-agent-runtime-worker-self-test))
@@ -5361,6 +5617,9 @@ With prefix SAVE, persist the preference through Customize."
       (my/gptel-sync-directive-for-current-runtime))
     (my/gptel-sync-tools)
     (let* ((task-text (gptel-agent-runtime-current-buffer-task-text))
+           (_model-route
+            (when gptel-agent-runtime-model-router-enabled
+              (gptel-agent-runtime-apply-model-route task-text)))
            (ctx   (my/workspace-context-string))
            (capability-context
             (when (gptel-agent-runtime-capability-question-p task-text)
@@ -6648,10 +6907,12 @@ The preferred format is JSON with a top-level :steps list. A single
 
 (defun gptel-agent-runtime--worker-active-count (session)
   "Return number of running workers for SESSION."
-  (cl-count-if
-   (lambda (worker)
-     (eq (gptel-agent-runtime-worker-status worker) 'running))
-   (gptel-agent-runtime-session-workers session)))
+  (if (not session)
+      0
+    (cl-count-if
+     (lambda (worker)
+       (eq (gptel-agent-runtime-worker-status worker) 'running))
+     (gptel-agent-runtime-session-workers session))))
 
 (defun gptel-agent-runtime--worker-queued-p (worker)
   "Return non-nil when WORKER is queued."
