@@ -172,6 +172,20 @@ level lists."
   :type 'alist
   :group 'gptel-agent-runtime)
 
+(defcustom gptel-agent-runtime-policy-preset 'open
+  "Named safety-policy preset last applied by the runtime.
+`open' keeps maximum local functionality for testing.
+`balanced' asks before code, Elisp, writes, exports, and Org mutations.
+`strict' denies code/Elisp execution and asks before writes/exports/mutations.
+`research-only' allows read/search/web research and denies mutation/code tools.
+`coding-only' allows coding tools with confirmation and denies web/image fetches."
+  :type '(choice (const :tag "Open testing" open)
+                 (const :tag "Balanced daily use" balanced)
+                 (const :tag "Strict" strict)
+                 (const :tag "Research only" research-only)
+                 (const :tag "Coding only" coding-only))
+  :group 'gptel-agent-runtime)
+
 (defcustom gptel-agent-runtime-default-tool-policy
   '(("execute_code" . (:taint untrusted))
     ("run_elisp" . (:taint untrusted))
@@ -966,6 +980,134 @@ Allowed values are `safe', `read', `write', `shell', and `destructive'."
         (alist-get name gptel-agent-runtime-default-tool-policy nil nil #'equal)
         (and symbol
              (alist-get symbol gptel-agent-runtime-default-tool-policy)))))
+
+(defconst gptel-agent-runtime--policy-preset-settings
+  '((open
+     :require-confirmation nil
+     :risk-level write
+     :tool-policy nil
+     :description "Maximum functionality for tests and local experiments.")
+    (balanced
+     :require-confirmation t
+     :risk-level write
+     :tool-policy
+     (("execute_code" . (:confirm always :taint untrusted))
+      ("run_elisp" . (:confirm always :taint untrusted))
+      ("org_export" . (:confirm write :taint trusted))
+      ("write_file" . (:confirm write :taint trusted))
+      ("write_org_file" . (:confirm write :taint trusted))
+      ("add_todo" . (:confirm write :taint trusted))
+      ("change_todo_state" . (:confirm write :taint trusted))
+      ("set_deadline" . (:confirm write :taint trusted))
+      ("add_tag" . (:confirm write :taint trusted))
+      ("web_fetch_image" . (:confirm write :taint untrusted)))
+     :description "Ask before code, Elisp, writes, exports, and Org changes.")
+    (strict
+     :require-confirmation t
+     :risk-level read
+     :tool-policy
+     (("execute_code" . (:default deny :taint untrusted))
+      ("run_elisp" . (:default deny :taint untrusted))
+      ("org_export" . (:confirm always :taint trusted))
+      ("write_file" . (:confirm always :taint trusted))
+      ("write_org_file" . (:confirm always :taint trusted))
+      ("add_todo" . (:confirm always :taint trusted))
+      ("change_todo_state" . (:confirm always :taint trusted))
+      ("set_deadline" . (:confirm always :taint trusted))
+      ("add_tag" . (:confirm always :taint trusted))
+      ("web_fetch_image" . (:confirm always :taint untrusted)))
+     :description "Deny code/Elisp execution and ask before mutations.")
+    (research-only
+     :require-confirmation t
+     :risk-level write
+     :tool-policy
+     (("execute_code" . (:default deny :taint untrusted))
+      ("run_elisp" . (:default deny :taint untrusted))
+      ("org_export" . (:default deny :taint trusted))
+      ("write_file" . (:default deny :taint trusted))
+      ("write_org_file" . (:default deny :taint trusted))
+      ("add_todo" . (:default deny :taint trusted))
+      ("change_todo_state" . (:default deny :taint trusted))
+      ("set_deadline" . (:default deny :taint trusted))
+      ("add_tag" . (:default deny :taint trusted))
+      ("web_fetch_image" . (:confirm write :taint untrusted)))
+     :description "Allow research/read tools and deny mutation/code tools.")
+    (coding-only
+     :require-confirmation t
+     :risk-level write
+     :tool-policy
+     (("execute_code" . (:confirm always :taint untrusted))
+      ("run_elisp" . (:confirm always :taint untrusted))
+      ("org_export" . (:confirm write :taint trusted))
+      ("write_file" . (:confirm write :taint trusted))
+      ("write_org_file" . (:confirm write :taint trusted))
+      ("add_todo" . (:confirm write :taint trusted))
+      ("change_todo_state" . (:confirm write :taint trusted))
+      ("set_deadline" . (:confirm write :taint trusted))
+      ("add_tag" . (:confirm write :taint trusted))
+      ("web_search" . (:default deny :taint untrusted))
+      ("web_fetch_text" . (:default deny :taint untrusted))
+      ("web_extract_images" . (:default deny :taint untrusted))
+      ("web_fetch_image" . (:default deny :taint untrusted)))
+     :description "Allow coding tools with confirmation and deny web fetches."))
+  "Named policy preset settings.")
+
+(defun gptel-agent-runtime-policy-preset-names ()
+  "Return all available policy preset names as symbols."
+  (mapcar #'car gptel-agent-runtime--policy-preset-settings))
+
+(defun gptel-agent-runtime-policy-preset-description (preset)
+  "Return human-readable description for PRESET."
+  (plist-get (alist-get preset gptel-agent-runtime--policy-preset-settings)
+             :description))
+
+(defun gptel-agent-runtime-apply-policy-preset (preset &optional save)
+  "Apply named policy PRESET.
+With SAVE, persist the preset and derived policy variables through Customize."
+  (interactive
+   (list (intern
+          (completing-read "Policy preset: "
+                           (mapcar #'symbol-name
+                                   (gptel-agent-runtime-policy-preset-names))
+                           nil t nil nil
+                           (symbol-name gptel-agent-runtime-policy-preset)))
+         current-prefix-arg))
+  (let ((settings (alist-get preset
+                             gptel-agent-runtime--policy-preset-settings)))
+    (unless settings
+      (user-error "Unknown policy preset: %s" preset))
+    (let ((require-confirmation
+           (plist-get settings :require-confirmation))
+          (risk-level (plist-get settings :risk-level))
+          (tool-policy (copy-tree (plist-get settings :tool-policy))))
+      (if save
+          (progn
+            (customize-save-variable
+             'gptel-agent-runtime-policy-preset preset)
+            (customize-save-variable
+             'gptel-agent-runtime-require-confirmation-for-risky-actions
+             require-confirmation)
+            (customize-save-variable
+             'gptel-agent-runtime-risk-confirmation-level risk-level)
+            (customize-save-variable
+             'gptel-agent-runtime-tool-policy tool-policy))
+        (setq gptel-agent-runtime-policy-preset preset)
+        (setq gptel-agent-runtime-require-confirmation-for-risky-actions
+              require-confirmation)
+        (setq gptel-agent-runtime-risk-confirmation-level risk-level)
+        (setq gptel-agent-runtime-tool-policy tool-policy)))
+    (message "gptel policy preset applied: %s - %s%s"
+             preset
+             (or (gptel-agent-runtime-policy-preset-description preset) "")
+             (if save " (saved)" ""))
+    preset))
+
+(defalias 'gptel-agent-runtime-set-policy-preset
+  #'gptel-agent-runtime-apply-policy-preset)
+
+(unless (eq gptel-agent-runtime-policy-preset 'open)
+  (gptel-agent-runtime-apply-policy-preset
+   gptel-agent-runtime-policy-preset))
 
 (defun gptel-agent-runtime--policy-default-allows-p (policy)
   "Return non-nil when POLICY default permits execution."
@@ -3959,6 +4101,11 @@ Return non-nil when the region was changed."
   (with-temp-buffer
     (insert "gptel-agent-runtime guardrails\n\n")
     (insert (format "Runtime routing: %s\n" (gptel-agent-runtime-router-state)))
+    (insert (format "Policy preset: %s - %s\n"
+                    gptel-agent-runtime-policy-preset
+                    (or (gptel-agent-runtime-policy-preset-description
+                         gptel-agent-runtime-policy-preset)
+                        "")))
     (insert (format "Policy broker enabled: %s\n" gptel-agent-runtime-policy-enabled))
     (insert (format "Risk confirmation: enabled=%s level=%s\n"
                     gptel-agent-runtime-require-confirmation-for-risky-actions
@@ -4996,11 +5143,12 @@ With prefix SAVE, persist the preference through Customize."
   "Open a compact command menu for the Emacs agent runtime."
   (interactive)
   (message (concat "Agent runtime: [t]est [s]warm [g]uardrails [r]outer "
-                   "[e]nable [d]isable [m]ode start[u]p [l]tools [o]rganization "
+                   "[e]nable [d]isable [m]ode start[u]p policy-[v]iew "
+                   "[l]tools [o]rganization "
                    "[p]resume [x]stop [q]uit"))
   (pcase (read-char-choice
           "Agent runtime command: "
-          '(?t ?s ?g ?r ?e ?d ?m ?u ?l ?o ?p ?x ?q))
+          '(?t ?s ?g ?r ?e ?d ?m ?u ?v ?l ?o ?p ?x ?q))
     (?t (gptel-agent-runtime-safe-swarm-self-test))
     (?s (gptel-agent-runtime-show-swarm))
     (?g (gptel-agent-runtime-show-guardrails))
@@ -5010,6 +5158,7 @@ With prefix SAVE, persist the preference through Customize."
     (?m (call-interactively #'gptel-agent-runtime-set-chat-router-mode))
     (?u (call-interactively
          #'gptel-agent-runtime-set-chat-router-startup-mode))
+    (?v (call-interactively #'gptel-agent-runtime-set-policy-preset))
     (?l (gptel-agent-runtime-list-tools))
     (?o (gptel-agent-runtime-list-organization))
     (?p (gptel-agent-runtime-resume-last-session))
