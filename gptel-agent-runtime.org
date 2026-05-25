@@ -391,6 +391,15 @@ worker state. Tool mutation remains guarded by safety policy."
   :safe #'integerp
   :group 'gptel-agent-runtime)
 
+(defcustom gptel-agent-runtime-worker-max-retries 1
+  "Maximum automatic retries for a failed parallel worker.
+Retries are used for worker-level execution failures such as missing tools,
+exceptions, or empty direct-response callbacks. Verification failures still flow
+through the normal reviewer/reflection loop."
+  :type 'integer
+  :safe #'integerp
+  :group 'gptel-agent-runtime)
+
 (defcustom gptel-agent-runtime-parallel-safe-tool-names
   '("direct_response"
     "read_file" "read_org_file" "list_directory" "search_files"
@@ -449,6 +458,11 @@ web_fetch_text while still preventing accidental long loops."
 
 (defcustom gptel-agent-runtime-guardrails-buffer-name "*gptel-agent-guardrails*"
   "Buffer name used for runtime policy and guardrail status."
+  :type 'string
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-workers-buffer-name "*gptel-agent-workers*"
+  "Buffer name used for parallel worker lifecycle status."
   :type 'string
   :group 'gptel-agent-runtime)
 
@@ -644,10 +658,16 @@ Structs and constructors for high-level tasks and agent sessions. These are the 
   session-id
   agent
   step-id
+  step-title
+  tool
   status
   prompt
   result
   error
+  attempts
+  max-retries
+  handle
+  queued-at
   started-at
   updated-at)
 
@@ -778,6 +798,21 @@ Structs and constructors for high-level tasks and agent sessions. These are the 
             ('parallel-workers-launched
              (format "ROUTER launched %s parallel worker(s)"
                      (or (plist-get payload :count) 0)))
+            ('worker-queued
+             (format "WORKER %s queued for %s using %s"
+                     (or (plist-get payload :worker) "")
+                     (or (plist-get payload :agent) "assistant")
+                     (or (plist-get payload :tool) "direct_response")))
+            ('worker-retrying
+             (format "WORKER %s retrying attempt %s/%s: %s"
+                     (or (plist-get payload :worker) "")
+                     (or (plist-get payload :next-attempt) "")
+                     (or (plist-get payload :max-retries) "")
+                     (or (plist-get payload :error) "")))
+            ('worker-cancelled
+             (format "WORKER %s cancelled: %s"
+                     (or (plist-get payload :worker) "")
+                     (or (plist-get payload :reason) "")))
             ('worker-started
              (format "WORKER %s started for %s using %s"
                      (or (plist-get payload :worker) "")
@@ -1793,11 +1828,16 @@ Emacs and safe to evolve while the data model is still changing."
       :session-id ,(gptel-agent-runtime-worker-session-id object)
       :agent ,(gptel-agent-runtime-worker-agent object)
       :step-id ,(gptel-agent-runtime-worker-step-id object)
+      :step-title ,(gptel-agent-runtime-worker-step-title object)
+      :tool ,(gptel-agent-runtime-worker-tool object)
       :status ,(gptel-agent-runtime-worker-status object)
       :prompt ,(gptel-agent-runtime-worker-prompt object)
       :result ,(gptel-agent-runtime--struct-to-data
                 (gptel-agent-runtime-worker-result object))
       :error ,(gptel-agent-runtime-worker-error object)
+      :attempts ,(gptel-agent-runtime-worker-attempts object)
+      :max-retries ,(gptel-agent-runtime-worker-max-retries object)
+      :queued-at ,(gptel-agent-runtime-worker-queued-at object)
       :started-at ,(gptel-agent-runtime-worker-started-at object)
       :updated-at ,(gptel-agent-runtime-worker-updated-at object)))
    ((gptel-agent-runtime-organization-unit-p object)
@@ -1914,11 +1954,17 @@ Emacs and safe to evolve while the data model is still changing."
         :session-id (plist-get data :session-id)
         :agent (plist-get data :agent)
         :step-id (plist-get data :step-id)
+        :step-title (plist-get data :step-title)
+        :tool (plist-get data :tool)
         :status (plist-get data :status)
         :prompt (plist-get data :prompt)
         :result (gptel-agent-runtime--data-to-struct
                  (plist-get data :result))
         :error (plist-get data :error)
+        :attempts (or (plist-get data :attempts) 0)
+        :max-retries (or (plist-get data :max-retries)
+                         gptel-agent-runtime-worker-max-retries)
+        :queued-at (plist-get data :queued-at)
         :started-at (plist-get data :started-at)
         :updated-at (plist-get data :updated-at)))
       ('organization-unit
@@ -4400,6 +4446,12 @@ Return non-nil when the region was changed."
                          gptel-agent-runtime--raw-tool-continuation-running)))
     (insert (format "Raw JSON in example blocks executes: %s\n"
                     gptel-agent-runtime-execute-raw-tool-calls-in-example-blocks))
+    (insert (format "Parallel worker lifecycle: enabled=%s max=%s retries=%s active=%s\n"
+                    gptel-agent-runtime-enable-parallel-workers
+                    gptel-agent-runtime-max-parallel-workers
+                    gptel-agent-runtime-worker-max-retries
+                    (gptel-agent-runtime--worker-active-count
+                     gptel-agent-runtime--current-session)))
     (insert (format "Chat status markers: %s\n\n"
                     gptel-agent-runtime-show-chat-status-markers))
     (gptel-agent-runtime--insert-list
@@ -4447,6 +4499,9 @@ Return non-nil when the region was changed."
     (insert "- M-x gptel-agent-runtime-toggle-swarm-routing\n")
     (insert "- M-x gptel-agent-runtime-set-chat-router-mode\n")
     (insert "- M-x gptel-agent-runtime-list-tools\n")
+    (insert "- M-x gptel-agent-runtime-list-workers\n")
+    (insert "- M-x gptel-agent-runtime-cancel-worker\n")
+    (insert "- M-x gptel-agent-runtime-retry-worker\n")
     (insert "- M-x gptel-agent-runtime-list-organization\n")
     (buffer-string)))
 
@@ -5438,11 +5493,11 @@ With prefix SAVE, persist the preference through Customize."
   (interactive)
   (message (concat "Agent runtime: [t]est [s]warm [g]uardrails [r]outer "
                    "[e]nable [d]isable [m]ode start[u]p policy-[v]iew "
-                   "[l]tools [o]rganization "
+                   "[l]tools [w]orkers [o]rganization "
                    "[p]resume [x]stop [q]uit"))
   (pcase (read-char-choice
           "Agent runtime command: "
-          '(?t ?s ?g ?r ?e ?d ?m ?u ?v ?l ?o ?p ?x ?q))
+          '(?t ?s ?g ?r ?e ?d ?m ?u ?v ?l ?w ?o ?p ?x ?q))
     (?t (gptel-agent-runtime-safe-swarm-self-test))
     (?s (gptel-agent-runtime-show-swarm))
     (?g (gptel-agent-runtime-show-guardrails))
@@ -5454,6 +5509,7 @@ With prefix SAVE, persist the preference through Customize."
          #'gptel-agent-runtime-set-chat-router-startup-mode))
     (?v (call-interactively #'gptel-agent-runtime-set-policy-preset))
     (?l (gptel-agent-runtime-list-tools))
+    (?w (gptel-agent-runtime-list-workers))
     (?o (gptel-agent-runtime-list-organization))
     (?p (gptel-agent-runtime-resume-last-session))
     (?x (gptel-agent-runtime-stop))
@@ -5962,6 +6018,9 @@ remember -> continue."
   "Stop the current autonomous agent session."
   (interactive)
   (when gptel-agent-runtime--current-session
+    (gptel-agent-runtime-cancel-workers
+     gptel-agent-runtime--current-session
+     "Session stopped by user.")
     (setf (gptel-agent-runtime-task-status
            (gptel-agent-runtime-session-root-task
             gptel-agent-runtime--current-session))
@@ -6045,7 +6104,8 @@ remember -> continue."
     (when (eq (gptel-agent-runtime-worker-status worker) 'running)
       (setf (gptel-agent-runtime-worker-status worker) 'requeued)
       (setf (gptel-agent-runtime-worker-error worker)
-            "Worker was running when session was saved; requeued on resume.")))
+            "Worker was running when session was saved; requeued on resume.")
+      (setf (gptel-agent-runtime-worker-handle worker) nil)))
   (let* ((task (gptel-agent-runtime-session-current-task session))
          (plan (and task (gptel-agent-runtime-task-notes task))))
     (when (gptel-agent-runtime-plan-p plan)
@@ -6790,6 +6850,112 @@ The preferred format is JSON with a top-level :steps list. A single
          (not (gptel-agent-runtime-safety-check-step
                step (list :source "parallel-worker"))))))
 
+(defun gptel-agent-runtime--find-plan-step-by-id (session step-id)
+  "Return plan step with STEP-ID in SESSION, or nil."
+  (let* ((task (and session (gptel-agent-runtime-session-current-task session)))
+         (plan (and task (gptel-agent-runtime-task-notes task))))
+    (and plan
+         (cl-find step-id
+                  (gptel-agent-runtime-plan-steps plan)
+                  :key #'gptel-agent-runtime-plan-step-id
+                  :test #'equal))))
+
+(defun gptel-agent-runtime--worker-active-count (session)
+  "Return number of running workers for SESSION."
+  (cl-count-if
+   (lambda (worker)
+     (eq (gptel-agent-runtime-worker-status worker) 'running))
+   (gptel-agent-runtime-session-workers session)))
+
+(defun gptel-agent-runtime--worker-queued-p (worker)
+  "Return non-nil when WORKER is queued."
+  (eq (gptel-agent-runtime-worker-status worker) 'queued))
+
+(defun gptel-agent-runtime--worker-handle-cancel (worker)
+  "Best-effort cancellation of WORKER's process handle."
+  (let ((handle (gptel-agent-runtime-worker-handle worker)))
+    (when (processp handle)
+      (ignore-errors
+        (when (process-live-p handle)
+          (delete-process handle))))))
+
+(defun gptel-agent-runtime--worker-finish
+    (worker step session status &optional value error tool)
+  "Finish WORKER for STEP in SESSION with STATUS, VALUE, ERROR, and TOOL."
+  (setf (gptel-agent-runtime-worker-updated-at worker)
+        (gptel-agent-runtime--timestamp))
+  (setf (gptel-agent-runtime-worker-result worker) value)
+  (setf (gptel-agent-runtime-worker-error worker) error)
+  (let* ((attempts (or (gptel-agent-runtime-worker-attempts worker) 0))
+         (max-retries (or (gptel-agent-runtime-worker-max-retries worker) 0))
+         (tool (or tool (gptel-agent-runtime-worker-tool worker))))
+    (if (and (eq status 'failed)
+             (< attempts (1+ max-retries))
+             step
+             session)
+        (progn
+          (setf (gptel-agent-runtime-worker-status worker) 'queued)
+          (setf (gptel-agent-runtime-worker-queued-at worker)
+                (gptel-agent-runtime--timestamp))
+          (setf (gptel-agent-runtime-worker-handle worker) nil)
+          (setf (gptel-agent-runtime-plan-step-status step) 'draft)
+          (gptel-agent-runtime-emit-event
+           'worker-retrying
+           :source "worker-runner"
+           :session-id (gptel-agent-runtime-session-id session)
+           :payload (list :worker (gptel-agent-runtime-worker-id worker)
+                          :tool tool
+                          :next-attempt (1+ attempts)
+                          :max-retries max-retries
+                          :error error)
+           :taint 'trusted)
+          (gptel-agent-runtime--dispatch-worker-queue session))
+      (setf (gptel-agent-runtime-worker-status worker) status)
+      (setf (gptel-agent-runtime-worker-handle worker) nil)
+      (gptel-agent-runtime-emit-event
+       'worker-finished
+       :source "worker-runner"
+       :session-id (gptel-agent-runtime-session-id session)
+       :payload (list :worker (gptel-agent-runtime-worker-id worker)
+                      :status status
+                      :tool tool
+                      :error error
+                      :attempts attempts)
+       :taint 'trusted)
+      (pcase status
+        ('done
+         (gptel-agent-runtime--observe-result
+          step session
+          (gptel-agent-runtime-result-ok
+           :tool tool
+           :output (format "%s" value)
+           :metadata (list :worker (gptel-agent-runtime-worker-id worker)))))
+        ('failed
+         (gptel-agent-runtime--observe-result
+          step session
+          (gptel-agent-runtime-result-error
+           :tool tool
+           :error (or error "Worker failed.")
+           :metadata (list :worker (gptel-agent-runtime-worker-id worker)))))
+        ('cancelled
+         (when step
+           (setf (gptel-agent-runtime-plan-step-status step) 'cancelled))))
+      (when session
+        (gptel-agent-runtime--dispatch-worker-queue session)))))
+
+(defun gptel-agent-runtime--dispatch-worker-queue (session)
+  "Start queued workers for SESSION up to the concurrency limit."
+  (let ((active (gptel-agent-runtime--worker-active-count session)))
+    (dolist (worker (reverse (gptel-agent-runtime-session-workers session)))
+      (when (and (< active gptel-agent-runtime-max-parallel-workers)
+                 (gptel-agent-runtime--worker-queued-p worker))
+        (let ((step (gptel-agent-runtime--find-plan-step-by-id
+                     session
+                     (gptel-agent-runtime-worker-step-id worker))))
+          (when step
+            (setq active (1+ active))
+            (gptel-agent-runtime--run-worker worker step session)))))))
+
 (defun gptel-agent-runtime--launch-parallel-workers (steps session)
   "Launch STEPS as independent worker requests for SESSION."
   (push (format "%s launching %d parallel worker(s)."
@@ -6805,27 +6971,53 @@ The preferred format is JSON with a top-level :steps list. A single
                                  steps))
    :taint 'trusted)
   (dolist (step steps)
-    (setf (gptel-agent-runtime-plan-step-status step) 'running)
+    (setf (gptel-agent-runtime-plan-step-status step) 'queued)
     (let* ((now (gptel-agent-runtime--timestamp))
+           (tool-name (or (gptel-agent-runtime-plan-step-suggested-tool step)
+                          "direct_response"))
            (worker (gptel-agent-runtime-worker-create
                     :id (format "worker-%s" (format-time-string "%Y%m%d%H%M%S%N"))
                     :session-id (gptel-agent-runtime-session-id session)
                     :agent (or (gptel-agent-runtime-plan-step-agent step)
                                "assistant")
                     :step-id (gptel-agent-runtime-plan-step-id step)
-                    :status 'running
+                    :step-title (gptel-agent-runtime-plan-step-title step)
+                    :tool tool-name
+                    :status 'queued
                     :prompt (gptel-agent-runtime-plan-step-title step)
                     :result nil
                     :error nil
-                    :started-at now
+                    :attempts 0
+                    :max-retries gptel-agent-runtime-worker-max-retries
+                    :handle nil
+                    :queued-at now
+                    :started-at nil
                     :updated-at now)))
       (push worker (gptel-agent-runtime-session-workers session))
-      (gptel-agent-runtime--run-worker worker step session))))
+      (gptel-agent-runtime-emit-event
+       'worker-queued
+       :source "worker-queue"
+       :session-id (gptel-agent-runtime-session-id session)
+       :payload (list :worker (gptel-agent-runtime-worker-id worker)
+                      :agent (gptel-agent-runtime-worker-agent worker)
+                      :step-id (gptel-agent-runtime-worker-step-id worker)
+                      :step (gptel-agent-runtime-worker-step-title worker)
+                      :tool tool-name)
+       :taint 'trusted)))
+  (gptel-agent-runtime--dispatch-worker-queue session))
 
 (defun gptel-agent-runtime--run-worker (worker step session)
   "Run WORKER for STEP in SESSION."
   (let ((tool-name (or (gptel-agent-runtime-plan-step-suggested-tool step)
                        "direct_response")))
+    (setf (gptel-agent-runtime-worker-status worker) 'running)
+    (setf (gptel-agent-runtime-worker-started-at worker)
+          (gptel-agent-runtime--timestamp))
+    (setf (gptel-agent-runtime-worker-updated-at worker)
+          (gptel-agent-runtime--timestamp))
+    (setf (gptel-agent-runtime-worker-attempts worker)
+          (1+ (or (gptel-agent-runtime-worker-attempts worker) 0)))
+    (setf (gptel-agent-runtime-plan-step-status step) 'running)
     (gptel-agent-runtime-emit-event
      'worker-started
      :source "worker-runner"
@@ -6834,7 +7026,8 @@ The preferred format is JSON with a top-level :steps list. A single
                     :agent (gptel-agent-runtime-worker-agent worker)
                     :step-id (gptel-agent-runtime-worker-step-id worker)
                     :step (gptel-agent-runtime-plan-step-title step)
-                    :tool tool-name)
+                    :tool tool-name
+                    :attempts (gptel-agent-runtime-worker-attempts worker))
      :taint 'trusted)
     (if (equal tool-name "direct_response")
         (gptel-agent-runtime--worker-direct-response worker step session)
@@ -6846,55 +7039,24 @@ The preferred format is JSON with a top-level :steps list. A single
                         "direct_response"))
          (tool (gptel-agent-runtime--find-native-tool tool-name)))
     (if (not tool)
-        (progn
-          (setf (gptel-agent-runtime-worker-status worker) 'failed)
-          (setf (gptel-agent-runtime-worker-error worker)
-                (format "Unknown tool: %s" tool-name))
-          (gptel-agent-runtime-emit-event
-           'worker-finished
-           :source "worker-runner"
-           :session-id (gptel-agent-runtime-session-id session)
-           :payload (list :worker (gptel-agent-runtime-worker-id worker)
-                          :status 'failed
-                          :tool tool-name
-                          :error (format "Unknown tool: %s" tool-name))
-           :taint 'trusted)
-          (gptel-agent-runtime--observe-result
-           step session
-           (gptel-agent-runtime-result-error
-            :tool tool-name
-            :error (format "Unknown tool: %s" tool-name)
-            :metadata (list :worker
-                            (gptel-agent-runtime-worker-id worker)))))
+        (gptel-agent-runtime--worker-finish
+         worker step session 'failed nil
+         (format "Unknown tool: %s" tool-name)
+         tool-name)
       (if (and (fboundp 'gptel-tool-async) (gptel-tool-async tool))
           (let* ((args (gptel-agent-runtime--normalize-args
                         (gptel-agent-runtime-plan-step-args step)))
                  (arg-values (if (fboundp 'gptel--map-tool-args)
                                  (gptel--map-tool-args tool args)
                                nil)))
-            (apply (gptel-tool-function tool)
-                   (lambda (value)
-                     (setf (gptel-agent-runtime-worker-status worker) 'done)
-                     (setf (gptel-agent-runtime-worker-result worker) value)
-                     (setf (gptel-agent-runtime-worker-updated-at worker)
-                           (gptel-agent-runtime--timestamp))
-                     (gptel-agent-runtime-emit-event
-                      'worker-finished
-                      :source "worker-runner"
-                      :session-id (gptel-agent-runtime-session-id session)
-                      :payload (list :worker (gptel-agent-runtime-worker-id worker)
-                                     :status 'done
-                                     :tool tool-name)
-                      :taint 'trusted)
-                     (gptel-agent-runtime--observe-result
-                      step session
-                      (gptel-agent-runtime-result-ok
-                       :tool tool-name
-                       :output (format "%s" value)
-                       :metadata (list :worker
-                                       (gptel-agent-runtime-worker-id worker)
-                                       :async t))))
-                   arg-values))
+            (setf (gptel-agent-runtime-worker-handle worker)
+                  (apply (gptel-tool-function tool)
+                         (lambda (value)
+                           (unless (eq (gptel-agent-runtime-worker-status worker)
+                                       'cancelled)
+                             (gptel-agent-runtime--worker-finish
+                              worker step session 'done value nil tool-name)))
+                         arg-values)))
         (condition-case err
             (let* ((args (gptel-agent-runtime--normalize-args
                           (gptel-agent-runtime-plan-step-args step)))
@@ -6902,45 +7064,13 @@ The preferred format is JSON with a top-level :steps list. A single
                                    (gptel--map-tool-args tool args)
                                  nil))
                    (value (apply (gptel-tool-function tool) arg-values)))
-              (setf (gptel-agent-runtime-worker-status worker) 'done)
-              (setf (gptel-agent-runtime-worker-result worker) value)
-              (setf (gptel-agent-runtime-worker-updated-at worker)
-                    (gptel-agent-runtime--timestamp))
-              (gptel-agent-runtime-emit-event
-               'worker-finished
-               :source "worker-runner"
-               :session-id (gptel-agent-runtime-session-id session)
-               :payload (list :worker (gptel-agent-runtime-worker-id worker)
-                              :status 'done
-                              :tool tool-name)
-               :taint 'trusted)
-              (gptel-agent-runtime--observe-result
-               step session
-               (gptel-agent-runtime-result-ok
-                :tool tool-name
-                :output (format "%s" value)
-                :metadata (list :worker
-                                (gptel-agent-runtime-worker-id worker)))))
+              (gptel-agent-runtime--worker-finish
+               worker step session 'done value nil tool-name))
           (error
-           (setf (gptel-agent-runtime-worker-status worker) 'failed)
-           (setf (gptel-agent-runtime-worker-error worker)
-                 (error-message-string err))
-           (gptel-agent-runtime-emit-event
-            'worker-finished
-            :source "worker-runner"
-            :session-id (gptel-agent-runtime-session-id session)
-            :payload (list :worker (gptel-agent-runtime-worker-id worker)
-                           :status 'failed
-                           :tool tool-name
-                           :error (error-message-string err))
-            :taint 'trusted)
-           (gptel-agent-runtime--observe-result
-            step session
-            (gptel-agent-runtime-result-error
-             :tool tool-name
-             :error (error-message-string err)
-             :metadata (list :worker
-                             (gptel-agent-runtime-worker-id worker))))))))))
+           (gptel-agent-runtime--worker-finish
+            worker step session 'failed nil
+            (error-message-string err)
+            tool-name)))))))
 
 (defun gptel-agent-runtime--worker-direct-response (worker step session)
   "Run a direct-response WORKER request for STEP."
@@ -6952,53 +7082,165 @@ The preferred format is JSON with a top-level :steps list. A single
                      (alist-get (my/gptel-directive-for-current-runtime)
                                 gptel-directives)
                      "You are an Emacs assistant.")))
-    (gptel-request
-     (format "GOAL:\n%s\n\nWORKER STEP:\n%s\n\nRATIONALE:\n%s\n\nReturn the result for this delegated step."
-             (gptel-agent-runtime-task-goal task)
-             (gptel-agent-runtime-plan-step-title step)
-             (gptel-agent-runtime-plan-step-rationale step))
-     :system system
-     :callback
-     (lambda (response _info)
-       (setf (gptel-agent-runtime-worker-updated-at worker)
-             (gptel-agent-runtime--timestamp))
-       (if response
-           (progn
-             (setf (gptel-agent-runtime-worker-status worker) 'done)
-             (setf (gptel-agent-runtime-worker-result worker) response)
-             (gptel-agent-runtime-emit-event
-              'worker-finished
-              :source "worker-runner"
-              :session-id (gptel-agent-runtime-session-id session)
-              :payload (list :worker (gptel-agent-runtime-worker-id worker)
-                             :status 'done
-                             :tool "parallel-direct-response"
-                             :chars (length response))
-              :taint 'trusted)
-             (gptel-agent-runtime--observe-result
-              step session
-              (gptel-agent-runtime-result-ok
-               :tool "parallel-direct-response"
-               :output response
-               :metadata (list :worker (gptel-agent-runtime-worker-id worker)))))
-         (setf (gptel-agent-runtime-worker-status worker) 'failed)
-         (setf (gptel-agent-runtime-worker-error worker) "No response")
-         (gptel-agent-runtime-emit-event
-          'worker-finished
-          :source "worker-runner"
-          :session-id (gptel-agent-runtime-session-id session)
-          :payload (list :worker (gptel-agent-runtime-worker-id worker)
-                         :status 'failed
-                         :tool "parallel-direct-response"
-                         :error "No response")
-          :taint 'trusted)
-         (gptel-agent-runtime--observe-result
-          step session
-          (gptel-agent-runtime-result-error
-           :tool "parallel-direct-response"
-           :error "Worker returned no response."
-           :metadata (list :worker
-                           (gptel-agent-runtime-worker-id worker)))))))))
+    (setf (gptel-agent-runtime-worker-handle worker)
+          (gptel-request
+           (format "GOAL:\n%s\n\nWORKER STEP:\n%s\n\nRATIONALE:\n%s\n\nReturn the result for this delegated step."
+                   (gptel-agent-runtime-task-goal task)
+                   (gptel-agent-runtime-plan-step-title step)
+                   (gptel-agent-runtime-plan-step-rationale step))
+           :system system
+           :callback
+           (lambda (response _info)
+             (unless (eq (gptel-agent-runtime-worker-status worker) 'cancelled)
+               (if response
+                   (gptel-agent-runtime--worker-finish
+                    worker step session 'done response nil
+                    "parallel-direct-response")
+                 (gptel-agent-runtime--worker-finish
+                  worker step session 'failed nil
+                 "Worker returned no response."
+                  "parallel-direct-response"))))))))
+
+(defun gptel-agent-runtime-cancel-worker (worker-id &optional session reason)
+  "Cancel WORKER-ID in SESSION or the active session."
+  (interactive
+   (list
+    (let* ((session (or gptel-agent-runtime--current-session
+                        (user-error "No active agent session")))
+           (ids (mapcar #'gptel-agent-runtime-worker-id
+                        (gptel-agent-runtime-session-workers session))))
+      (completing-read "Cancel worker: " ids nil t))
+    gptel-agent-runtime--current-session
+    "Cancelled by user."))
+  (let* ((session (or session gptel-agent-runtime--current-session))
+         (worker (and session
+                      (cl-find worker-id
+                               (gptel-agent-runtime-session-workers session)
+                               :key #'gptel-agent-runtime-worker-id
+                               :test #'equal))))
+    (unless worker
+      (user-error "Unknown worker: %s" worker-id))
+    (gptel-agent-runtime--worker-handle-cancel worker)
+    (setf (gptel-agent-runtime-worker-status worker) 'cancelled)
+    (setf (gptel-agent-runtime-worker-error worker)
+          (or reason "Cancelled."))
+    (setf (gptel-agent-runtime-worker-updated-at worker)
+          (gptel-agent-runtime--timestamp))
+    (let ((step (gptel-agent-runtime--find-plan-step-by-id
+                 session
+                 (gptel-agent-runtime-worker-step-id worker))))
+      (when step
+        (setf (gptel-agent-runtime-plan-step-status step) 'cancelled)))
+    (gptel-agent-runtime-emit-event
+     'worker-cancelled
+     :source "worker-control"
+     :session-id (gptel-agent-runtime-session-id session)
+     :payload (list :worker (gptel-agent-runtime-worker-id worker)
+                    :reason (or reason "Cancelled."))
+     :taint 'trusted)
+    (gptel-agent-runtime--dispatch-worker-queue session)
+    (when (called-interactively-p 'interactive)
+      (message "Worker cancelled: %s" worker-id))
+    worker))
+
+(defun gptel-agent-runtime-cancel-workers (&optional session reason)
+  "Cancel queued/running workers for SESSION."
+  (let ((session (or session gptel-agent-runtime--current-session)))
+    (when session
+      (dolist (worker (gptel-agent-runtime-session-workers session))
+        (when (memq (gptel-agent-runtime-worker-status worker)
+                    '(queued running requeued))
+          (gptel-agent-runtime-cancel-worker
+           (gptel-agent-runtime-worker-id worker)
+           session
+           (or reason "Cancelled.")))))))
+
+(defun gptel-agent-runtime-retry-worker (worker-id &optional session)
+  "Requeue failed or cancelled WORKER-ID in SESSION or the active session."
+  (interactive
+   (list
+    (let* ((session (or gptel-agent-runtime--current-session
+                        (user-error "No active agent session")))
+           (ids (mapcar #'gptel-agent-runtime-worker-id
+                        (gptel-agent-runtime-session-workers session))))
+      (completing-read "Retry worker: " ids nil t))
+    gptel-agent-runtime--current-session))
+  (let* ((session (or session gptel-agent-runtime--current-session))
+         (worker (and session
+                      (cl-find worker-id
+                               (gptel-agent-runtime-session-workers session)
+                               :key #'gptel-agent-runtime-worker-id
+                               :test #'equal)))
+         (step (and worker
+                    (gptel-agent-runtime--find-plan-step-by-id
+                     session
+                     (gptel-agent-runtime-worker-step-id worker)))))
+    (unless worker
+      (user-error "Unknown worker: %s" worker-id))
+    (unless step
+      (user-error "Worker has no matching plan step: %s" worker-id))
+    (unless (memq (gptel-agent-runtime-worker-status worker)
+                  '(failed cancelled requeued))
+      (user-error "Worker is not retryable: %s"
+                  (gptel-agent-runtime-worker-status worker)))
+    (setf (gptel-agent-runtime-worker-status worker) 'queued)
+    (setf (gptel-agent-runtime-worker-error worker) nil)
+    (setf (gptel-agent-runtime-worker-result worker) nil)
+    (setf (gptel-agent-runtime-worker-handle worker) nil)
+    (setf (gptel-agent-runtime-worker-queued-at worker)
+          (gptel-agent-runtime--timestamp))
+    (setf (gptel-agent-runtime-plan-step-status step) 'queued)
+    (gptel-agent-runtime-emit-event
+     'worker-retrying
+     :source "worker-control"
+     :session-id (gptel-agent-runtime-session-id session)
+     :payload (list :worker worker-id
+                    :manual t
+                    :next-attempt (1+ (or (gptel-agent-runtime-worker-attempts worker) 0))
+                    :max-retries (gptel-agent-runtime-worker-max-retries worker))
+     :taint 'trusted)
+    (gptel-agent-runtime--dispatch-worker-queue session)
+    (when (called-interactively-p 'interactive)
+      (message "Worker requeued: %s" worker-id))
+    worker))
+
+(defun gptel-agent-runtime-workers-summary (&optional session)
+  "Return a human-readable summary of workers for SESSION."
+  (let ((session (or session gptel-agent-runtime--current-session)))
+    (with-temp-buffer
+      (insert "gptel-agent-runtime workers\n\n")
+      (if (not session)
+          (insert "No active session.\n")
+        (insert (format "Session: %s\n" (gptel-agent-runtime-session-id session)))
+        (insert (format "Active: %s  Max parallel: %s  Max retries: %s\n\n"
+                        (gptel-agent-runtime--worker-active-count session)
+                        gptel-agent-runtime-max-parallel-workers
+                        gptel-agent-runtime-worker-max-retries))
+        (if (gptel-agent-runtime-session-workers session)
+            (dolist (worker (reverse (gptel-agent-runtime-session-workers
+                                      session)))
+              (insert
+               (format "- %s [%s] agent=%s tool=%s attempts=%s/%s\n  step=%s\n  error=%s\n"
+                       (gptel-agent-runtime-worker-id worker)
+                       (gptel-agent-runtime-worker-status worker)
+                       (or (gptel-agent-runtime-worker-agent worker) "")
+                       (or (gptel-agent-runtime-worker-tool worker) "")
+                       (or (gptel-agent-runtime-worker-attempts worker) 0)
+                       (or (gptel-agent-runtime-worker-max-retries worker) 0)
+                       (or (gptel-agent-runtime-worker-step-title worker) "")
+                       (or (gptel-agent-runtime-worker-error worker) ""))))
+          (insert "No workers have been created for this session yet.\n")))
+      (buffer-string))))
+
+(defun gptel-agent-runtime-list-workers ()
+  "Display parallel worker lifecycle status."
+  (interactive)
+  (with-current-buffer (get-buffer-create
+                        gptel-agent-runtime-workers-buffer-name)
+    (erase-buffer)
+    (insert (gptel-agent-runtime-workers-summary))
+    (goto-char (point-min))
+    (display-buffer (current-buffer))))
 
 (defun gptel-agent-runtime--find-native-tool (name)
   "Return gptel tool named NAME, or nil."
@@ -7381,10 +7623,11 @@ CONTEXT is passed to the policy broker."
     (gptel-agent-runtime-record-skill-outcome skill-name success-p note)))
 
 (defun gptel-agent-runtime--running-workers-p (session)
-  "Return non-nil when SESSION has workers still running."
+  "Return non-nil when SESSION has workers still running or queued."
   (cl-some
    (lambda (worker)
-     (eq (gptel-agent-runtime-worker-status worker) 'running))
+     (memq (gptel-agent-runtime-worker-status worker)
+           '(queued running requeued)))
    (gptel-agent-runtime-session-workers session)))
 
 (defun gptel-agent-runtime--observe-result (step session result)
