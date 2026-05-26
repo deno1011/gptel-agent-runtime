@@ -274,10 +274,18 @@ planning so similar tasks need fewer reasoning iterations."
   "Default organizational process for autonomous sessions.
 `hierarchical' uses manager-style planning, delegation, execution, review, and
 memory. `delphi' asks isolated specialist agents for drafts, then aggregates.
-`direct' keeps the earlier lightweight planner/executor behavior."
+`direct' keeps the earlier lightweight planner/executor behavior.
+`brainstorm' runs inventor + simplifier + skeptic + planner for novel tasks.
+`hypothesis-test' runs a single cheap experiment step and feeds its observed
+result back as evidence.
+`peer-review' adds skeptic + risk-officer review before any write/code-exec
+step is allowed to run."
   :type '(choice (const :tag "Hierarchical chief clerk" hierarchical)
                  (const :tag "Delphi peer review" delphi)
-                 (const :tag "Direct planner/executor" direct))
+                 (const :tag "Direct planner/executor" direct)
+                 (const :tag "Brainstorm for novel tasks" brainstorm)
+                 (const :tag "Hypothesis-test experiment" hypothesis-test)
+                 (const :tag "Peer-review before mutations" peer-review))
   :group 'gptel-agent-runtime)
 
 (defcustom gptel-agent-runtime-enable-plan-review t
@@ -1597,6 +1605,25 @@ status, and the registered agent capability allowlist."
                            0 (min 5 (length gptel-agent-runtime--last-skeptic-verdicts)))
                 "\n"))))
     (gptel-agent-runtime--mission-control-section
+     "Exploration & learning"
+     (format "  Novelty threshold: %.2f   Min tokens: %d\n  Strategy synthesis: %s   Interval: every %d ticks\n  Candidate playbooks pending: %d\n  Top playbooks (by success rate):\n%s"
+             gptel-agent-runtime-novelty-threshold
+             gptel-agent-runtime-novelty-min-tokens
+             gptel-agent-runtime-strategy-synthesis-enabled
+             gptel-agent-runtime-strategy-synthesis-interval-ticks
+             (length (or (gptel-agent-runtime-list-playbook-candidates) '()))
+             (let ((top (gptel-agent-runtime-rank-playbooks-by-success 5)))
+               (if (null top)
+                   "    (no playbooks registered)"
+                 (mapconcat
+                  (lambda (pb)
+                    (let ((rate (gptel-agent-runtime-playbook-success-rate pb)))
+                      (format "    %s  %s"
+                              (or (gptel-agent-runtime-playbook-id pb)
+                                  (gptel-agent-runtime-playbook-summary pb))
+                              (if rate (format "%.0f%%" (* 100 rate)) "unused"))))
+                  top "\n")))))
+    (gptel-agent-runtime--mission-control-section
      "Agents / capability allowlists"
      (if (null gptel-agent-runtime-agent-registry)
          "  (no agents registered)"
@@ -2295,6 +2322,333 @@ Returns DECISION."
                decision)
               t))))
   decision)
+
+;; ===== Phase 4: novelty detection, strategy synthesis, hypothesis-test, =====
+;; ===== playbook success scoring                                          =====
+
+(defcustom gptel-agent-runtime-novelty-threshold 0.7
+  "Novelty score (0.0-1.0) at or above which a task is treated as novel.
+When `gptel-agent-runtime-novelty-score' returns >= this threshold, the
+runtime emits a `novelty-detected' event so brainstorm-mode subscribers can
+react. Default 0.7 means tasks must be clearly unlike past work to trigger."
+  :type 'number
+  :safe #'numberp
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-novelty-min-tokens 3
+  "Minimum number of significant tokens in a task before novelty is scored."
+  :type 'integer
+  :safe #'integerp
+  :group 'gptel-agent-runtime)
+
+(defun gptel-agent-runtime--significant-tokens (text)
+  "Return a deduplicated list of significant tokens for novelty scoring.
+Drops short and very-common stop tokens to reduce noise."
+  (let* ((tokens (and (stringp text)
+                      (split-string (downcase text) "[^a-zA-Z0-9_-]+" t)))
+         (stops '("the" "a" "an" "and" "or" "of" "to" "in" "on" "for" "with"
+                  "is" "are" "be" "as" "by" "that" "this" "it" "at" "from"
+                  "do" "did" "does" "have" "has" "had" "you" "i" "me" "we"
+                  "they" "he" "she" "us" "our" "your" "their"
+                  "der" "die" "das" "und" "oder" "in" "an" "auf" "mit" "ist"
+                  "im" "am" "ein" "eine" "den" "des" "dem" "zu" "von")))
+    (cl-remove-duplicates
+     (cl-remove-if (lambda (tok)
+                     (or (< (length tok) 3)
+                         (member tok stops)))
+                   tokens)
+     :test #'equal)))
+
+(defun gptel-agent-runtime--jaccard (a b)
+  "Return the Jaccard similarity between token lists A and B (0.0-1.0)."
+  (if (or (null a) (null b))
+      0.0
+    (let* ((set-a (cl-remove-duplicates a :test #'equal))
+           (set-b (cl-remove-duplicates b :test #'equal))
+           (intersect (cl-count-if (lambda (x) (member x set-b)) set-a))
+           (union (length (cl-union set-a set-b :test #'equal))))
+      (if (zerop union) 0.0
+        (/ (float intersect) union)))))
+
+(defun gptel-agent-runtime-novelty-score (text)
+  "Return a 0.0-1.0 novelty score for TEXT against past sessions and playbooks.
+Higher means more novel. The score is a deterministic blend of the inverse
+of the best Jaccard similarity against past playbook summaries and the
+inverse of trigger-coverage by registered playbooks. The function never
+calls a model; it is safe to invoke synchronously inside the policy broker
+or the chat router."
+  (let* ((tokens (gptel-agent-runtime--significant-tokens text)))
+    (cond
+     ((< (length tokens) gptel-agent-runtime-novelty-min-tokens) 0.0)
+     ((null gptel-agent-runtime-playbook-registry) 1.0)
+     (t
+      (let* ((best 0.0)
+             (trigger-hits 0))
+        (dolist (pb gptel-agent-runtime-playbook-registry)
+          (let* ((summary (or (gptel-agent-runtime-playbook-summary pb) ""))
+                 (pb-tokens (gptel-agent-runtime--significant-tokens summary))
+                 (sim (gptel-agent-runtime--jaccard tokens pb-tokens)))
+            (when (> sim best) (setq best sim)))
+          (dolist (trig (gptel-agent-runtime-playbook-triggers pb))
+            (when (and trig (gptel-agent-runtime--trigger-matches-p trig text))
+              (cl-incf trigger-hits))))
+        (let* ((sim-novelty (- 1.0 best))
+               (trigger-novelty
+                (cond ((>= trigger-hits 2) 0.0)
+                      ((= trigger-hits 1) 0.3)
+                      (t 0.7)))
+               ;; Heavier weight on Jaccard since trigger matches are coarse.
+               (score (+ (* 0.65 sim-novelty)
+                         (* 0.35 trigger-novelty))))
+          (max 0.0 (min 1.0 score))))))))
+
+(defun gptel-agent-runtime-novel-task-p (text)
+  "Return non-nil and emit `novelty-detected' when TEXT is novel.
+The threshold is `gptel-agent-runtime-novelty-threshold'."
+  (let ((score (gptel-agent-runtime-novelty-score text)))
+    (when (>= score gptel-agent-runtime-novelty-threshold)
+      (gptel-agent-runtime-emit-event
+       'novelty-detected
+       :source "novelty-detector"
+       :payload (list :score score
+                      :text (gptel-agent-runtime--shorten text 220))
+       :taint 'trusted)
+      score)))
+
+;; ----- Playbook success scoring helpers -----
+
+(defun gptel-agent-runtime-playbook-success-rate (playbook)
+  "Return the success rate (0.0-1.0) for PLAYBOOK or nil when unused."
+  (let* ((s (or (gptel-agent-runtime-playbook-success-count playbook) 0))
+         (f (or (gptel-agent-runtime-playbook-failure-count playbook) 0))
+         (total (+ s f)))
+    (when (> total 0)
+      (/ (float s) total))))
+
+(defun gptel-agent-runtime-playbook-last-used-at (playbook)
+  "Return the last-used timestamp string for PLAYBOOK.
+Currently derived from `updated-at' until per-invocation tracking lands."
+  (gptel-agent-runtime-playbook-updated-at playbook))
+
+(defun gptel-agent-runtime-rank-playbooks-by-success (&optional limit)
+  "Return registered playbooks ordered by best recent-success rate.
+LIMIT defaults to all. Playbooks with no usage history sort last but are
+included so unused candidates are still discoverable."
+  (let* ((scored
+          (mapcar
+           (lambda (pb)
+             (cons pb (or (gptel-agent-runtime-playbook-success-rate pb)
+                          -1.0)))
+           gptel-agent-runtime-playbook-registry))
+         (sorted (sort scored (lambda (a b) (> (cdr a) (cdr b)))))
+         (heads (mapcar #'car sorted)))
+    (if limit (cl-subseq heads 0 (min limit (length heads))) heads)))
+
+(defun gptel-agent-runtime-next-time-do-this-first (text)
+  "Return a one-line hint about which playbook to try first for TEXT, or nil."
+  (let* ((matches (and (fboundp 'gptel-agent-runtime-match-playbooks)
+                       (gptel-agent-runtime-match-playbooks text)))
+         (best (car matches))
+         (rate (and best (gptel-agent-runtime-playbook-success-rate best))))
+    (when (and best rate (>= rate 0.5))
+      (format "Next time, start with playbook `%s' (%.0f%% success on %d runs)."
+              (or (gptel-agent-runtime-playbook-id best)
+                  (gptel-agent-runtime-playbook-summary best))
+              (* 100 rate)
+              (+ (or (gptel-agent-runtime-playbook-success-count best) 0)
+                 (or (gptel-agent-runtime-playbook-failure-count best) 0))))))
+
+;; ----- Strategy synthesis: candidate playbooks -----
+
+(defcustom gptel-agent-runtime-strategy-synthesis-enabled t
+  "When non-nil, the runtime synthesizes candidate playbooks on idle ticks.
+Candidate playbooks are saved to
+`~/.emacs.d/gptel-agent-runtime/playbooks/candidates/' with `:status candidate'
+and are NOT auto-applied. They become active only after the user reviews
+them via `M-x gptel-agent-runtime-review-playbook-candidates'."
+  :type 'boolean
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-strategy-synthesis-min-success 2
+  "Minimum success-count required for a playbook to seed a candidate synthesis."
+  :type 'integer
+  :safe #'integerp
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-strategy-synthesis-interval-ticks 20
+  "Minimum substrate ticks between two strategy-synthesis runs."
+  :type 'integer
+  :safe #'integerp
+  :group 'gptel-agent-runtime)
+
+(defvar gptel-agent-runtime--last-synthesis-tick 0
+  "Tick at which the last strategy-synthesis run produced a candidate.")
+
+(defun gptel-agent-runtime--candidates-directory ()
+  "Return the candidate-playbook directory, creating it as needed."
+  (let ((dir (expand-file-name
+              "gptel-agent-runtime/playbooks/candidates/"
+              user-emacs-directory)))
+    (unless (file-directory-p dir) (make-directory dir t))
+    dir))
+
+(defun gptel-agent-runtime--write-candidate-playbook (candidate)
+  "Persist CANDIDATE plist to a new file under the candidates directory.
+Returns the absolute path written."
+  (let* ((id (or (plist-get candidate :id)
+                 (format "candidate-%s-%s"
+                         gptel-agent-runtime-tick-counter
+                         (format-time-string "%H%M%S"))))
+         (file (expand-file-name
+                (concat id ".el")
+                (gptel-agent-runtime--candidates-directory))))
+    (with-temp-file file
+      (let ((create-lockfiles nil))
+        (prin1 (gptel-agent-runtime--state-header "strategy-synthesis")
+               (current-buffer))
+        (insert "\n")
+        (prin1 (plist-put candidate :id id) (current-buffer))
+        (insert "\n")))
+    file))
+
+(defun gptel-agent-runtime-synthesize-candidate-playbook (&optional reason)
+  "Produce one candidate playbook from the top-2 successful playbooks.
+This is deterministic (no model call): it picks the two highest-success-rate
+playbooks, merges their triggers, concatenates their step summaries, and
+writes the result as a candidate. Returns the candidate plist, or nil when
+there are not enough successful playbooks to synthesize from."
+  (interactive)
+  (let* ((seeds (cl-remove-if-not
+                 (lambda (pb)
+                   (let ((s (or (gptel-agent-runtime-playbook-success-count pb)
+                                0)))
+                     (>= s gptel-agent-runtime-strategy-synthesis-min-success)))
+                 (gptel-agent-runtime-rank-playbooks-by-success))))
+    (when (>= (length seeds) 2)
+      (let* ((a (nth 0 seeds))
+             (b (nth 1 seeds))
+             (triggers (cl-remove-duplicates
+                        (append (gptel-agent-runtime-playbook-triggers a)
+                                (gptel-agent-runtime-playbook-triggers b))
+                        :test #'equal))
+             (summary (format "Synthesized strategy combining %s + %s"
+                              (or (gptel-agent-runtime-playbook-summary a) "?")
+                              (or (gptel-agent-runtime-playbook-summary b) "?")))
+             (steps (append (gptel-agent-runtime-playbook-steps a)
+                            (gptel-agent-runtime-playbook-steps b)))
+             (candidate (list :id (format "candidate-%s-%s"
+                                          gptel-agent-runtime-tick-counter
+                                          (format-time-string "%H%M%S"))
+                              :status 'candidate
+                              :summary summary
+                              :triggers triggers
+                              :steps steps
+                              :source-playbooks
+                              (list (gptel-agent-runtime-playbook-id a)
+                                    (gptel-agent-runtime-playbook-id b))
+                              :reason (or reason "tick-driven synthesis")
+                              :created-at (gptel-agent-runtime--timestamp)))
+             (file (gptel-agent-runtime--write-candidate-playbook candidate)))
+        (setq gptel-agent-runtime--last-synthesis-tick
+              gptel-agent-runtime-tick-counter)
+        (gptel-agent-runtime-emit-event
+         'memory-write
+         :source "strategy-synthesis"
+         :payload (list :candidate (plist-get candidate :id) :file file)
+         :taint 'trusted)
+        (when (called-interactively-p 'interactive)
+          (message "gptel-agent-runtime: wrote candidate playbook %s" file))
+        candidate))))
+
+(defun gptel-agent-runtime--maybe-synthesize-on-tick (_event)
+  "Tick-subscribed callback that occasionally synthesizes a candidate playbook."
+  (when (and gptel-agent-runtime-strategy-synthesis-enabled
+             gptel-agent-runtime--idle-pump-timer
+             (>= (- gptel-agent-runtime-tick-counter
+                    gptel-agent-runtime--last-synthesis-tick)
+                 gptel-agent-runtime-strategy-synthesis-interval-ticks))
+    (ignore-errors
+      (gptel-agent-runtime-synthesize-candidate-playbook
+       "idle-pump tick"))))
+
+;; Register the synthesis subscriber once.
+(gptel-agent-runtime-subscribe
+ 'tick #'gptel-agent-runtime--maybe-synthesize-on-tick)
+
+(defun gptel-agent-runtime-list-playbook-candidates ()
+  "Return the list of candidate playbook files."
+  (when (file-directory-p (gptel-agent-runtime--candidates-directory))
+    (directory-files (gptel-agent-runtime--candidates-directory) t "\\.el\\'")))
+
+(defun gptel-agent-runtime-review-playbook-candidates ()
+  "Open a buffer listing pending candidate playbooks for human review."
+  (interactive)
+  (let* ((files (gptel-agent-runtime-list-playbook-candidates)))
+    (with-current-buffer (get-buffer-create "*gptel-agent-candidates*")
+      (erase-buffer)
+      (insert (format "gptel-agent-runtime playbook candidates\nDirectory: %s\nCount: %d\n\n"
+                      (gptel-agent-runtime--candidates-directory)
+                      (length files)))
+      (if (null files)
+          (insert "  (no candidates pending; synthesis runs on idle ticks)\n")
+        (dolist (file files)
+          (let* ((parsed (gptel-agent-runtime--read-versioned file))
+                 (rest (cdr parsed))
+                 (payload (with-temp-buffer
+                            (insert-file-contents file)
+                            (goto-char rest)
+                            (condition-case nil (read (current-buffer)) (error nil)))))
+            (insert (format "  %s\n    summary: %s\n    triggers: %s\n    sources: %s\n"
+                            file
+                            (or (plist-get payload :summary) "?")
+                            (or (plist-get payload :triggers) '())
+                            (or (plist-get payload :source-playbooks) '()))))))
+      (goto-char (point-min))
+      (special-mode))
+    (display-buffer "*gptel-agent-candidates*")))
+
+;; ----- Hypothesis-test process mode (scaffold) -----
+
+(defcustom gptel-agent-runtime-hypothesis-test-enabled t
+  "When non-nil, planner may choose `hypothesis-test' as a process mode.
+The mode produces a small experiment step that the executor runs and feeds
+back as evidence with source-type `experiment'. Useful when the runtime is
+uncertain about an environmental capability (does this URL respond, does
+this Babel language work, does this file exist)."
+  :type 'boolean
+  :group 'gptel-agent-runtime)
+
+(defun gptel-agent-runtime-make-experiment-evidence
+    (description observed expected-predicate &optional agent)
+  "Construct evidence of type `experiment'.
+DESCRIPTION is what was tested. OBSERVED is the observed result string.
+EXPECTED-PREDICATE is a one-line description of the expected outcome (e.g.
+\"URL responds 200\"). AGENT is the agent that ran the experiment.
+
+Taint defaults to `untrusted' for experiment evidence so downstream prompts
+treat the observation as data, not as an instruction."
+  (gptel-agent-runtime-make-evidence
+   (format "EXPERIMENT: %s\nEXPECTED: %s\nOBSERVED: %s"
+           (or description "")
+           (or expected-predicate "")
+           (or observed ""))
+   'experiment
+   (or description "experiment")
+   :agent agent
+   :taint 'untrusted))
+
+(defun gptel-agent-runtime-evaluate-experiment (evidence predicate-fn)
+  "Apply PREDICATE-FN to the OBSERVED field of EVIDENCE.
+PREDICATE-FN takes the observed string and returns non-nil on success.
+Returns a plist with :passed-p, :observed, :description."
+  (let* ((text (gptel-agent-runtime-evidence-text evidence))
+         (observed (and (stringp text)
+                        (when (string-match "OBSERVED: \\(.*\\)\\'" text)
+                          (match-string 1 text))))
+         (passed (and observed (funcall predicate-fn observed))))
+    (list :passed-p (and passed t)
+          :observed observed
+          :description (gptel-agent-runtime-evidence-source-id evidence))))
 
 (defun gptel-agent-runtime-policy-evaluate-step (step &optional context)
   "Return policy decision for STEP in CONTEXT.
