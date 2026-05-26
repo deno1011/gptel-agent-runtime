@@ -504,11 +504,14 @@ list keeps the compatibility shim read/search oriented."
   :group 'gptel-agent-runtime)
 
 (defcustom gptel-agent-runtime-raw-tool-confirmation-names
-  '("execute_code" "run_elisp" "org_export")
+  '("execute_code" "run_elisp" "org_export"
+    "write_file" "write_org_file"
+    "add_todo" "change_todo_state" "set_deadline" "add_tag")
   "Raw JSON tool-call names that may run only after confirmation.
-This covers useful local-model actions that execute code or produce files. They
-are never auto-executed from raw assistant text unless confirmation policy is
-relaxed by the user."
+This covers useful local-model actions that execute code, produce files, or
+mutate Org state. They are never auto-executed from raw assistant text unless
+confirmation policy is relaxed by the user. The capability gate, the
+quarantine pre-flight, and the Advocatus Diaboli skeptic all still apply."
   :type '(repeat string)
   :group 'gptel-agent-runtime)
 
@@ -7204,6 +7207,37 @@ CRITICAL RULES:
   ,#+begin_src elisp block that performs the work, not a JSON example.
 - If you find yourself describing how the user would call a tool, stop and
   call the tool yourself.
+
+CRITICAL REASONING (apply BEFORE you decide how to respond):
+- Distinguish action verbs from explanation verbs.
+  - Action verbs: \"create\", \"add\", \"write\", \"do\", \"make\", \"set\",
+    \"delete\", \"open\", \"run\", \"send\", \"build\", \"erstellen\",
+    \"hinzufügen\", \"machen\". The user wants the task done.
+  - Explanation verbs: \"how do I\", \"how to\", \"explain\", \"describe\",
+    \"show me how\", \"erkläre\", \"wie kann ich\". The user wants
+    instructions.
+  - When in doubt, ASK exactly one question: \"Do you want me to do this
+    now, or explain how?\"
+- If the user asks you to DO something and a required input is missing or
+  ambiguous (which file? which list? what content? which buffer? what
+  destination?), STOP and ask ONE concise clarifying question. Do not
+  guess. Do not give a tutorial. Do not write the JSON.
+  Example failures to avoid:
+  - User: \"create a todo\". You: \"Here is how add_todo works...\" - WRONG.
+  - User: \"create a todo\". You: \"Which file should the TODO go into
+    (inbox.org, a project file, somewhere else)? And what is the task?\" - RIGHT.
+- A tool not appearing in the raw-call allow list is NEVER a reason to
+  refuse the task, give instructions, or describe the JSON. Those allow
+  lists describe how the local-model raw-JSON compatibility shim selects
+  what to execute; they do not constrain you. When you decide a tool is the
+  right action, CALL IT NATIVELY via gptel's tool-call channel. The
+  capability gate, policy preset, and skeptic decide whether it actually
+  runs - not you.
+- When the user is vague but it is safe to proceed with a reasonable
+  default, you may proceed AND state the default in one short sentence
+  (\"Adding to inbox.org under TODO\"). When the safe default would mutate
+  important state (config files, dotfiles, multiple files at once,
+  unfamiliar paths), do not default - ask.
 
 ORG EXECUTION RULES:
 - Emacs action: use an elisp block with :AUTORUN.
