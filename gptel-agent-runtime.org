@@ -5111,6 +5111,8 @@ Compatibility helpers for selecting a backend/model, choosing the matching direc
 
 #+begin_src emacs-lisp
 
+(require 'gar-directives)
+
 (defun my/gptel-register-model (name backend model)
   "Register NAME with BACKEND+MODEL in `my/gptel-backends'.
 Overwrites an existing entry with the same name."
@@ -5118,46 +5120,6 @@ Overwrites an existing entry with the same name."
         (cons (cons name (cons backend model))
               (cl-remove name my/gptel-backends
                          :key #'car :test #'equal))))
-
-(defvar my/gptel-local-model-pattern
-  "\\(Ollama\\|LM Studio\\|MLX\\)"
-  "Regexp matching model display names that should use the local directive.")
-
-(defvar my/gptel-local-runtime-pattern
-  "\\(Ollama\\|LM Studio\\|MLX\\|qwen2\\.5\\|qwen3\\|llama\\|mistral\\|deepseek-r1\\)"
-  "Regexp matching active backend/model values that should use the local directive.")
-
-(defun my/gptel-directive-for-choice (choice)
-  "Return the directive symbol that should be used for model CHOICE."
-  (if (string-match-p my/gptel-local-model-pattern choice)
-      'emacs-local-assistant
-    'emacs-assistant))
-
-(defun my/gptel-local-runtime-p ()
-  "Return non-nil when the active gptel backend/model is local."
-  (let ((backend-name (condition-case nil
-                          (if (and (boundp 'gptel-backend)
-                                   (fboundp 'gptel-backend-name))
-                              (format "%s" (gptel-backend-name gptel-backend))
-                            (format "%S" gptel-backend))
-                        (error (format "%S" gptel-backend))))
-        (model-name (format "%S" (my/gptel-model-id gptel-model))))
-    (string-match-p my/gptel-local-runtime-pattern
-                    (concat backend-name " " model-name))))
-
-(defun my/gptel-directive-for-current-runtime ()
-  "Return the directive symbol for the active gptel backend/model."
-  (if (my/gptel-local-runtime-p)
-      'emacs-local-assistant
-    'emacs-assistant))
-
-(defun my/gptel-sync-directive-for-current-runtime ()
-  "Set `gptel--system-message' according to the active backend/model."
-  (let* ((directive (my/gptel-directive-for-current-runtime))
-         (system-message (alist-get directive gptel-directives)))
-    (when system-message
-      (setq-local gptel--system-message system-message))
-    directive))
 
 (defun my/gptel-tools-all ()
   "Return list of all registered gptel-tool structs.
@@ -5392,13 +5354,6 @@ is non-nil. Return the routing decision plist."
   "Show the active gptel model in the mode line."
   (when (bound-and-true-p gptel-mode)
     (format " [%s]" gptel-model)))
-
-(defun my/gptel-current-directive-name ()
-  "Return the directive symbol that matches the current system message."
-  (let ((current (and (boundp 'gptel--system-message) gptel--system-message)))
-    (car (seq-find (lambda (entry)
-                     (equal (cdr entry) current))
-                   gptel-directives))))
 
 (defun my/gptel-status ()
   "Display active gptel backend, model, directive, and tool count."
@@ -6770,12 +6725,17 @@ Activates the response and AUTORUN hooks on
 (provide 'claude-executor)
 #+end_src
 
-* Prompt Directives and Runtime Defaults
+* Executor Mode Activation
 
-gptel directives for local assistant, planner, and full assistant modes, plus executor defaults and Babel language activation. Prompt strings contain nested Org examples, so those lines are comma-escaped in this literate source and unescaped during tangling.
+The prompt directives previously lived in this section. They have moved
+to [[file:gar-directives.org][gar-directives]] (loaded earlier in this file via =(require 'gar-directives)=
+in the Model Switching section). What remains here is the legacy
+=claude-executor= configuration -- it stays for now and will move to its
+own module in a later PR.
 
-#+begin_src emacs-lisp
+#+begin_src emacs-lisp :tangle no
 
+;; Moved to gar-directives.org:
 (setq gptel-directives
       (append gptel-directives
               `((assistant . ,(format "You are an Emacs assistant.
@@ -6999,6 +6959,14 @@ Never tell the user to run manual M-x commands when Emacs can execute the action
 (add-hook 'gptel-mode-hook
           (lambda ()
             (my/gptel-sync-directive-for-current-runtime)))
+#+end_src
+
+The block above is preserved verbatim from the pre-split monolith for
+historical reference and is suppressed from tangling. The block below
+(default =:tangle yes=) is the executor activation that stays in the
+master.
+
+#+begin_src emacs-lisp
 
 ;;; --- Security -----------------------------------------------------
 ;; Confirmation dialog before execution (Babel + AUTORUN)
