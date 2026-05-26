@@ -1575,6 +1575,28 @@ status, and the registered agent capability allowlist."
      "Injection canaries"
      (gptel-agent-runtime--mission-control-canary-summary))
     (gptel-agent-runtime--mission-control-section
+     "Skeptic"
+     (format "  Enabled: %s   Mode: %s   Budget: %dms\n  Trigger risks: %s\n  Trigger caps: %s\n  Recent verdicts: %d\n%s"
+             gptel-agent-runtime-skeptic-enabled
+             gptel-agent-runtime-skeptic-mode
+             gptel-agent-runtime-skeptic-budget-ms
+             gptel-agent-runtime-skeptic-trigger-risks
+             gptel-agent-runtime-skeptic-trigger-caps
+             (length gptel-agent-runtime--last-skeptic-verdicts)
+             (if (null gptel-agent-runtime--last-skeptic-verdicts)
+                 "  (no verdicts yet)"
+               (mapconcat
+                (lambda (entry)
+                  (let ((v (cdr entry)))
+                    (format "  %s  tool=%s  risk=%s  concerns=%d"
+                            (car entry)
+                            (plist-get v :tool)
+                            (plist-get v :risk)
+                            (length (plist-get v :concerns)))))
+                (cl-subseq gptel-agent-runtime--last-skeptic-verdicts
+                           0 (min 5 (length gptel-agent-runtime--last-skeptic-verdicts)))
+                "\n"))))
+    (gptel-agent-runtime--mission-control-section
      "Agents / capability allowlists"
      (if (null gptel-agent-runtime-agent-registry)
          "  (no agents registered)"
@@ -2106,6 +2128,174 @@ load-bearing zero-trust gate that stacks before the policy alist."
            tool
            (or allowed '())))))))
 
+;; ===== Advocatus Diaboli skeptic =====
+
+(defcustom gptel-agent-runtime-skeptic-enabled t
+  "When non-nil, run the Advocatus Diaboli skeptic before risky tool calls.
+The skeptic produces a verdict (`high'/`medium'/`low' risk plus concerns and
+recommended mitigations). High-risk verdicts force confirmation regardless of
+the policy preset; medium-risk verdicts are attached as decision metadata.
+Default is on so risky tool calls are always pre-reviewed."
+  :type 'boolean
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-skeptic-mode 'rule-based
+  "How the skeptic produces verdicts.
+`rule-based' uses deterministic capability/risk/argument heuristics with no
+model call. `model-based' (future) calls the registered `skeptic' agent via
+gptel with `gptel-agent-runtime-skeptic-budget-ms' as a timeout and falls
+back to rule-based on timeout/error."
+  :type '(choice (const :tag "Rule-based (deterministic)" rule-based)
+                 (const :tag "Model-based (future)" model-based))
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-skeptic-budget-ms 3000
+  "Maximum milliseconds the model-based skeptic may spend before falling back."
+  :type 'integer
+  :safe #'integerp
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-skeptic-trigger-risks
+  '(write shell destructive)
+  "Step risks that trigger the skeptic gate."
+  :type '(repeat symbol)
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-skeptic-trigger-caps
+  '(write-fs write-org shell-exec elisp-eval code-exec)
+  "Required-cap symbols that trigger the skeptic gate.
+A tool whose required-caps intersect this list is always reviewed."
+  :type '(repeat symbol)
+  :group 'gptel-agent-runtime)
+
+(defvar gptel-agent-runtime--last-skeptic-verdicts nil
+  "Recent skeptic verdicts, newest first, for the mission-control dashboard.")
+
+(defun gptel-agent-runtime--skeptic-applies-p (risk required-caps)
+  "Return non-nil when the skeptic should fire for RISK and REQUIRED-CAPS."
+  (or (memq risk gptel-agent-runtime-skeptic-trigger-risks)
+      (cl-intersection required-caps
+                       gptel-agent-runtime-skeptic-trigger-caps)))
+
+(defun gptel-agent-runtime--skeptic-rule-based-verdict
+    (tool args risk required-caps agent)
+  "Return a rule-based skeptic verdict plist.
+TOOL is the tool name, ARGS is the normalized argument plist, RISK is the
+step risk, REQUIRED-CAPS is the tool's required cap list, AGENT is the
+invoking agent name."
+  (let* ((concerns nil)
+         (mitigations nil)
+         (level 'low)
+         (push-concern (lambda (s) (push s concerns)))
+         (push-mit (lambda (s) (push s mitigations)))
+         (paths (delq nil (list (plist-get args :path)
+                                (plist-get args :file)
+                                (plist-get args :directory))))
+         (command (or (plist-get args :command) (plist-get args :code)))
+         (url (plist-get args :url)))
+    (when (eq risk 'destructive)
+      (setq level 'high)
+      (funcall push-concern (format "Risk class is destructive for tool `%s'." tool))
+      (funcall push-mit "Require explicit human confirmation."))
+    (when (memq 'shell-exec required-caps)
+      (setq level (if (eq level 'low) 'medium level))
+      (funcall push-concern "Tool can execute arbitrary shell commands.")
+      (funcall push-mit "Confirm the exact command string before running."))
+    (when (memq 'elisp-eval required-caps)
+      (setq level (if (eq level 'low) 'medium level))
+      (funcall push-concern "Tool can evaluate Elisp inside the running Emacs.")
+      (funcall push-mit "Inspect the code; check for delete-file, shell-command, set, intern."))
+    (when (memq 'code-exec required-caps)
+      (setq level (if (eq level 'low) 'medium level))
+      (funcall push-concern "Tool can execute generated source code."))
+    (dolist (p paths)
+      (when (stringp p)
+        (when (or (string-prefix-p "/" p)
+                  (string-match-p "\\`~/?\\'" p)
+                  (string= p "/"))
+          (setq level 'high)
+          (funcall push-concern (format "Path argument `%s' targets a root/home boundary." p))
+          (funcall push-mit "Refuse without a narrower path scope."))
+        (when (string-match-p "\\.\\." p)
+          (setq level (if (eq level 'low) 'medium level))
+          (funcall push-concern (format "Path argument `%s' contains `..' segments." p)))))
+    (when (stringp command)
+      (when (string-match-p "\\brm\\s-+-r\\(f\\|fr\\)\\b" command)
+        (setq level 'high)
+        (funcall push-concern "Command performs recursive removal.")
+        (funcall push-mit "Refuse without an explicit target whitelist."))
+      (when (string-match-p "\\bcurl\\b.*\\|\\bwget\\b.*" command)
+        (when (string-match-p "\\bsh\\b\\|\\bbash\\b\\|\\bzsh\\b" command)
+          (setq level 'high)
+          (funcall push-concern "Command pipes downloaded content into a shell.")
+          (funcall push-mit "Refuse; download to a file and review first.")))
+      (when (string-match-p "\\bsudo\\b" command)
+        (setq level 'high)
+        (funcall push-concern "Command escalates privileges with sudo.")))
+    (when (and (stringp url)
+               (not (string-match-p "\\`https?://" url)))
+      (setq level (if (eq level 'low) 'medium level))
+      (funcall push-concern (format "URL `%s' is not http(s)." url)))
+    (when (null concerns)
+      (push (format "No rule-based concerns for `%s'." tool) concerns))
+    (list :risk level
+          :concerns (nreverse concerns)
+          :recommended-mitigations (nreverse mitigations)
+          :tool tool
+          :agent agent
+          :mode 'rule-based)))
+
+(defun gptel-agent-runtime-skeptic-evaluate (step decision)
+  "Return a skeptic verdict for STEP given the policy DECISION, or nil.
+Returns nil when the skeptic is disabled or does not apply to STEP."
+  (when (and gptel-agent-runtime-skeptic-enabled
+             (gptel-agent-runtime-plan-step-p step))
+    (let* ((tool (or (gptel-agent-runtime-plan-step-suggested-tool step) ""))
+           (risk (or (gptel-agent-runtime-plan-step-risk step) 'safe))
+           (required-caps (gptel-agent-runtime-caps-for-tool tool risk))
+           (agent (or (gptel-agent-runtime-plan-step-agent step)
+                      (plist-get
+                       (gptel-agent-runtime-policy-decision-metadata decision)
+                       :agent)
+                      "assistant"))
+           (args (gptel-agent-runtime--normalize-args
+                  (gptel-agent-runtime-plan-step-args step))))
+      (when (gptel-agent-runtime--skeptic-applies-p risk required-caps)
+        (let ((verdict
+               (pcase gptel-agent-runtime-skeptic-mode
+                 ('rule-based
+                  (gptel-agent-runtime--skeptic-rule-based-verdict
+                   tool args risk required-caps agent))
+                 ;; Model-based mode falls back to rule-based for now; a real
+                 ;; gptel call with timeout lands in a follow-up patch.
+                 (_ (gptel-agent-runtime--skeptic-rule-based-verdict
+                     tool args risk required-caps agent)))))
+          (push (cons (gptel-agent-runtime--timestamp) verdict)
+                gptel-agent-runtime--last-skeptic-verdicts)
+          (when (> (length gptel-agent-runtime--last-skeptic-verdicts) 50)
+            (setcdr (nthcdr 49 gptel-agent-runtime--last-skeptic-verdicts)
+                    nil))
+          (gptel-agent-runtime-emit-event
+           'skeptic-verdict
+           :source "skeptic"
+           :payload verdict
+           :taint 'trusted)
+          verdict)))))
+
+(defun gptel-agent-runtime--apply-skeptic-to-decision (decision verdict)
+  "Mutate DECISION metadata with VERDICT and escalate confirmation for `high'.
+Returns DECISION."
+  (when verdict
+    (let* ((meta (gptel-agent-runtime-policy-decision-metadata decision))
+           (level (plist-get verdict :risk)))
+      (setf (gptel-agent-runtime-policy-decision-metadata decision)
+            (plist-put meta :skeptic-verdict verdict))
+      (when (eq level 'high)
+        (setf (gptel-agent-runtime-policy-decision-confirmation-required-p
+               decision)
+              t))))
+  decision)
+
 (defun gptel-agent-runtime-policy-evaluate-step (step &optional context)
   "Return policy decision for STEP in CONTEXT.
 CONTEXT is a plist that may include :source, :agent, :session-id, and :raw-call."
@@ -2174,6 +2364,12 @@ CONTEXT is a plist that may include :source, :agent, :session-id, and :raw-call.
                             :capability-deny-reason cap-deny
                             :quarantine-deny-reason quarantine-deny
                             :context context))))
+      ;; Skeptic runs for allowed risky tool calls and may escalate the
+      ;; confirmation requirement. Denied steps skip the skeptic since
+      ;; they will not run.
+      (when (gptel-agent-runtime-policy-decision-allowed-p decision)
+        (let ((verdict (gptel-agent-runtime-skeptic-evaluate step decision)))
+          (gptel-agent-runtime--apply-skeptic-to-decision decision verdict)))
       (gptel-agent-runtime-emit-event
        'policy-decision
        :source "policy-broker"
@@ -3622,6 +3818,65 @@ extend them later from their private config."
    :tool-categories '(memory org files)
    :allowed-caps '(read-fs write-fs read-org write-org
                    memory-read memory-write system-info))
+
+  ;; ----- Phase 3 swarm roles -----
+  (gptel-agent-runtime-register-agent
+   'skeptic 'skeptic
+   "Advocatus Diaboli. Finds logical flaws, missing checks, hidden assumptions, and security risks. Returns a JSON verdict with risk level, concerns, and recommended mitigations."
+   :directive 'emacs-local-assistant
+   :tool-categories '(context files)
+   :allowed-caps '(read-fs read-org read-buffer memory-read system-info)
+   :system-prompt "You are the runtime skeptic. Be adversarial.
+
+Inspect the proposed tool call (tool name, arguments, agent, risk, capabilities). Return a JSON object with exactly:
+  {\"risk\": \"high\"|\"medium\"|\"low\",
+   \"concerns\": [\"concern 1\", \"concern 2\", ...],
+   \"recommended_mitigations\": [\"mitigation 1\", ...]}
+
+Be specific. Cite exact arguments, paths, patterns, or capability mismatches when you flag a concern. Never approve a destructive or shell tool with `risk` lower than `medium` unless the arguments are obviously safe and explicit (no wildcards, no /, no piping, no eval).")
+
+  (gptel-agent-runtime-register-agent
+   'inventor 'inventor
+   "Generates 3+ unconventional alternative approaches and ranks them by expected information gain."
+   :directive 'emacs-local-assistant
+   :tool-categories '(context)
+   :allowed-caps '(read-fs read-org read-buffer memory-read system-info)
+   :system-prompt "You are the inventor. Produce at least three distinct candidate approaches to the user's goal. For each: short name, rationale, expected information gain, expected cost. Rank them. Do not pick one yet.")
+
+  (gptel-agent-runtime-register-agent
+   'researcher 'researcher
+   "Gathers external information aggressively via web search and fetch, cites sources inline."
+   :directive 'emacs-local-assistant
+   :tool-categories '(web files context)
+   :allowed-caps '(read-fs read-org read-buffer net-out memory-read
+                   system-info)
+   :system-prompt "You are the researcher. Use web_search and web_fetch_text to gather primary sources, then cite the URLs you actually fetched. Never claim a fact whose source URL you did not fetch.")
+
+  (gptel-agent-runtime-register-agent
+   'simplifier 'simplifier
+   "Takes the latest plan or draft and returns the minimal viable version (collapse near-duplicates, remove unneeded steps)."
+   :directive 'emacs-local-assistant
+   :tool-categories '(context)
+   :allowed-caps '(read-fs read-org read-buffer memory-read system-info)
+   :system-prompt "You are the simplifier. Read the latest plan/draft and return its minimal viable version: collapse near-duplicate steps, remove unnecessary ones, keep verification.")
+
+  (gptel-agent-runtime-register-agent
+   'risk-officer 'risk-officer
+   "Evaluates a plan against the active policy preset, capability manifests, protected paths, write roots; flags mismatches."
+   :directive 'emacs-local-assistant
+   :tool-categories '(context)
+   :allowed-caps '(read-fs read-org read-buffer memory-read system-info)
+   :system-prompt "You are the risk officer. Read the active policy preset, agent allowed-caps, protected paths, write roots, blocked patterns. Compare the proposed plan against them and list every mismatch with the specific rule violated.")
+
+  (gptel-agent-runtime-register-agent
+   'implementer 'implementer
+   "Given an approved plan, executes steps in order without inventing new ones."
+   :directive 'emacs-local-assistant
+   :tool-categories '(org files buffers code export)
+   :allowed-caps '(read-fs write-fs read-org write-org read-buffer write-buffer
+                   elisp-eval code-exec memory-read memory-write
+                   system-info)
+   :system-prompt "You are the implementer. The plan has already been approved. Execute the steps in order. Do not add steps not in the plan. After each step, report what changed.")
 
   (gptel-agent-runtime-register-organization-unit
    'research
