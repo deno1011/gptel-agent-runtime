@@ -2323,6 +2323,357 @@ Returns DECISION."
               t))))
   decision)
 
+;; ===== Phase 5: tool-invention pipeline =====
+
+(defcustom gptel-agent-runtime-tool-invention-enabled t
+  "When non-nil, the runtime accepts tool-invention proposals.
+Proposed tools are saved to
+`~/.emacs.d/gptel-agent-runtime/proposed-tools/' and never auto-registered.
+They become live only after passing static analysis, subprocess validation,
+and explicit user approval via
+`M-x gptel-agent-runtime-review-proposed-tools'."
+  :type 'boolean
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-tool-invention-denied-forms
+  '(shell-command
+    shell-command-to-string
+    call-process call-process-region call-process-shell-command
+    process-file
+    start-process start-process-shell-command
+    make-process
+    make-network-process
+    url-retrieve url-retrieve-synchronously
+    delete-file delete-directory
+    rename-file copy-file copy-directory
+    write-file write-region append-to-file
+    eval eval-region eval-buffer eval-expression
+    load load-file load-library
+    require autoload
+    intern
+    setq set setq-default fset fmakunbound makunbound
+    advice-add advice-remove
+    add-hook remove-hook
+    kill-emacs save-buffers-kill-emacs)
+  "Symbols that may NOT appear anywhere inside a proposed-tool body.
+The static analyzer walks the proposed s-expression and rejects the
+proposal if any of these symbols appears in functional position. The
+denied list is conservative on purpose; users can edit this list to relax
+it for trusted environments, but the default targets shell/file/eval
+escape hatches and primitive low-level mutation."
+  :type '(repeat symbol)
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-tool-invention-allowed-prefixes
+  '("gptel-agent-runtime-" "gptel-")
+  "Function-symbol prefixes whose calls are always allowed inside proposals.
+Used as a positive allowlist: even when a function name overlaps a denied
+form, callers prefixed by one of these strings are still permitted. Empty
+list means no prefix-based allowlist."
+  :type '(repeat string)
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-tool-invention-subprocess-timeout 30
+  "Maximum seconds the subprocess validator may run."
+  :type 'integer
+  :safe #'integerp
+  :group 'gptel-agent-runtime)
+
+(defun gptel-agent-runtime--proposed-tools-directory ()
+  "Return (and create) the proposed-tools directory."
+  (let ((dir (expand-file-name
+              "gptel-agent-runtime/proposed-tools/"
+              user-emacs-directory)))
+    (unless (file-directory-p dir) (make-directory dir t))
+    dir))
+
+(defun gptel-agent-runtime--rejected-tools-directory ()
+  "Return (and create) the rejected-tools directory."
+  (let ((dir (expand-file-name "rejected/"
+                               (gptel-agent-runtime--proposed-tools-directory))))
+    (unless (file-directory-p dir) (make-directory dir t))
+    dir))
+
+(defun gptel-agent-runtime--symbol-allowed-prefix-p (sym)
+  "Return non-nil when SYM's name starts with an allowed prefix."
+  (let ((name (and (symbolp sym) (symbol-name sym))))
+    (and name
+         (cl-some (lambda (p) (string-prefix-p p name))
+                  gptel-agent-runtime-tool-invention-allowed-prefixes))))
+
+(defun gptel-agent-runtime--safe-form-violations (form)
+  "Walk FORM and return a list of (SYMBOL . PATH) violations.
+PATH is a short description like \"head\" or `apply' for diagnostics.
+Returns nil when no denied symbol appears in functional position."
+  (let ((violations nil))
+    (cl-labels
+        ((walk (node)
+           (cond
+            ((not (consp node)) nil)
+            ((symbolp (car node))
+             (let ((head (car node)))
+               (when (and (memq head gptel-agent-runtime-tool-invention-denied-forms)
+                          (not (gptel-agent-runtime--symbol-allowed-prefix-p head)))
+                 (push (cons head 'head) violations))
+               ;; Catch (funcall 'symbol ...) and (apply 'symbol ...)
+               (when (memq head '(funcall apply))
+                 (let ((target (cadr node)))
+                   (when (and (consp target)
+                              (eq (car target) 'quote)
+                              (symbolp (cadr target))
+                              (memq (cadr target)
+                                    gptel-agent-runtime-tool-invention-denied-forms)
+                              (not (gptel-agent-runtime--symbol-allowed-prefix-p
+                                    (cadr target))))
+                     (push (cons (cadr target) head) violations))))
+               (mapc #'walk (cdr node))))
+            (t (mapc #'walk node)))))
+      (walk form))
+    (nreverse violations)))
+
+(defun gptel-agent-runtime--read-all-forms (file)
+  "Read all top-level Lisp forms from FILE and return them as a list."
+  (with-temp-buffer
+    (insert-file-contents file)
+    (goto-char (point-min))
+    (let (forms form)
+      (while (setq form (condition-case nil
+                            (read (current-buffer))
+                          (end-of-file nil)))
+        (push form forms))
+      (nreverse forms))))
+
+(cl-defun gptel-agent-runtime-propose-tool
+    (&key name description args-schema body-elisp required-caps risk
+          rationale tests author)
+  "Save a tool proposal under proposed-tools/ and emit a submission event.
+NAME (string) is the proposed tool name. DESCRIPTION is user-facing text.
+ARGS-SCHEMA is an arg description (plist or JSON-shaped sexp).
+BODY-ELISP is a single Lisp form (the proposed defun body). REQUIRED-CAPS
+is a list of capability symbols. RISK is one of safe/read/write/shell/
+destructive. RATIONALE is the inventor's reasoning. TESTS is an optional
+list of (INPUT EXPECTED) pairs for the subprocess validator. AUTHOR is an
+optional name. Returns the absolute file path."
+  (unless gptel-agent-runtime-tool-invention-enabled
+    (user-error "Tool invention is disabled."))
+  (unless (and (stringp name) (not (string-empty-p name)))
+    (user-error "Tool proposal needs a non-empty :name string"))
+  (unless body-elisp
+    (user-error "Tool proposal needs :body-elisp"))
+  (let* ((dir (gptel-agent-runtime--proposed-tools-directory))
+         (file (expand-file-name
+                (format "%s-%s.el"
+                        name
+                        gptel-agent-runtime-tick-counter)
+                dir))
+         (payload (list :name name
+                        :description description
+                        :args-schema args-schema
+                        :body-elisp body-elisp
+                        :required-caps required-caps
+                        :risk (or risk 'write)
+                        :rationale rationale
+                        :tests tests
+                        :author author
+                        :submitted-tick gptel-agent-runtime-tick-counter
+                        :submitted-at (gptel-agent-runtime--timestamp))))
+    (with-temp-file file
+      (let ((create-lockfiles nil))
+        (prin1 (gptel-agent-runtime--state-header "tool-invention")
+               (current-buffer))
+        (insert "\n")
+        (prin1 payload (current-buffer))
+        (insert "\n")))
+    (gptel-agent-runtime-emit-event
+     'tool-proposal-submitted
+     :source "tool-invention"
+     :payload (list :name name :file file)
+     :taint 'trusted)
+    file))
+
+(defun gptel-agent-runtime--read-proposal (file)
+  "Return the proposal plist stored in FILE, or nil when unreadable."
+  (let* ((parsed (gptel-agent-runtime--read-versioned file))
+         (rest (cdr parsed)))
+    (when rest
+      (with-temp-buffer
+        (insert-file-contents file)
+        (goto-char rest)
+        (condition-case nil (read (current-buffer)) (error nil))))))
+
+(defun gptel-agent-runtime--locate-emacs-binary ()
+  "Return an absolute path to the running Emacs binary, or nil."
+  (let ((candidate (expand-file-name invocation-name invocation-directory)))
+    (cond
+     ((and (stringp candidate) (file-executable-p candidate)) candidate)
+     ((executable-find "emacs"))
+     (t nil))))
+
+(defun gptel-agent-runtime-validate-proposed-tool (file)
+  "Validate the proposal at FILE through static + subprocess checks.
+Returns a plist with :file, :static-violations, :subprocess-exit-code,
+:subprocess-stdout, :subprocess-stderr, :passed-p, :passed-static-p."
+  (let* ((proposal (gptel-agent-runtime--read-proposal file))
+         (body (plist-get proposal :body-elisp))
+         (violations (and body
+                          (gptel-agent-runtime--safe-form-violations body)))
+         (passed-static (null violations))
+         (sub-stdout "") (sub-stderr "") (sub-exit nil))
+    (when (and passed-static body)
+      (let* ((emacs-bin (gptel-agent-runtime--locate-emacs-binary))
+             (body-file (make-temp-file "gar-body-" nil ".el"))
+             (script-file (make-temp-file "gar-validator-" nil ".el")))
+        (unwind-protect
+            (when emacs-bin
+              ;; Dump the proposed body alone to a candidate file we can
+              ;; byte-compile in a clean subprocess.
+              (with-temp-file body-file
+                (let ((print-level nil) (print-length nil)
+                      (create-lockfiles nil))
+                  (insert ";;; gptel-agent-runtime proposed tool body -*- lexical-binding: t; -*-\n")
+                  (prin1 body (current-buffer))
+                  (insert "\n(provide 'gar-proposed-body)\n")))
+              ;; Validator script: byte-compile inside `with-timeout', print
+              ;; a structured outcome line, never load the body code itself.
+              (with-temp-file script-file
+                (let ((print-level nil) (print-length nil)
+                      (create-lockfiles nil)
+                      (timeout
+                       (max 1 gptel-agent-runtime-tool-invention-subprocess-timeout)))
+                  (insert ";;; gptel-agent-runtime tool-invention validator -*- lexical-binding: t; -*-\n")
+                  (insert "(setq byte-compile-error-on-warn nil)\n")
+                  (insert
+                   (format "(with-timeout (%d (princ \"timeout\\n\") (kill-emacs 124))\n"
+                           timeout))
+                  (insert
+                   (format "  (let ((res (byte-compile-file %S)))\n"
+                           body-file))
+                  (insert "    (princ (format \"compile=%s\\n\" res))\n")
+                  (insert "    (kill-emacs (if res 0 1))))\n")))
+              ;; Run subprocess. We do not use the shell so there are no
+              ;; shell-expansion or `timeout(1)' portability issues.
+              (with-temp-buffer
+                (let* ((default-directory temporary-file-directory)
+                       (proc-exit (call-process emacs-bin nil
+                                                (current-buffer) nil
+                                                "-Q" "--batch"
+                                                "-l" script-file)))
+                  (setq sub-exit proc-exit
+                        sub-stdout (buffer-string)
+                        sub-stderr ""))))
+          (ignore-errors (delete-file body-file))
+          (ignore-errors (delete-file (concat body-file "c")))
+          (ignore-errors (delete-file script-file)))))
+    (let ((passed (and passed-static (numberp sub-exit) (zerop sub-exit))))
+      (list :file file
+            :static-violations violations
+            :passed-static-p passed-static
+            :subprocess-exit-code sub-exit
+            :subprocess-stdout sub-stdout
+            :subprocess-stderr sub-stderr
+            :passed-p passed))))
+
+(defun gptel-agent-runtime-list-proposed-tools ()
+  "Return the list of proposed-tool files awaiting review."
+  (let ((dir (gptel-agent-runtime--proposed-tools-directory)))
+    (when (file-directory-p dir)
+      (cl-remove-if (lambda (f) (file-directory-p f))
+                    (directory-files dir t "\\.el\\'")))))
+
+(defun gptel-agent-runtime-approve-proposed-tool (file)
+  "Approve and register the proposed tool from FILE.
+Static + subprocess validation must pass. The new tool is registered via
+`gptel-agent-runtime-register-tool' with its declared :required-caps and
+:risk. The mapping is also added to `gptel-agent-runtime-tool-capabilities'
+so the zero-trust capability gate enforces it from the next call onward.
+Emits `tool-proposal-approved'. The proposal file is left in place for
+provenance and is renamed with a `.approved' suffix."
+  (interactive
+   (list (read-file-name "Proposal file: "
+                         (gptel-agent-runtime--proposed-tools-directory))))
+  (let* ((proposal (gptel-agent-runtime--read-proposal file))
+         (result (gptel-agent-runtime-validate-proposed-tool file)))
+    (unless (plist-get result :passed-p)
+      (user-error
+       "Validation did not pass; static-violations=%s exit=%s stderr=%s"
+       (plist-get result :static-violations)
+       (plist-get result :subprocess-exit-code)
+       (gptel-agent-runtime--shorten
+        (plist-get result :subprocess-stderr) 200)))
+    (let* ((name (plist-get proposal :name))
+           (caps (plist-get proposal :required-caps))
+           (risk (or (plist-get proposal :risk) 'write)))
+      (when name
+        ;; Register in the package-shaped registry.
+        (gptel-agent-runtime-register-tool
+         name 'invented risk
+         (or (plist-get proposal :description) "Invented tool")
+         :notes (plist-get proposal :rationale))
+        ;; Add to the zero-trust capability manifest.
+        (let ((entry (assoc name gptel-agent-runtime-tool-capabilities)))
+          (if entry
+              (setcdr entry (or caps '()))
+            (push (cons name (or caps '()))
+                  gptel-agent-runtime-tool-capabilities))))
+      (let ((approved-file (concat file ".approved")))
+        (ignore-errors (rename-file file approved-file t)))
+      (gptel-agent-runtime-emit-event
+       'tool-proposal-approved
+       :source "tool-invention"
+       :payload (list :name name :caps caps :risk risk)
+       :taint 'trusted)
+      (when (called-interactively-p 'interactive)
+        (message "gptel-agent-runtime: approved %s" name))
+      name)))
+
+(defun gptel-agent-runtime-reject-proposed-tool (file &optional reason)
+  "Move FILE to the rejected/ subdirectory. REASON is recorded in a sidecar."
+  (interactive
+   (list (read-file-name "Proposal file: "
+                         (gptel-agent-runtime--proposed-tools-directory))
+         (read-string "Reason: ")))
+  (let* ((base (file-name-nondirectory file))
+         (rejected-file (expand-file-name
+                         base
+                         (gptel-agent-runtime--rejected-tools-directory))))
+    (rename-file file rejected-file t)
+    (when (and reason (not (string-empty-p reason)))
+      (with-temp-file (concat rejected-file ".reason")
+        (insert reason "\n")))
+    (when (called-interactively-p 'interactive)
+      (message "gptel-agent-runtime: rejected %s" base))
+    rejected-file))
+
+(defun gptel-agent-runtime-review-proposed-tools ()
+  "Open a buffer summarizing proposed tools and their validation status."
+  (interactive)
+  (let* ((files (gptel-agent-runtime-list-proposed-tools)))
+    (with-current-buffer (get-buffer-create "*gptel-agent-proposed-tools*")
+      (erase-buffer)
+      (insert (format "gptel-agent-runtime proposed tools\nDirectory: %s\nCount: %d\n\n"
+                      (gptel-agent-runtime--proposed-tools-directory)
+                      (length files)))
+      (if (null files)
+          (insert "  (no proposed tools pending)\n")
+        (dolist (file files)
+          (let* ((proposal (gptel-agent-runtime--read-proposal file))
+                 (result (gptel-agent-runtime-validate-proposed-tool file)))
+            (insert (format "  %s\n"
+                            (file-name-nondirectory file)))
+            (insert (format "    name: %s\n    caps: %s\n    risk: %s\n    static-violations: %s\n    subprocess-exit: %s\n    passed: %s\n    rationale: %s\n\n"
+                            (plist-get proposal :name)
+                            (or (plist-get proposal :required-caps) '())
+                            (or (plist-get proposal :risk) 'write)
+                            (or (plist-get result :static-violations) "(none)")
+                            (plist-get result :subprocess-exit-code)
+                            (plist-get result :passed-p)
+                            (gptel-agent-runtime--shorten
+                             (or (plist-get proposal :rationale) "") 200))))))
+      (insert "\nUse M-x gptel-agent-runtime-approve-proposed-tool / -reject-proposed-tool\n")
+      (goto-char (point-min))
+      (special-mode))
+    (display-buffer "*gptel-agent-proposed-tools*")))
+
 ;; ===== Phase 4: novelty detection, strategy synthesis, hypothesis-test, =====
 ;; ===== playbook success scoring                                          =====
 
