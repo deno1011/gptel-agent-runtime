@@ -3981,6 +3981,19 @@ Emacs and safe to evolve while the data model is still changing."
                              :key #'car :test #'equal)))
       (gptel-agent-runtime-save-embedding-cache))))
 
+                       (unwind-protect
+                           (with-current-buffer buf
+                             (goto-char (point-min))
+                             (when (re-search-forward "\n\n" nil t)
+                               (let* ((json-object-type 'plist)
+                                      (json-array-type 'list)
+                                      (json-key-type 'keyword)
+                                      (data (json-read)))
+                                 (plist-get data :embedding))))
+                         (kill-buffer buf))))
+                 (error nil))))
+          (gptel-agent-runtime--embedding-cache-put text embedding)
+          embedding))))
 
 (defun gptel-agent-runtime--cosine-similarity (a b)
   "Return cosine similarity between numeric vectors A and B."
@@ -3991,31 +4004,18 @@ Emacs and safe to evolve while the data model is still changing."
       (cl-loop for x in a
                for y in b
                do (setq dot (+ dot (* x y))
-                        amag (+ amag (* x x))
-                        bmag (+ bmag (* y y))))
-      (if (and (> amag 0) (> bmag 0))
-          (/ dot (* (sqrt amag) (sqrt bmag)))
-        0.0))))
-
-(defun gptel-agent-runtime-memory-retrieve (query &optional limit)
-  "Return up to LIMIT memory items relevant to QUERY."
-  (let* ((limit (or limit 3))
-         scored)
-    (dolist (file (directory-files gptel-agent-runtime-memory-directory t "\\.el$"))
-      (unless (member (file-name-nondirectory file)
-                      '("playbooks.el" "skill-stats.el" "embedding-cache.el"))
-        (with-temp-buffer
-          (insert-file-contents file)
-          (goto-char (point-min))
-          (let* ((data (condition-case nil (read (current-buffer)) (error nil)))
-                 (text (plist-get data :text))
-                 (text-snippet (truncate-string-to-width text 1800 nil nil t))
+                                (truncate-string-to-width text 1800 nil nil t)))
+                 (text-embedding
+                  (and query-embedding
+                 (embedding-score
+                  (and query-embedding text-embedding
+                       (gptel-agent-runtime--cosine-similarity
+                        query-embedding text-embedding)))
                  (lexical-score (gptel-agent-runtime--text-score query text)))
             (push (list :file file
-                        :score lexical-score
-                        :text text-snippet
-                        :method 'lexical)
-                  scored)))))
+                        :score (or embedding-score lexical-score)
+                        :text text-snippet)
+                  scored))))))
     (cl-loop for item in (sort scored
                                (lambda (a b)
                                  (> (plist-get a :score)
