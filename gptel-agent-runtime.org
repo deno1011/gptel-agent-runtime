@@ -443,19 +443,19 @@ step is allowed to run."
 
 (defcustom gptel-agent-runtime-memory-retrieval-method 'lexical
   "Memory retrieval method.
-`lexical' uses local keyword scoring. `ollama-embeddings' asks Ollama for
+`lexical' uses local keyword scoring. `embeddings' asks the local server for
 embeddings and falls back to lexical scoring when unavailable."
   :type '(choice (const :tag "Lexical" lexical)
-                 (const :tag "Ollama embeddings" ollama-embeddings))
+                 (const :tag "Ollama embeddings" embeddings))
   :group 'gptel-agent-runtime)
 
 (defcustom gptel-agent-runtime-embedding-model "nomic-embed-text"
-  "Ollama embedding model used when memory retrieval method is `ollama-embeddings'."
+  "Local embedding model used when memory retrieval method is `embeddings'."
   :type 'string
   :group 'gptel-agent-runtime)
 
 (defcustom gptel-agent-runtime-embedding-cache-enabled t
-  "When non-nil, persist Ollama embeddings in a local cache file."
+  "When non-nil, persist local embeddings in a local cache file."
   :type 'boolean
   :group 'gptel-agent-runtime)
 
@@ -657,47 +657,6 @@ Planned values include `assistant', `planner', `executor', `reviewer', and
                  symbol)
   :group 'gptel-agent-runtime)
 
-(defcustom gptel-agent-runtime-default-local-model 'qwen2.5-coder:7b
-  "Default local model selected for gptel when Ollama is available."
-  :type 'symbol
-  :group 'gptel-agent-runtime)
-
-(defcustom gptel-agent-runtime-prefer-active-ollama-model t
-  "When non-nil, select Ollama's currently loaded model before the fallback default.
-The active model is read from Ollama's /api/ps endpoint. If no model is loaded,
-or Ollama is not reachable yet, `gptel-agent-runtime-default-local-model' is
-used instead."
-  :type 'boolean
-  :group 'gptel-agent-runtime)
-
-(defcustom gptel-agent-runtime-default-local-model-label
-  "Qwen 2.5 Coder 7B (Ollama)"
-  "Display label for `gptel-agent-runtime-default-local-model'."
-  :type 'string
-  :group 'gptel-agent-runtime)
-
-(defcustom gptel-agent-runtime-auto-start-ollama t
-  "When non-nil, start the Ollama server automatically if it is not running."
-  :type 'boolean
-  :group 'gptel-agent-runtime)
-
-(defcustom gptel-agent-runtime-ollama-command "ollama"
-  "Command used to start and manage Ollama."
-  :type 'string
-  :group 'gptel-agent-runtime)
-
-(defcustom gptel-agent-runtime-ollama-host "localhost:11434"
-  "Host and port used by the local Ollama server."
-  :type 'string
-  :group 'gptel-agent-runtime)
-
-(defcustom gptel-agent-runtime-ollama-models-directory nil
-  "Optional directory for Ollama model storage.
-When non-nil it is exported as OLLAMA_MODELS before starting Ollama. This lets
-the server find models downloaded to a non-default location."
-  :type '(choice (const :tag "Use Ollama default" nil)
-                 directory)
-  :group 'gptel-agent-runtime)
 
 (defcustom gptel-agent-runtime-model-router-enabled nil
   "When non-nil, select backend/model automatically before gptel sends.
@@ -4022,23 +3981,6 @@ Emacs and safe to evolve while the data model is still changing."
                              :key #'car :test #'equal)))
       (gptel-agent-runtime-save-embedding-cache))))
 
-(defun gptel-agent-runtime--ollama-embedding (text)
-  "Return Ollama embedding vector for TEXT, or nil."
-  (when (eq gptel-agent-runtime-memory-retrieval-method 'ollama-embeddings)
-    (or (gptel-agent-runtime--embedding-cache-get text)
-        (let ((embedding
-               (condition-case nil
-                   (let* ((url-request-method "POST")
-                          (url-request-extra-headers
-                           '(("Content-Type" . "application/json")))
-                          (url-request-data
-                           (json-encode
-                            `(("model" . ,gptel-agent-runtime-embedding-model)
-                              ("prompt" . ,text))))
-                          (buf (url-retrieve-synchronously
-                                (gptel-agent-runtime--ollama-url "/api/embeddings")
-                                t t 3)))
-                     (when buf
                        (unwind-protect
                            (with-current-buffer buf
                              (goto-char (point-min))
@@ -4062,32 +4004,9 @@ Emacs and safe to evolve while the data model is still changing."
       (cl-loop for x in a
                for y in b
                do (setq dot (+ dot (* x y))
-                        amag (+ amag (* x x))
-                        bmag (+ bmag (* y y))))
-      (if (or (zerop amag) (zerop bmag))
-          0.0
-        (/ dot (* (sqrt amag) (sqrt bmag)))))))
-
-(defun gptel-agent-runtime-memory-retrieve (query &optional limit)
-  "Return up to LIMIT memory snippets relevant to QUERY."
-  (let ((limit (or limit gptel-agent-runtime-memory-retrieval-limit))
-        scored)
-    (let ((query-embedding
-           (and (eq gptel-agent-runtime-memory-retrieval-method
-                    'ollama-embeddings)
-                (gptel-agent-runtime--ollama-embedding query))))
-      (dolist (file (gptel-agent-runtime-memory-files))
-      (when (file-readable-p file)
-        (let ((text (with-temp-buffer
-                      (insert-file-contents file nil 0
-                                            (min 12000
-                                                 (nth 7 (file-attributes file))))
-                      (buffer-string))))
-          (let* ((text-snippet (string-trim
                                 (truncate-string-to-width text 1800 nil nil t)))
                  (text-embedding
                   (and query-embedding
-                       (gptel-agent-runtime--ollama-embedding text-snippet)))
                  (embedding-score
                   (and query-embedding text-embedding
                        (gptel-agent-runtime--cosine-similarity
@@ -4095,7 +4014,6 @@ Emacs and safe to evolve while the data model is still changing."
                  (lexical-score (gptel-agent-runtime--text-score query text)))
             (push (list :file file
                         :score (or embedding-score lexical-score)
-                        :method (if embedding-score 'ollama-embeddings 'lexical)
                         :text text-snippet)
                   scored))))))
     (cl-loop for item in (sort scored
@@ -4980,220 +4898,11 @@ Installs/configures gptel, loads provider modules, registers cloud and local bac
 (require 'gptel)
 (require 'gptel-anthropic nil t)
 (require 'gptel-openai nil t)
-(require 'gptel-ollama nil t)
 (require 'gptel-gemini nil t)
 
 (defvar my/gptel-backends nil
   "Alist of (DISPLAY-NAME . (BACKEND . MODEL)) for all backends.")
 
-(defvar my/gptel-ollama-backend nil
-  "The registered Ollama backend, when Ollama is installed.")
-
-(defun gptel-agent-runtime--ollama-url (&optional path)
-  "Return the local Ollama URL for PATH."
-  (format "http://%s%s"
-          gptel-agent-runtime-ollama-host
-          (or path "")))
-
-(defun gptel-agent-runtime-ollama-running-p ()
-  "Return non-nil when the configured Ollama server responds."
-  (condition-case nil
-      (let ((buf (url-retrieve-synchronously
-                  (gptel-agent-runtime--ollama-url "/api/tags") t t 1)))
-        (when buf
-          (kill-buffer buf)
-          t))
-    (error nil)))
-
-(defun gptel-agent-runtime-start-ollama-if-needed ()
-  "Start Ollama in the background if configured and not already running."
-  (when (and gptel-agent-runtime-auto-start-ollama
-             (executable-find gptel-agent-runtime-ollama-command)
-             (not (gptel-agent-runtime-ollama-running-p)))
-    (let ((process-environment (copy-sequence process-environment)))
-      (when gptel-agent-runtime-ollama-models-directory
-        (setenv "OLLAMA_MODELS"
-                (expand-file-name gptel-agent-runtime-ollama-models-directory)))
-      (start-process "ollama-serve" "*ollama-serve*"
-                     gptel-agent-runtime-ollama-command "serve"))))
-
-(defun gptel-agent-runtime-active-ollama-model ()
-  "Return the first currently loaded Ollama model as a symbol, or nil.
-This uses /api/ps, which reports loaded/running models. The function tolerates
-both plist and vector shapes returned by `json-read'."
-  (condition-case nil
-      (let ((buf (url-retrieve-synchronously
-                  (gptel-agent-runtime--ollama-url "/api/ps") t t 1)))
-        (when buf
-          (unwind-protect
-              (with-current-buffer buf
-                (goto-char (point-min))
-                (when (re-search-forward "\n\n" nil t)
-                  (let* ((json-object-type 'plist)
-                         (json-array-type 'list)
-                         (json-key-type 'keyword)
-                         (data (json-read))
-                         (models (plist-get data :models))
-                         (first-model (car-safe models))
-                         (name (plist-get first-model :name)))
-                    (when (and (stringp name)
-                               (not (string-empty-p name)))
-                      (intern name)))))
-            (kill-buffer buf))))
-    (error nil)))
-
-(defun my/gptel-model-id (model)
-  "Return the symbol model id from MODEL, tolerating gptel metadata forms."
-  (cond
-   ((symbolp model) model)
-   ((and (consp model) (symbolp (car model))) (car model))
-   ((and (vectorp model) (> (length model) 0) (symbolp (aref model 0)))
-    (aref model 0))
-   (t model)))
-
-(defun my/gptel-backend-model-symbols (backend)
-  "Return BACKEND model ids as symbols, tolerating list/vector metadata."
-  (when (and backend (fboundp 'gptel-backend-models))
-    (mapcar #'my/gptel-model-id
-            (append (gptel-backend-models backend) nil))))
-
-(defun gptel-agent-runtime-use-default-local-model ()
-  "Select the active or configured default local Ollama model when available."
-  (interactive)
-  (gptel-agent-runtime-start-ollama-if-needed)
-  (when my/gptel-ollama-backend
-    (let ((model (or (and gptel-agent-runtime-prefer-active-ollama-model
-                          (gptel-agent-runtime-active-ollama-model))
-                     gptel-agent-runtime-default-local-model)))
-      (unless (member model (my/gptel-backend-model-symbols my/gptel-ollama-backend))
-        (when (fboundp 'gptel-backend-models)
-          (setf (gptel-backend-models my/gptel-ollama-backend)
-                (append (gptel-backend-models my/gptel-ollama-backend)
-                        (list `(,model :capabilities (tool-use json)))))))
-      (setq gptel-backend my/gptel-ollama-backend
-            gptel-model model)
-      (my/gptel-sync-directive-for-current-runtime)
-      (my/gptel-sync-tools)
-      (message "gptel local model selected: %s%s"
-               model
-               (if (eq model gptel-agent-runtime-default-local-model)
-                   (format " (%s)" gptel-agent-runtime-default-local-model-label)
-                 " (active Ollama model)")))))
-
-;; -- Anthropic / Claude -----------------------------------------------
-(let ((backend (gptel-make-anthropic "Claude"
-                  :stream t
-                  :key (lambda () (getenv "ANTHROPIC_API_KEY")))))
-  (setq my/gptel-backends
-        `(("Claude Opus 4.7"    ,backend . claude-opus-4-7)
-          ("Claude Sonnet 4.6"  ,backend . claude-sonnet-4-6)
-          ("Claude Haiku 4.5"   ,backend . claude-haiku-4-5-20251001)))
-  ;; Preliminary default (overridden below by LM Studio)
-  (setq gptel-backend backend
-        gptel-model   'claude-opus-4-7))
-
-;; -- OpenAI / ChatGPT -------------------------------------------------
-;; Set OPENAI_API_KEY in secrets.el: (setenv "OPENAI_API_KEY" "sk-...")
-;; gptel 0.9.9.5 automatically uses the Responses API for api.openai.com
-;; (/v1/responses). Force Chat Completions via an explicit endpoint:
-(let ((backend (gptel-make-openai "ChatGPT"
-                  :stream t
-                  :host "api.openai.com"
-                  :endpoint "/v1/chat/completions"
-                  :key (lambda () (getenv "OPENAI_API_KEY")))))
-  (setq my/gptel-backends
-        (append my/gptel-backends
-                `(("GPT-4o"           ,backend . gpt-4o)
-                  ("GPT-4o-mini"       ,backend . gpt-4o-mini)
-                  ("o3-mini"           ,backend . o3-mini)
-                  ("o4-mini"           ,backend . o4-mini)))))
-
-;; -- Google Gemini ----------------------------------------------------
-;; Set GEMINI_API_KEY in secrets.el: (setenv "GEMINI_API_KEY" "AIza...")
-;; Commented out until key is available:
-;; (let ((backend (gptel-make-gemini "Gemini"
-;;                  :stream t
-;;                  :key (lambda () (getenv "GEMINI_API_KEY")))))
-;;   (setq my/gptel-backends
-;;         (append my/gptel-backends
-;;                 `(("Gemini 2.0 Flash" ,backend . gemini-2.0-flash)
-;;                   ("Gemini 2.5 Pro"   ,backend . gemini-2.5-pro)))))
-
-;; -- LM Studio (local, OpenAI-compatible) ----------------------------
-;; LM Studio must be running: Sidebar → Local Server → Start Server
-;; Port: 1234 (default). No API key required.
-;; Verify model IDs with: curl http://localhost:1234/v1/models
-(let ((backend (gptel-make-openai "LM Studio"
-                  :stream t
-                  :protocol "http"
-                  :host "localhost:1234"
-                  :endpoint "/v1/chat/completions"
-                  :key "lm-studio"
-                  :models '(mistralai/ministral-3-14b-reasoning
-                            deepseek-r1-distill-qwen-7b
-                            gemma-4-31b-it
-                            gemma-3-12b-it))))
-  (setq my/gptel-backends
-        (append my/gptel-backends
-                `(("Ministral 3B 14B Reasoning (LM Studio)" ,backend . mistralai/ministral-3-14b-reasoning)
-                  ("DeepSeek R1 7B (LM Studio)"             ,backend . deepseek-r1-distill-qwen-7b)
-                  ("Gemma 4 31B (LM Studio)"                ,backend . gemma-4-31b-it)
-                  ("Gemma 3 12B Q4 (LM Studio)"             ,backend . gemma-3-12b-it))))
-  ;; Default: LM Studio (local, private, free)
-  ;; If server is offline: C-c M → select another backend/model.
-  (setq gptel-backend backend
-        gptel-model   'mistralai/ministral-3-14b-reasoning))
-
-;; -- MLX (local, Apple Silicon, via mlx-lm standalone server) --------
-;; Start server: mlx_lm.server --model mlx-community/Qwen3-14B-4bit --port 8080
-;; Models download automatically from HuggingFace on first run.
-(let ((backend (gptel-make-openai "MLX"
-                  :stream t
-                  :protocol "http"
-                  :host "localhost:8080"
-                  :endpoint "/v1/chat/completions"
-                  :key "mlx"
-                  :models '(mlx-community/Qwen3-14B-4bit
-                            mlx-community/gemma-3-12b-it-4bit))))
-  (setq my/gptel-backends
-        (append my/gptel-backends
-                `(("Qwen3 14B (MLX)"    ,backend . mlx-community/Qwen3-14B-4bit)
-                  ("Gemma 3 12B (MLX)"  ,backend . mlx-community/gemma-3-12b-it-4bit)))))
-
-;; -- Ollama (local) ---------------------------------------------------
-;; Only activated when `ollama' is found in PATH.
-;; Install models first: ollama pull <name>
-(when (executable-find "ollama")
-  (gptel-agent-runtime-start-ollama-if-needed)
-  (let ((backend (gptel-make-ollama "Ollama"
-                   :stream t
-                   :host gptel-agent-runtime-ollama-host
-                   :models '((llama3.2 :capabilities (tool-use json))
-                              (mistral :capabilities (tool-use json))
-                              phi3
-                              (qwen2.5 :capabilities (tool-use json))
-                              (qwen2.5-coder:7b :capabilities (tool-use json))
-                              (deepseek-r1 :capabilities (tool-use json))))))
-    (setq my/gptel-ollama-backend backend)
-    (setq my/gptel-backends
-          (append my/gptel-backends
-                  `(("Llama 3.2 (Ollama)"    ,backend . llama3.2)
-                    ("Mistral (Ollama)"       ,backend . mistral)
-                    ("DeepSeek R1 (Ollama)"   ,backend . deepseek-r1)
-                    ("Qwen 2.5 Coder 7B (Ollama)" ,backend . qwen2.5-coder:7b)
-                    ("Qwen 2.5 (Ollama)"      ,backend . qwen2.5))))))
-#+end_src
-
-* Model Switching, Directive Sync, and Status UI
-
-Compatibility helpers for selecting a backend/model, choosing the matching directive, enabling tools, and reporting current gptel state.
-
-#+begin_src emacs-lisp
-
-(defun my/gptel-register-model (name backend model)
-  "Register NAME with BACKEND+MODEL in `my/gptel-backends'.
-Overwrites an existing entry with the same name."
-  (setq my/gptel-backends
         (cons (cons name (cons backend model))
               (cl-remove name my/gptel-backends
                          :key #'car :test #'equal))))
@@ -5314,28 +5023,6 @@ gptel--known-tools is a two-level alist: (category . ((name . struct) ...))."
          (complexity (+ length-score
                         (min 4 code-score)
                         (min 4 introspection-score)
-                        (min 3 creativity-score)
-                        (min 3 tool-risk-score)
-                        (if (> web-score 0) 1 0))))
-    (list :complexity complexity
-          :context length-score
-          :code code-score
-          :introspection introspection-score
-          :creativity creativity-score
-          :tool-risk tool-risk-score
-          :web web-score
-          :privacy privacy-score
-          :speed speed-score)))
-
-(defun gptel-agent-runtime-model-router-profile-for-analysis (analysis)
-  "Return model profile symbol for ANALYSIS."
-  (let ((complexity (plist-get analysis :complexity))
-        (context (plist-get analysis :context))
-        (code (plist-get analysis :code))
-        (introspection (plist-get analysis :introspection))
-        (creativity (plist-get analysis :creativity))
-        (tool-risk (plist-get analysis :tool-risk))
-        (web (plist-get analysis :web))
         (privacy (plist-get analysis :privacy))
         (speed (plist-get analysis :speed)))
     (cond
@@ -10264,9 +9951,6 @@ CONTEXT is passed to the policy broker."
 ;; Select the local model only after directives, tools, and compatibility
 ;; helpers have been defined. In the old literate config this ordering was
 ;; implicit; as a package it must be explicit.
-(when (and (boundp 'my/gptel-ollama-backend)
-           my/gptel-ollama-backend)
-  (gptel-agent-runtime-use-default-local-model))
 
 (provide 'gptel-agent-runtime)
 
