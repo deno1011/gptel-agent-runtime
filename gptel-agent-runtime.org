@@ -4979,130 +4979,8 @@ mission-control buffer, model-router, and Ollama-aware helpers do not crash
 when the setup has not yet populated them.
 
 #+begin_src emacs-lisp
-
 (require 'gptel)
-
-(defvar my/gptel-backends nil
-  "Alist of (DISPLAY-NAME . (BACKEND . MODEL)) for all backends.
-Populated by the consuming setup file; the runtime package only forward-
-declares it.")
-
-(defvar my/gptel-ollama-backend nil
-  "The registered Ollama backend, when the setup file has installed one.
-Forward-declared by the package; populated by the setup file.")
-
-(defun gptel-agent-runtime--ollama-url (&optional path)
-  "Return the local Ollama URL for PATH."
-  (format "http://%s%s"
-          gptel-agent-runtime-ollama-host
-          (or path "")))
-
-(defun gptel-agent-runtime-ollama-running-p ()
-  "Return non-nil when the configured Ollama server responds."
-  (condition-case nil
-      (let ((buf (url-retrieve-synchronously
-                  (gptel-agent-runtime--ollama-url "/api/tags") t t 1)))
-        (when buf
-          (kill-buffer buf)
-          t))
-    (error nil)))
-
-(defun gptel-agent-runtime-start-ollama-if-needed ()
-  "Start Ollama in the background if configured and not already running."
-  (when (and gptel-agent-runtime-auto-start-ollama
-             (executable-find gptel-agent-runtime-ollama-command)
-             (not (gptel-agent-runtime-ollama-running-p)))
-    (let ((process-environment (copy-sequence process-environment)))
-      (when gptel-agent-runtime-ollama-models-directory
-        (setenv "OLLAMA_MODELS"
-                (expand-file-name gptel-agent-runtime-ollama-models-directory)))
-      (start-process "ollama-serve" "*ollama-serve*"
-                     gptel-agent-runtime-ollama-command "serve"))))
-
-(defun gptel-agent-runtime-active-ollama-model ()
-  "Return the first currently loaded Ollama model as a symbol, or nil.
-This uses /api/ps, which reports loaded/running models. The function tolerates
-both plist and vector shapes returned by `json-read'."
-  (condition-case nil
-      (let ((buf (url-retrieve-synchronously
-                  (gptel-agent-runtime--ollama-url "/api/ps") t t 1)))
-        (when buf
-          (unwind-protect
-              (with-current-buffer buf
-                (goto-char (point-min))
-                (when (re-search-forward "\n\n" nil t)
-                  (let* ((json-object-type 'plist)
-                         (json-array-type 'list)
-                         (json-key-type 'keyword)
-                         (data (json-read))
-                         (models (plist-get data :models))
-                         (first-model (car-safe models))
-                         (name (plist-get first-model :name)))
-                    (when (and (stringp name)
-                               (not (string-empty-p name)))
-                      (intern name)))))
-            (kill-buffer buf))))
-    (error nil)))
-
-(defun my/gptel-model-id (model)
-  "Return the symbol model id from MODEL, tolerating gptel metadata forms."
-  (cond
-   ((symbolp model) model)
-   ((and (consp model) (symbolp (car model))) (car model))
-   ((and (vectorp model) (> (length model) 0) (symbolp (aref model 0)))
-    (aref model 0))
-   (t model)))
-
-(defun my/gptel-backend-model-symbols (backend)
-  "Return BACKEND model ids as symbols, tolerating list/vector metadata."
-  (when (and backend (fboundp 'gptel-backend-models))
-    (mapcar #'my/gptel-model-id
-            (append (gptel-backend-models backend) nil))))
-
-(defun gptel-agent-runtime-use-default-local-model ()
-  "Select the active or configured default local Ollama model when available."
-  (interactive)
-  (gptel-agent-runtime-start-ollama-if-needed)
-  (when my/gptel-ollama-backend
-    (let ((model (or (and gptel-agent-runtime-prefer-active-ollama-model
-                          (gptel-agent-runtime-active-ollama-model))
-                     gptel-agent-runtime-default-local-model)))
-      (unless (member model (my/gptel-backend-model-symbols my/gptel-ollama-backend))
-        (when (fboundp 'gptel-backend-models)
-          (setf (gptel-backend-models my/gptel-ollama-backend)
-                (append (gptel-backend-models my/gptel-ollama-backend)
-                        (list `(,model :capabilities (tool-use json)))))))
-      (setq gptel-backend my/gptel-ollama-backend
-            gptel-model model)
-      (my/gptel-sync-directive-for-current-runtime)
-      (my/gptel-sync-tools)
-      (message "gptel local model selected: %s%s"
-               model
-               (if (eq model gptel-agent-runtime-default-local-model)
-                   (format " (%s)" gptel-agent-runtime-default-local-model-label)
-                 " (active Ollama model)")))))
-
-;; NOTE: Backend registration intentionally lives outside this package.
-;; The consuming setup file is responsible for:
-;;   1. Requiring provider modules:
-;;        (require 'gptel-anthropic nil t)
-;;        (require 'gptel-openai nil t)
-;;        (require 'gptel-ollama nil t)
-;;        (require 'gptel-gemini nil t)
-;;   2. Calling gptel-make-anthropic / gptel-make-openai / gptel-make-ollama
-;;      with the user's preferred endpoints, API keys, and model lists.
-;;   3. Populating `my/gptel-backends' with the resulting (DISPLAY-NAME .
-;;      (BACKEND . MODEL)) entries.
-;;   4. Optionally setting `my/gptel-ollama-backend' when an Ollama backend
-;;      is registered, so `gptel-agent-runtime-use-default-local-model' and
-;;      mission-control can find it.
-;;   5. Selecting an initial `gptel-backend' and `gptel-model'.
-;;
-;; This split keeps the package model-neutral and lets each host carry its
-;; own API keys, default model preference, and Ollama provisioning logic.
-;; See:
-;;   ~/emacs/config/gptel-setup.org      (live private setup)
-;;   ~/emacs-mac-setup/gptel-setup.org   (bootstrap template)
+(require 'gar-backend)
 #+end_src
 
 * Model Switching, Directive Sync, and Status UI
@@ -5112,14 +4990,6 @@ Compatibility helpers for selecting a backend/model, choosing the matching direc
 #+begin_src emacs-lisp
 
 (require 'gar-directives)
-
-(defun my/gptel-register-model (name backend model)
-  "Register NAME with BACKEND+MODEL in `my/gptel-backends'.
-Overwrites an existing entry with the same name."
-  (setq my/gptel-backends
-        (cons (cons name (cons backend model))
-              (cl-remove name my/gptel-backends
-                         :key #'car :test #'equal))))
 
 (defun my/gptel-tools-all ()
   "Return list of all registered gptel-tool structs.
