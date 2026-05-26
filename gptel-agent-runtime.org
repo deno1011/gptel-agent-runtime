@@ -4962,32 +4962,34 @@ Be specific. Cite exact arguments, paths, patterns, or capability mismatches whe
 (gptel-agent-runtime-load-embedding-cache)
 #+end_src
 
-* gptel Base Setup and Backend Registration
+* gptel Runtime Helpers (Provider-Neutral)
 
-Installs/configures gptel, loads provider modules, registers cloud and local backends, starts/selects Ollama, and prefers the currently active Ollama model when available.
+Provider-neutral runtime helpers for the autonomous loop, mission control,
+and model-router. This section deliberately registers NO backends. Backend
+registration (Anthropic/OpenAI/LM Studio/MLX/Ollama) is the responsibility
+of the consuming setup file (=~/emacs/config/gptel-setup.org= or
+=emacs-mac-setup/gptel-setup.org=), which is where API keys, machine-specific
+preferences, and the default backend selection live.
+
+The package only requires gptel itself; provider modules
+(=gptel-anthropic=, =gptel-openai=, =gptel-ollama=, =gptel-gemini=) are
+required by the setup file before its backend constructors run. The package
+forward-declares =my/gptel-backends= and =my/gptel-ollama-backend= so the
+mission-control buffer, model-router, and Ollama-aware helpers do not crash
+when the setup has not yet populated them.
 
 #+begin_src emacs-lisp
 
-(use-package gptel
-  :ensure t
-  :demand t
-  :config
-  (setq gptel-default-mode 'org-mode))
-
-;; Provider constructors are defined in provider modules, not always in the
-;; base gptel feature. Require them before backend construction so partial
-;; reloads with M-x load-file cannot stop before tools are registered.
 (require 'gptel)
-(require 'gptel-anthropic nil t)
-(require 'gptel-openai nil t)
-(require 'gptel-ollama nil t)
-(require 'gptel-gemini nil t)
 
 (defvar my/gptel-backends nil
-  "Alist of (DISPLAY-NAME . (BACKEND . MODEL)) for all backends.")
+  "Alist of (DISPLAY-NAME . (BACKEND . MODEL)) for all backends.
+Populated by the consuming setup file; the runtime package only forward-
+declares it.")
 
 (defvar my/gptel-ollama-backend nil
-  "The registered Ollama backend, when Ollama is installed.")
+  "The registered Ollama backend, when the setup file has installed one.
+Forward-declared by the package; populated by the setup file.")
 
 (defun gptel-agent-runtime--ollama-url (&optional path)
   "Return the local Ollama URL for PATH."
@@ -5080,108 +5082,27 @@ both plist and vector shapes returned by `json-read'."
                    (format " (%s)" gptel-agent-runtime-default-local-model-label)
                  " (active Ollama model)")))))
 
-;; -- Anthropic / Claude -----------------------------------------------
-(let ((backend (gptel-make-anthropic "Claude"
-                  :stream t
-                  :key (lambda () (getenv "ANTHROPIC_API_KEY")))))
-  (setq my/gptel-backends
-        `(("Claude Opus 4.7"    ,backend . claude-opus-4-7)
-          ("Claude Sonnet 4.6"  ,backend . claude-sonnet-4-6)
-          ("Claude Haiku 4.5"   ,backend . claude-haiku-4-5-20251001)))
-  ;; Preliminary default (overridden below by LM Studio)
-  (setq gptel-backend backend
-        gptel-model   'claude-opus-4-7))
-
-;; -- OpenAI / ChatGPT -------------------------------------------------
-;; Set OPENAI_API_KEY in secrets.el: (setenv "OPENAI_API_KEY" "sk-...")
-;; gptel 0.9.9.5 automatically uses the Responses API for api.openai.com
-;; (/v1/responses). Force Chat Completions via an explicit endpoint:
-(let ((backend (gptel-make-openai "ChatGPT"
-                  :stream t
-                  :host "api.openai.com"
-                  :endpoint "/v1/chat/completions"
-                  :key (lambda () (getenv "OPENAI_API_KEY")))))
-  (setq my/gptel-backends
-        (append my/gptel-backends
-                `(("GPT-4o"           ,backend . gpt-4o)
-                  ("GPT-4o-mini"       ,backend . gpt-4o-mini)
-                  ("o3-mini"           ,backend . o3-mini)
-                  ("o4-mini"           ,backend . o4-mini)))))
-
-;; -- Google Gemini ----------------------------------------------------
-;; Set GEMINI_API_KEY in secrets.el: (setenv "GEMINI_API_KEY" "AIza...")
-;; Commented out until key is available:
-;; (let ((backend (gptel-make-gemini "Gemini"
-;;                  :stream t
-;;                  :key (lambda () (getenv "GEMINI_API_KEY")))))
-;;   (setq my/gptel-backends
-;;         (append my/gptel-backends
-;;                 `(("Gemini 2.0 Flash" ,backend . gemini-2.0-flash)
-;;                   ("Gemini 2.5 Pro"   ,backend . gemini-2.5-pro)))))
-
-;; -- LM Studio (local, OpenAI-compatible) ----------------------------
-;; LM Studio must be running: Sidebar → Local Server → Start Server
-;; Port: 1234 (default). No API key required.
-;; Verify model IDs with: curl http://localhost:1234/v1/models
-(let ((backend (gptel-make-openai "LM Studio"
-                  :stream t
-                  :protocol "http"
-                  :host "localhost:1234"
-                  :endpoint "/v1/chat/completions"
-                  :key "lm-studio"
-                  :models '(mistralai/ministral-3-14b-reasoning
-                            deepseek-r1-distill-qwen-7b
-                            gemma-4-31b-it
-                            gemma-3-12b-it))))
-  (setq my/gptel-backends
-        (append my/gptel-backends
-                `(("Ministral 3B 14B Reasoning (LM Studio)" ,backend . mistralai/ministral-3-14b-reasoning)
-                  ("DeepSeek R1 7B (LM Studio)"             ,backend . deepseek-r1-distill-qwen-7b)
-                  ("Gemma 4 31B (LM Studio)"                ,backend . gemma-4-31b-it)
-                  ("Gemma 3 12B Q4 (LM Studio)"             ,backend . gemma-3-12b-it))))
-  ;; Default: LM Studio (local, private, free)
-  ;; If server is offline: C-c M → select another backend/model.
-  (setq gptel-backend backend
-        gptel-model   'mistralai/ministral-3-14b-reasoning))
-
-;; -- MLX (local, Apple Silicon, via mlx-lm standalone server) --------
-;; Start server: mlx_lm.server --model mlx-community/Qwen3-14B-4bit --port 8080
-;; Models download automatically from HuggingFace on first run.
-(let ((backend (gptel-make-openai "MLX"
-                  :stream t
-                  :protocol "http"
-                  :host "localhost:8080"
-                  :endpoint "/v1/chat/completions"
-                  :key "mlx"
-                  :models '(mlx-community/Qwen3-14B-4bit
-                            mlx-community/gemma-3-12b-it-4bit))))
-  (setq my/gptel-backends
-        (append my/gptel-backends
-                `(("Qwen3 14B (MLX)"    ,backend . mlx-community/Qwen3-14B-4bit)
-                  ("Gemma 3 12B (MLX)"  ,backend . mlx-community/gemma-3-12b-it-4bit)))))
-
-;; -- Ollama (local) ---------------------------------------------------
-;; Only activated when `ollama' is found in PATH.
-;; Install models first: ollama pull <name>
-(when (executable-find "ollama")
-  (gptel-agent-runtime-start-ollama-if-needed)
-  (let ((backend (gptel-make-ollama "Ollama"
-                   :stream t
-                   :host gptel-agent-runtime-ollama-host
-                   :models '((llama3.2 :capabilities (tool-use json))
-                              (mistral :capabilities (tool-use json))
-                              phi3
-                              (qwen2.5 :capabilities (tool-use json))
-                              (qwen2.5-coder:7b :capabilities (tool-use json))
-                              (deepseek-r1 :capabilities (tool-use json))))))
-    (setq my/gptel-ollama-backend backend)
-    (setq my/gptel-backends
-          (append my/gptel-backends
-                  `(("Llama 3.2 (Ollama)"    ,backend . llama3.2)
-                    ("Mistral (Ollama)"       ,backend . mistral)
-                    ("DeepSeek R1 (Ollama)"   ,backend . deepseek-r1)
-                    ("Qwen 2.5 Coder 7B (Ollama)" ,backend . qwen2.5-coder:7b)
-                    ("Qwen 2.5 (Ollama)"      ,backend . qwen2.5))))))
+;; NOTE: Backend registration intentionally lives outside this package.
+;; The consuming setup file is responsible for:
+;;   1. Requiring provider modules:
+;;        (require 'gptel-anthropic nil t)
+;;        (require 'gptel-openai nil t)
+;;        (require 'gptel-ollama nil t)
+;;        (require 'gptel-gemini nil t)
+;;   2. Calling gptel-make-anthropic / gptel-make-openai / gptel-make-ollama
+;;      with the user's preferred endpoints, API keys, and model lists.
+;;   3. Populating `my/gptel-backends' with the resulting (DISPLAY-NAME .
+;;      (BACKEND . MODEL)) entries.
+;;   4. Optionally setting `my/gptel-ollama-backend' when an Ollama backend
+;;      is registered, so `gptel-agent-runtime-use-default-local-model' and
+;;      mission-control can find it.
+;;   5. Selecting an initial `gptel-backend' and `gptel-model'.
+;;
+;; This split keeps the package model-neutral and lets each host carry its
+;; own API keys, default model preference, and Ollama provisioning logic.
+;; See:
+;;   ~/emacs/config/gptel-setup.org      (live private setup)
+;;   ~/emacs-mac-setup/gptel-setup.org   (bootstrap template)
 #+end_src
 
 * Model Switching, Directive Sync, and Status UI
