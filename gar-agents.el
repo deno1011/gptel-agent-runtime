@@ -501,6 +501,24 @@ tasks. PLIST accepts :id, :agent, :skills, :steps, :source-session,
        "\n")
     "No matching playbooks."))
 
+(defun gptel-agent-runtime-playbook-bump (playbook outcome timestamp)
+  "Mutate PLAYBOOK's success/failure count for OUTCOME and update updated-at.
+OUTCOME is one of `success' or `failure' (any other value updates only the
+timestamp). Defined here because `setf' on the playbook accessors needs the
+`cl-defstruct' from this module to be loaded at the time the call sites are
+macro-expanded; gar-memory's record-playbook-invocation helper delegates
+the mutation to this function to avoid a load-order conflict."
+  (when playbook
+    (cond
+     ((eq outcome 'success)
+      (setf (gptel-agent-runtime-playbook-success-count playbook)
+            (1+ (or (gptel-agent-runtime-playbook-success-count playbook) 0))))
+     ((eq outcome 'failure)
+      (setf (gptel-agent-runtime-playbook-failure-count playbook)
+            (1+ (or (gptel-agent-runtime-playbook-failure-count playbook) 0)))))
+    (when timestamp
+      (setf (gptel-agent-runtime-playbook-updated-at playbook) timestamp))))
+
 (defun gptel-agent-runtime-record-session-playbook (session)
   "Create a reusable playbook from completed SESSION."
   (when gptel-agent-runtime-enable-playbook-learning
@@ -906,6 +924,8 @@ Be specific. Cite exact arguments, paths, patterns, or capability mismatches whe
 (gptel-agent-runtime-load-skill-stats)
 (gptel-agent-runtime-load-playbooks)
 (gptel-agent-runtime-load-embedding-cache)
+(when (fboundp 'gptel-agent-runtime-load-playbook-invocations)
+  (gptel-agent-runtime-load-playbook-invocations))
 
 (defun gptel-agent-runtime--model-router-count-matches (patterns text)
   "Return number of PATTERNS matching TEXT."
