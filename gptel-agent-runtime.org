@@ -39,10 +39,10 @@ travels through this layered stack:
 ** Load order
 
 The master =(require)='s modules in this order, which respects the
-dependency DAG: =gar-core= -> =gar-substrate= -> =gar-safety= ->
-=gar-canaries= -> =gar-memory= -> =gar-tools= -> =gar-backend= ->
-=gar-directives= -> =gar-context= -> =gar-executor= -> =gar-agents= ->
-=gar-loop=.
+dependency DAG: =gar-core= -> =gar-substrate= -> =gar-quarantine= ->
+=gar-safety= -> =gar-canaries= -> =gar-memory= -> =gar-tools= ->
+=gar-backend= -> =gar-directives= -> =gar-context= -> =gar-executor= ->
+=gar-agents= -> =gar-loop=.
 
 Modules forward-declare cross-module callees with =declare-function= and
 read defcustoms from =gar-core= via =defvar= forward declarations so
@@ -98,7 +98,8 @@ normal init path.")
 ;; Module load order (respects the dependency DAG).
 (require 'gar-core)        ; defgroup + ~50 defcustoms + all cl-defstructs + base helpers
 (require 'gar-substrate)   ; tick, event pump, evidence, versioned state
-(require 'gar-safety)      ; policy broker, caps, skeptic, quarantine, mission-control
+(require 'gar-quarantine)  ; per-source quarantine + promote + pre-flight conflict check
+(require 'gar-safety)      ; policy broker, caps, skeptic, mission-control
 (require 'gar-canaries)    ; prompt-injection canary suite (wraps gar-safety's untrusted-context)
 (require 'gar-memory)      ; sessions, embedding cache, novelty, synthesis, hypothesis-test
 (require 'gar-tools)       ; tool registry, native gptel tools, tool-invention pipeline
