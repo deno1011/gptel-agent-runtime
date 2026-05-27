@@ -34,7 +34,8 @@ normal init path.")
 ;; Module load order (respects the dependency DAG).
 (require 'gar-core)        ; defgroup + ~50 defcustoms + all cl-defstructs + base helpers
 (require 'gar-substrate)   ; tick, event pump, evidence, versioned state
-(require 'gar-safety)      ; policy broker, caps, skeptic, quarantine, mission-control
+(require 'gar-quarantine)  ; per-source quarantine + promote + pre-flight conflict check
+(require 'gar-safety)      ; policy broker, caps, skeptic, mission-control
 (require 'gar-canaries)    ; prompt-injection canary suite (wraps gar-safety's untrusted-context)
 (require 'gar-memory)      ; sessions, embedding cache, novelty, synthesis, hypothesis-test
 (require 'gar-tools)       ; tool registry, native gptel tools, tool-invention pipeline
