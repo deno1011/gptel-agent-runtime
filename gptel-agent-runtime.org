@@ -40,8 +40,9 @@ travels through this layered stack:
 
 The master =(require)='s modules in this order, which respects the
 dependency DAG: =gar-core= -> =gar-substrate= -> =gar-safety= ->
-=gar-memory= -> =gar-tools= -> =gar-backend= -> =gar-directives= ->
-=gar-context= -> =gar-executor= -> =gar-agents= -> =gar-loop=.
+=gar-canaries= -> =gar-memory= -> =gar-tools= -> =gar-backend= ->
+=gar-directives= -> =gar-context= -> =gar-executor= -> =gar-agents= ->
+=gar-loop=.
 
 Modules forward-declare cross-module callees with =declare-function= and
 read defcustoms from =gar-core= via =defvar= forward declarations so
@@ -97,7 +98,8 @@ normal init path.")
 ;; Module load order (respects the dependency DAG).
 (require 'gar-core)        ; defgroup + ~50 defcustoms + all cl-defstructs + base helpers
 (require 'gar-substrate)   ; tick, event pump, evidence, versioned state
-(require 'gar-safety)      ; policy broker, caps, skeptic, quarantine, canaries, mission-control
+(require 'gar-safety)      ; policy broker, caps, skeptic, quarantine, mission-control
+(require 'gar-canaries)    ; prompt-injection canary suite (wraps gar-safety's untrusted-context)
 (require 'gar-memory)      ; sessions, embedding cache, novelty, synthesis, hypothesis-test
 (require 'gar-tools)       ; tool registry, native gptel tools, tool-invention pipeline
 (require 'gar-backend)     ; Ollama runtime utilities + model-id normalization
