@@ -45,7 +45,7 @@
   (expand-file-name "gptel-images" user-emacs-directory)
   "Directory for images inserted via `my/insert-clipboard-image'."
   :type 'directory
-  :group 'claude-executor)
+  :group 'gar-response-executor)
 
 (defcustom my/gptel-image-max-dim 1600
   "Maximum edge length in pixels.
@@ -54,7 +54,7 @@ as PNG are ~15 MB → resize to 1600 px edge + optional JPEG: <500 KB.
 The 5 MB raw upload limit is the strictest mainstream provider's cap;
 Base64 encoding (+33%) hits that at ~3.75 MB. Stay well below to be safe."
   :type 'integer
-  :group 'claude-executor)
+  :group 'gar-response-executor)
 
 (defcustom my/gptel-image-max-bytes (* 2 1024 1024)
   "Soft-limit image size in bytes (2 MB).
@@ -62,7 +62,7 @@ If exceeded after resize → convert to JPEG q=85.
 Conservative due to Base64 overhead (~33%): 2 MB raw → ~2.7 MB encoded,
 safely below the strictest 5 MB provider limit."
   :type 'integer
-  :group 'claude-executor)
+  :group 'gar-response-executor)
 
 (with-eval-after-load 'org-download
   (cond
@@ -185,12 +185,12 @@ next gptel request. Shrinks first if necessary."
 (defcustom my/web-fetch-timeout 30
   "Timeout in seconds for `my/web-fetch'."
   :type 'integer
-  :group 'claude-executor)
+  :group 'gar-response-executor)
 
 (defcustom my/web-user-agent "Emacs-Gptel-Agent-Helper"
   "User-Agent string for web requests."
   :type 'string
-  :group 'claude-executor)
+  :group 'gar-response-executor)
 
 (defun my/web-fetch (url)
   "Fetch URL synchronously, return body as string.

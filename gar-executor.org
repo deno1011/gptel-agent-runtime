@@ -16,7 +16,7 @@ Module of [[file:gptel-agent-runtime.org][gptel-agent-runtime]]. Watches gptel r
   (instructions-instead-of-Babel) by appending a correct executable
   block
 
-The =claude-executor-*= symbol prefix is kept verbatim for backward
+The =gar-response-executor-*= symbol prefix is kept verbatim for backward
 compatibility with any user config that customised these settings under
 their original names. A future PR may add =gar-response-executor-*=
 aliases via =defvaralias= / =defalias=; today the legacy names are the
@@ -43,7 +43,7 @@ See also:
 ;; (with inline-image redisplay for org-mode). It also carries a small
 ;; tutorial-style-plot-response repair hook for low-skilled local models.
 ;;
-;; The `claude-executor-*' symbol prefix is preserved verbatim for
+;; The `gar-response-executor-*' symbol prefix is preserved verbatim for
 ;; compatibility with any user customisation under those names. A
 ;; future PR may add `gar-response-executor-*' aliases.
 
@@ -66,7 +66,7 @@ See also:
 (require 'ob)
 (require 'cl-lib)
 
-(defgroup claude-executor nil
+(defgroup gar-response-executor nil
   "Auto-execution of code blocks in assistant responses.
 The `claude-executor' symbol prefix is kept for compatibility with earlier
 configuration versions; the implementation is model-neutral."
@@ -74,64 +74,64 @@ configuration versions; the implementation is model-neutral."
 
 ;;; --- General Switches ----------------------------------------------
 
-(defcustom claude-executor-auto-execute nil
+(defcustom gar-response-executor-auto-execute nil
   "Automatically execute Babel blocks, exec-tags and auto-commands.
 WARNING: security risk, off by default.
 Does NOT affect AUTORUN elisp blocks — those always run when the
-mode is active (with confirmation if `claude-executor-confirm-before-execute')."
+mode is active (with confirmation if `gar-response-executor-confirm-before-execute')."
   :type 'boolean
-  :group 'claude-executor)
+  :group 'gar-response-executor)
 
-(defcustom claude-executor-confirm-before-execute nil
+(defcustom gar-response-executor-confirm-before-execute nil
   "Require confirmation before each execution.
 Applies to Babel blocks and AUTORUN elisp blocks."
   :type 'boolean
-  :group 'claude-executor)
+  :group 'gar-response-executor)
 
 ;;; --- Babel Block Configuration -------------------------------------
 
-(defcustom claude-executor-allowed-languages
+(defcustom gar-response-executor-allowed-languages
   '("python" "sh" "bash" "elisp" "R" "ruby" "js")
   "Languages for which Babel auto-execution is allowed.
-Checked in `claude-executor--execute-babel-block'."
+Checked in `gar-response-executor--execute-babel-block'."
   :type '(repeat string)
-  :group 'claude-executor)
+  :group 'gar-response-executor)
 
 ;;; --- Pattern-Based Auto Commands -----------------------------------
 
-(defcustom claude-executor-auto-commands nil
+(defcustom gar-response-executor-auto-commands nil
   "Alist of (REGEX . COMMAND) for automatic shell commands.
 When REGEX matches in the response, COMMAND is executed.
 Example:
   '((\"pip install \\\\(.*\\\\)\" . \"pip install \\\\1\"))"
   :type '(alist :key-type regexp :value-type string)
-  :group 'claude-executor)
+  :group 'gar-response-executor)
 
 ;;; --- AUTORUN Configuration -----------------------------------------
 
-(defcustom claude-executor-auto-execute-elisp nil
+(defcustom gar-response-executor-auto-execute-elisp nil
   "Reserved flag for future elisp auto-eval control.
-Currently AUTORUN execution is coupled to `claude-executor-mode' and
-`claude-executor-confirm-before-execute'."
+Currently AUTORUN execution is coupled to `gar-response-executor-mode' and
+`gar-response-executor-confirm-before-execute'."
   :type 'boolean
-  :group 'claude-executor)
+  :group 'gar-response-executor)
 
-(defcustom claude-executor-elisp-tag "AUTORUN"
+(defcustom gar-response-executor-elisp-tag "AUTORUN"
   "Tag that marks automatic elisp execution.
 The assistant must write ~#+begin_src elisp :AUTORUN~ in responses.
 Can be renamed via this custom variable (e.g. \"RUN\")."
   :type 'string
-  :group 'claude-executor)
+  :group 'gar-response-executor)
 
-(defcustom claude-executor-allowed-functions nil
+(defcustom gar-response-executor-allowed-functions nil
   "Optional whitelist of allowed functions for AUTORUN eval.
 - nil  → no restriction (any elisp call is allowed).
 - list → AUTORUN code that calls a function not in the list is
         rejected and logged in *Assistant Actions*."
   :type '(repeat symbol)
-  :group 'claude-executor)
+  :group 'gar-response-executor)
 
-(defun claude-executor--find-babel-blocks ()
+(defun gar-response-executor--find-babel-blocks ()
   "Find all Babel code blocks in the current (possibly narrowed) region.
 Returns a list of plists with :lang, :header, :body, :begin, :end."
   (let (blocks)
@@ -148,7 +148,7 @@ Returns a list of plists with :lang, :header, :body, :begin, :end."
               blocks)))
     (nreverse blocks)))
 
-(defun claude-executor--lang-extension (lang)
+(defun gar-response-executor--lang-extension (lang)
   "File extension for LANG (used for temp file)."
   (cdr (assoc lang '(("python" . ".py")
                      ("sh"     . ".sh")
@@ -158,7 +158,7 @@ Returns a list of plists with :lang, :header, :body, :begin, :end."
                      ("ruby"   . ".rb")
                      ("js"     . ".js")))))
 
-(defun claude-executor--lang-command (lang file)
+(defun gar-response-executor--lang-command (lang file)
   "Shell invocation for language LANG with file FILE."
   (cdr (assoc lang
               `(("python" . ,(format "python3 %s" file))
@@ -169,10 +169,10 @@ Returns a list of plists with :lang, :header, :body, :begin, :end."
                 ("ruby"   . ,(format "ruby %s" file))
                 ("js"     . ,(format "node %s" file))))))
 
-(defun claude-executor--do-execute (lang body)
+(defun gar-response-executor--do-execute (lang body)
   "Write BODY to a temp file, call the matching language CLI,
 log in *Assistant Execution Results* and delete the temp file."
-  (let* ((ext        (or (claude-executor--lang-extension lang) ""))
+  (let* ((ext        (or (gar-response-executor--lang-extension lang) ""))
          (tmp-file   (make-temp-file "claude-exec-" nil ext))
          (result-buf (get-buffer-create "*Assistant Execution Results*")))
     (with-temp-file tmp-file
@@ -183,7 +183,7 @@ log in *Assistant Execution Results* and delete the temp file."
                       (format-time-string "%H:%M:%S")))
       (insert body)
       (insert "\n--- Output ---\n")
-      (let ((cmd (claude-executor--lang-command lang tmp-file)))
+      (let ((cmd (gar-response-executor--lang-command lang tmp-file)))
         (if cmd
             (insert (shell-command-to-string cmd))
           (insert (format "No executor for language: %s\n" lang))))
@@ -191,14 +191,14 @@ log in *Assistant Execution Results* and delete the temp file."
     (display-buffer result-buf)
     (delete-file tmp-file)))
 
-(defun claude-executor--file-output-block-p (block)
+(defun gar-response-executor--file-output-block-p (block)
   "Return non-nil when BLOCK should be executed by Org Babel for file output."
   (let ((lang (plist-get block :lang))
         (header (plist-get block :header)))
     (or (string-match-p "\\_<:file\\_>" header)
         (member lang '("gnuplot" "dot" "plantuml" "mermaid")))))
 
-(defun claude-executor--execute-org-babel-file-block (block)
+(defun gar-response-executor--execute-org-babel-file-block (block)
   "Execute BLOCK with Org Babel and display generated images inline."
   (save-excursion
     (goto-char (plist-get block :begin))
@@ -216,28 +216,28 @@ log in *Assistant Execution Results* and delete the temp file."
                            (error-message-string err)))
            (display-buffer (current-buffer))))))))
 
-(defun claude-executor--execute-babel-block (block)
+(defun gar-response-executor--execute-babel-block (block)
   "Execute a Babel block.
-Checks `claude-executor-allowed-languages' and optionally
-`claude-executor-confirm-before-execute'."
+Checks `gar-response-executor-allowed-languages' and optionally
+`gar-response-executor-confirm-before-execute'."
   (let ((lang (plist-get block :lang))
         (body (plist-get block :body)))
-    (when (member lang claude-executor-allowed-languages)
+    (when (member lang gar-response-executor-allowed-languages)
       (cond
-       ((claude-executor--file-output-block-p block)
-        (if claude-executor-confirm-before-execute
+       ((gar-response-executor--file-output-block-p block)
+        (if gar-response-executor-confirm-before-execute
             (when (yes-or-no-p
                    (format "Execute file-output block (%s)?\n%s\n" lang body))
-              (claude-executor--execute-org-babel-file-block block))
-          (claude-executor--execute-org-babel-file-block block)))
-       (claude-executor-confirm-before-execute
+              (gar-response-executor--execute-org-babel-file-block block))
+          (gar-response-executor--execute-org-babel-file-block block)))
+       (gar-response-executor-confirm-before-execute
         (when (yes-or-no-p
                (format "Execute block (%s):\n%s\n?" lang body))
-          (claude-executor--do-execute lang body)))
+          (gar-response-executor--do-execute lang body)))
        (t
-        (claude-executor--do-execute lang body))))))
+        (gar-response-executor--do-execute lang body))))))
 
-(defun claude-executor--find-commands ()
+(defun gar-response-executor--find-commands ()
   "Find commands in tags of the form '<!-- exec: COMMAND -->'."
   (let (commands)
     (save-excursion
@@ -247,7 +247,7 @@ Checks `claude-executor-allowed-languages' and optionally
         (push (match-string-no-properties 1) commands)))
     (nreverse commands)))
 
-(defun claude-executor-run-command (command)
+(defun gar-response-executor-run-command (command)
   "Execute COMMAND in the shell.
 Output goes to the buffer *Assistant Commands*.
 Also callable interactively: M-x or C-c C-x c."
@@ -260,27 +260,27 @@ Also callable interactively: M-x or C-c C-x c."
       (insert "\n"))
     (display-buffer result-buf)))
 
-(defun claude-executor--find-autorun-blocks ()
+(defun gar-response-executor--find-autorun-blocks ()
   "Find elisp blocks whose header contains the AUTORUN tag.
-Search depends on `claude-executor-elisp-tag'."
+Search depends on `gar-response-executor-elisp-tag'."
   (let (blocks)
     (save-excursion
       (goto-char (point-min))
       (while (re-search-forward
               (format "^#\\+begin_src elisp.*%s.*\n\\(\\(?:.*\n\\)*?\\)#\\+end_src"
-                      claude-executor-elisp-tag)
+                      gar-response-executor-elisp-tag)
               nil t)
         (push (match-string-no-properties 1) blocks)))
     (nreverse blocks)))
 
-(defun claude-executor--whitelist-allows-p (code)
+(defun gar-response-executor--whitelist-allows-p (code)
   "Check whether CODE (string) only calls functions from
-`claude-executor-allowed-functions'.
+`gar-response-executor-allowed-functions'.
 If no whitelist is set → t (all allowed)."
-  (if (null claude-executor-allowed-functions)
+  (if (null gar-response-executor-allowed-functions)
       t
     (let ((sexp    (read code))
-          (allowed claude-executor-allowed-functions)
+          (allowed gar-response-executor-allowed-functions)
           (ok      t))
       (cl-labels ((walk (form)
                     (cond
@@ -293,7 +293,7 @@ If no whitelist is set → t (all allowed)."
         (walk sexp))
       ok)))
 
-(defun claude-executor--safe-eval (code)
+(defun gar-response-executor--safe-eval (code)
   "Evaluate CODE (string) with error handling and logging.
 - Whitelist violation → ⚠ entry, no eval.
 - Success             → ✓ entry with result.
@@ -301,7 +301,7 @@ If no whitelist is set → t (all allowed)."
 Logs go to the buffer *Assistant Actions*."
   (let ((log-buf (get-buffer-create "*Assistant Actions*")))
     (cond
-     ((not (claude-executor--whitelist-allows-p code))
+     ((not (gar-response-executor--whitelist-allows-p code))
       (with-current-buffer log-buf
         (goto-char (point-max))
         (insert (format "\n⚠ [%s]\n  Code: %s\n  Rejected: not in whitelist.\n"
@@ -1269,9 +1269,9 @@ not return native gptel tool-call messages."
                  gptel-agent-runtime-trace-buffer-name)))
             continuation-observations)))))))
 
-(defun claude-executor-response-hook (beg end)
+(defun gar-response-executor-response-hook (beg end)
   "Hook for Babel blocks, exec-tags and auto-pattern matching.
-Active only when `claude-executor-auto-execute' = t.
+Active only when `gar-response-executor-auto-execute' = t.
 Registered in `gptel-post-response-functions'."
   (save-restriction
     (narrow-to-region beg end)
@@ -1279,93 +1279,174 @@ Registered in `gptel-post-response-functions'."
     ;; This is safe text correction, not tool execution, so it stays active even
     ;; when automatic execution is disabled.
     (gptel-agent-runtime-repair-capability-response (point-min) (point-max))
-    (when claude-executor-auto-execute
+    (when gar-response-executor-auto-execute
       ;; 1. Repair obvious tutorial-style plot answers from weaker local models.
       (my/gptel-repair-inline-plot-response (point-min) (point-max))
       ;; 2. Execute safe JSON tool calls that local models printed as text.
       (gptel-agent-runtime-execute-raw-tool-calls (point-min) (point-max))
       ;; 3. Babel blocks
-      (dolist (block (claude-executor--find-babel-blocks))
-        (claude-executor--execute-babel-block block))
+      (dolist (block (gar-response-executor--find-babel-blocks))
+        (gar-response-executor--execute-babel-block block))
       ;; 4. Explicit exec-tags
-      (dolist (cmd (claude-executor--find-commands))
+      (dolist (cmd (gar-response-executor--find-commands))
         (when (yes-or-no-p (format "Execute command: %s ?" cmd))
-          (claude-executor-run-command cmd)))
-      ;; 5. User-defined patterns from claude-executor-auto-commands
-      (dolist (pattern-cmd claude-executor-auto-commands)
+          (gar-response-executor-run-command cmd)))
+      ;; 5. User-defined patterns from gar-response-executor-auto-commands
+      (dolist (pattern-cmd gar-response-executor-auto-commands)
         (save-excursion
           (goto-char (point-min))
           (when (re-search-forward (car pattern-cmd) nil t)
-            (claude-executor-run-command (cdr pattern-cmd))))))))
+            (gar-response-executor-run-command (cdr pattern-cmd))))))))
 
-(defun claude-executor-autorun-hook (beg end)
+(defun gar-response-executor-autorun-hook (beg end)
   "Hook for AUTORUN elisp blocks.
-Always active while `claude-executor-mode' is on.
-Respects `claude-executor-confirm-before-execute'."
+Always active while `gar-response-executor-mode' is on.
+Respects `gar-response-executor-confirm-before-execute'."
   (save-restriction
     (narrow-to-region beg end)
-    (dolist (code (claude-executor--find-autorun-blocks))
-      (if claude-executor-confirm-before-execute
+    (dolist (code (gar-response-executor--find-autorun-blocks))
+      (if gar-response-executor-confirm-before-execute
           (when (yes-or-no-p
                  (format "The assistant wants to execute:\n%s\nAllow?" code))
-            (claude-executor--safe-eval code))
-        (claude-executor--safe-eval code)))))
+            (gar-response-executor--safe-eval code))
+        (gar-response-executor--safe-eval code)))))
 
-(defun claude-executor-execute-all-blocks ()
+(defun gar-response-executor-execute-all-blocks ()
   "Manual variant: execute all Babel blocks in the current buffer."
   (interactive)
-  (let ((blocks (claude-executor--find-babel-blocks)))
+  (let ((blocks (gar-response-executor--find-babel-blocks)))
     (if blocks
         (dolist (block blocks)
-          (claude-executor--execute-babel-block block))
+          (gar-response-executor--execute-babel-block block))
       (message "No code blocks found."))))
 
-(defun claude-executor-execute-block-at-point ()
+(defun gar-response-executor-execute-block-at-point ()
   "Execute the Babel block under the cursor."
   (interactive)
   (let* ((elem (org-element-at-point))
          (lang (org-element-property :language elem))
          (body (org-element-property :value elem)))
     (if (and lang body)
-        (claude-executor--do-execute lang body)
+        (gar-response-executor--do-execute lang body)
       (message "No code block under cursor."))))
 
-(defvar claude-executor-mode-map
+(defvar gar-response-executor-mode-map
   (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "C-c C-x e") #'claude-executor-execute-all-blocks)
-    (define-key map (kbd "C-c C-x b") #'claude-executor-execute-block-at-point)
-    (define-key map (kbd "C-c C-x c") #'claude-executor-run-command)
+    (define-key map (kbd "C-c C-x e") #'gar-response-executor-execute-all-blocks)
+    (define-key map (kbd "C-c C-x b") #'gar-response-executor-execute-block-at-point)
+    (define-key map (kbd "C-c C-x c") #'gar-response-executor-run-command)
     map)
-  "Keymap for `claude-executor-mode'.")
+  "Keymap for `gar-response-executor-mode'.")
 
-(define-minor-mode claude-executor-mode
+(define-minor-mode gar-response-executor-mode
   "Global mode for automatic execution of assistant responses.
 Activates the response and AUTORUN hooks on
 `gptel-post-response-functions'."
   :lighter " CE"
-  :keymap claude-executor-mode-map
+  :keymap gar-response-executor-mode-map
   :global t
-  (if claude-executor-mode
+  (if gar-response-executor-mode
       (progn
         (add-hook 'gptel-post-response-functions
-                  #'claude-executor-response-hook)
+                  #'gar-response-executor-response-hook)
         (add-hook 'gptel-post-response-functions
-                  #'claude-executor-autorun-hook)
+                  #'gar-response-executor-autorun-hook)
         (message "Response Executor activated."))
     (remove-hook 'gptel-post-response-functions
-                 #'claude-executor-response-hook)
+                 #'gar-response-executor-response-hook)
     (remove-hook 'gptel-post-response-functions
-                 #'claude-executor-autorun-hook)
+                 #'gar-response-executor-autorun-hook)
     (message "Response Executor deactivated.")))
 
 #+end_src
 
+* Backward-compatibility shims for =claude-executor-*=
+
+Until 2026-05-27 the executor's defcustoms and functions used the
+=claude-executor-*= symbol prefix. The canonical names are now
+=gar-response-executor-*=; this section keeps every old name as a
+=defvaralias= (for variables) or =defalias= (for functions) pointing
+at the new symbol. User configs that customised =claude-executor-...=
+continue to work unchanged.
+
+#+begin_src emacs-lisp
+;; Defgroup shim: keep `claude-executor' as a child of the new group so
+;; M-x customize-group claude-executor still renders the same options.
+(defgroup claude-executor nil
+  "Compatibility shim for `gar-response-executor'.
+This group exists only so user configs that referenced
+`:group 'claude-executor' continue to work; the canonical group is
+`gar-response-executor'."
+  :group 'gar-response-executor)
+
+;; Defcustoms (variables) -- old name -> new name.
+(defvaralias 'claude-executor-auto-execute
+  'gar-response-executor-auto-execute)
+(defvaralias 'claude-executor-confirm-before-execute
+  'gar-response-executor-confirm-before-execute)
+(defvaralias 'claude-executor-allowed-languages
+  'gar-response-executor-allowed-languages)
+(defvaralias 'claude-executor-auto-commands
+  'gar-response-executor-auto-commands)
+(defvaralias 'claude-executor-auto-execute-elisp
+  'gar-response-executor-auto-execute-elisp)
+(defvaralias 'claude-executor-elisp-tag
+  'gar-response-executor-elisp-tag)
+(defvaralias 'claude-executor-allowed-functions
+  'gar-response-executor-allowed-functions)
+
+;; Private helpers -- old name -> new name.
+(defalias 'claude-executor--find-babel-blocks
+  'gar-response-executor--find-babel-blocks)
+(defalias 'claude-executor--lang-extension
+  'gar-response-executor--lang-extension)
+(defalias 'claude-executor--lang-command
+  'gar-response-executor--lang-command)
+(defalias 'claude-executor--do-execute
+  'gar-response-executor--do-execute)
+(defalias 'claude-executor--file-output-block-p
+  'gar-response-executor--file-output-block-p)
+(defalias 'claude-executor--execute-org-babel-file-block
+  'gar-response-executor--execute-org-babel-file-block)
+(defalias 'claude-executor--execute-babel-block
+  'gar-response-executor--execute-babel-block)
+(defalias 'claude-executor--find-commands
+  'gar-response-executor--find-commands)
+(defalias 'claude-executor--find-autorun-blocks
+  'gar-response-executor--find-autorun-blocks)
+(defalias 'claude-executor--whitelist-allows-p
+  'gar-response-executor--whitelist-allows-p)
+(defalias 'claude-executor--safe-eval
+  'gar-response-executor--safe-eval)
+
+;; Public commands -- old name -> new name.
+(defalias 'claude-executor-run-command
+  'gar-response-executor-run-command)
+(defalias 'claude-executor-response-hook
+  'gar-response-executor-response-hook)
+(defalias 'claude-executor-autorun-hook
+  'gar-response-executor-autorun-hook)
+(defalias 'claude-executor-execute-all-blocks
+  'gar-response-executor-execute-all-blocks)
+(defalias 'claude-executor-execute-block-at-point
+  'gar-response-executor-execute-block-at-point)
+
+;; Minor mode: alias both the function slot (defalias) and the value
+;; slot (defvaralias) -- define-minor-mode creates a same-named variable
+;; for the mode state in addition to the toggle function. Same for the
+;; mode-map variable.
+(defalias 'claude-executor-mode 'gar-response-executor-mode)
+(defvaralias 'claude-executor-mode 'gar-response-executor-mode)
+(defvaralias 'claude-executor-mode-map
+  'gar-response-executor-mode-map)
+#+end_src
+
 * File footer
 
-Two =provide= forms: the new =gar-executor= feature name (used by the
-master's =(require 'gar-executor)= call) and the legacy =claude-executor=
-name kept as a compat alias so any external code that
-=(require 'claude-executor)= continues to work.
+Three =provide= forms: the new =gar-executor= feature name (used by
+the master's =(require 'gar-executor)= call), the legacy =gar-executor=
+feature alias kept since the first split, and =claude-executor= for any
+external code that still does =(require 'claude-executor)=.
 
 #+begin_src emacs-lisp
 (provide 'gar-executor)

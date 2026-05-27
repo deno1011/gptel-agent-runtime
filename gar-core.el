@@ -912,35 +912,38 @@ gptel--known-tools is a two-level alist: (category . ((name . struct) ...))."
 
 
 ;;; --- Security -----------------------------------------------------
-;; Confirmation dialog before execution (Babel + AUTORUN)
-(setq claude-executor-confirm-before-execute nil)
+;; Confirmation dialog before execution (Babel + AUTORUN). Uses the new
+;; gar-response-executor-* names; defvaralias in gar-executor keeps the
+;; legacy claude-executor-* names usable by older user configs.
+(setq gar-response-executor-confirm-before-execute nil)
 
 ;; Automatically execute Babel blocks, exec-tags, auto-commands.
 ;; t = every Babel block with :results output / :file etc. runs directly
 ;; after an assistant response and produces visible output (or an image).
-(setq claude-executor-auto-execute t)
+(setq gar-response-executor-auto-execute t)
 
 ;;; --- Allowed Babel Languages --------------------------------------
-(setq claude-executor-allowed-languages
+(setq gar-response-executor-allowed-languages
       '("python" "sh" "bash" "elisp" "R" "ruby" "js"
         "gnuplot" "dot" "plantuml" "mermaid"))
 
 ;;; --- Pattern-Based Auto Commands (example commented out) ----------
-;; (setq claude-executor-auto-commands
+;; (setq gar-response-executor-auto-commands
 ;;       '(("pip install \\(.*\\)" . "pip install \\1")))
 
 ;;; --- AUTORUN Whitelist (optional) ---------------------------------
 ;; nil = no restriction. For more security, enter symbols here:
-;; (setq claude-executor-allowed-functions
+;; (setq gar-response-executor-allowed-functions
 ;;       '(find-file find-file-noselect with-current-buffer
 ;;         goto-char point-max insert save-buffer
 ;;         org-todo org-insert-heading org-agenda message))
 
 ;;; --- Activate Mode ------------------------------------------------
 ;; Backend + model is set in the "Multi-Backend Configuration" section.
-;; claude-executor-mode is defined in gar-executor (loaded after this
-;; module). The master's tail wiring calls it once gar-executor has
-;; provided the function.
+;; gar-response-executor-mode is defined in gar-executor (loaded after
+;; this module). The master's tail wiring calls it once gar-executor
+;; has provided the function. The legacy claude-executor-mode name is
+;; available via defalias for any user config that still binds it.
 
 (provide 'gar-core)
 
