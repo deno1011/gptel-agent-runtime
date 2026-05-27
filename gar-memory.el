@@ -38,6 +38,14 @@
                   "gptel-agent-runtime" (text))
 (declare-function gptel-agent-runtime-make-evidence
                   "gptel-agent-runtime" (text source-type source-id &rest plist))
+(declare-function gptel-agent-runtime-event-payload "gptel-agent-runtime" (event))
+(declare-function gptel-agent-runtime-event-session-id "gptel-agent-runtime" (event))
+(declare-function gptel-agent-runtime-session-current-task "gptel-agent-runtime" (session))
+(declare-function gptel-agent-runtime-session-iteration "gptel-agent-runtime" (session))
+(declare-function gptel-agent-runtime-task-goal "gptel-agent-runtime" (task))
+(defvar gptel-agent-runtime--current-session)
+(declare-function gptel-agent-runtime-playbook-bump "gptel-agent-runtime"
+                  (playbook outcome timestamp))
 (declare-function gptel-agent-runtime-subscribe
                   "gptel-agent-runtime" (event-type handler))
 
@@ -154,38 +162,273 @@ The threshold is `gptel-agent-runtime-novelty-threshold'."
     (when (> total 0)
       (/ (float s) total))))
 
+;; ----- Per-invocation playbook tracking -----
+;;
+;; Every time the autonomous loop finalizes a session, the subscriber
+;; below records ONE invocation entry per playbook that matched the
+;; session's goal at routing time. The entry captures the playbook ID,
+;; session ID, ISO timestamp, outcome (success/failure/abandoned),
+;; iteration count, and free-form notes. The log is persisted to
+;; `~/.emacs.d/gptel-agent-runtime/playbook-invocations.el' with the
+;; standard versioned-state header.
+;;
+;; The rolling-window helpers (`playbook-recent-success-rate',
+;; `playbook-last-used-at') consult this log first and fall back to the
+;; coarse `success-count' / `failure-count' totals on the playbook
+;; struct itself.
+
+(defcustom gptel-agent-runtime-playbook-invocations-max-memory 500
+  "Maximum number of playbook invocations kept in memory."
+  :type 'integer
+  :safe #'integerp
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-playbook-recent-window 10
+  "Number of most-recent invocations consulted by the rolling success rate.
+The per-invocation rolling rate is more responsive to recent failures
+than the all-time `success-count' / `failure-count' totals on the
+playbook struct."
+  :type 'integer
+  :safe #'integerp
+  :group 'gptel-agent-runtime)
+
+(defvar gptel-agent-runtime--playbook-invocations nil
+  "In-memory list of recent playbook invocations, newest first.
+Each entry is a plist with :id :playbook-id :session-id :outcome
+:started-at :finished-at :iteration-count :notes.")
+
+(defun gptel-agent-runtime--playbook-invocations-file ()
+  "Return the absolute path of the playbook-invocations log."
+  (expand-file-name
+   "playbook-invocations.el"
+   (expand-file-name "gptel-agent-runtime/" user-emacs-directory)))
+
+(defun gptel-agent-runtime--save-playbook-invocations ()
+  "Persist the in-memory invocation log to disk with the schema header."
+  (let* ((file (gptel-agent-runtime--playbook-invocations-file))
+         (dir (file-name-directory file)))
+    (unless (file-directory-p dir) (make-directory dir t))
+    (condition-case _err
+        (with-temp-file file
+          (let ((create-lockfiles nil)
+                (print-length nil)
+                (print-level nil))
+            (prin1 (gptel-agent-runtime--state-header "playbook-invocations")
+                   (current-buffer))
+            (insert "\n")
+            (prin1 gptel-agent-runtime--playbook-invocations (current-buffer))
+            (insert "\n")))
+      (file-error nil))))
+
+(defun gptel-agent-runtime-load-playbook-invocations ()
+  "Load the persisted invocation log, replacing the in-memory ring."
+  (let* ((file (gptel-agent-runtime--playbook-invocations-file)))
+    (when (file-exists-p file)
+      (let ((parsed (gptel-agent-runtime--read-versioned file)))
+        (when parsed
+          (with-temp-buffer
+            (insert-file-contents file)
+            (goto-char (cdr parsed))
+            (setq gptel-agent-runtime--playbook-invocations
+                  (condition-case nil (read (current-buffer)) (error nil)))))))))
+
+(cl-defun gptel-agent-runtime-record-playbook-invocation
+    (playbook-id session-id outcome
+                 &key started-at iteration-count notes)
+  "Append one PLAYBOOK-ID invocation entry to the log.
+OUTCOME is one of `success', `failure', `abandoned'. SESSION-ID,
+STARTED-AT (ISO timestamp string), ITERATION-COUNT, and NOTES are
+preserved verbatim. The matching playbook's `success-count' /
+`failure-count' / `updated-at' slots are also bumped so older code
+paths continue to see the totals. Returns the recorded plist."
+  (let* ((now (gptel-agent-runtime--timestamp))
+         (inv (list :id (format "inv-%s" (format-time-string "%Y%m%d%H%M%S%N"))
+                    :playbook-id playbook-id
+                    :session-id session-id
+                    :outcome outcome
+                    :started-at (or started-at now)
+                    :finished-at now
+                    :iteration-count iteration-count
+                    :notes notes)))
+    (push inv gptel-agent-runtime--playbook-invocations)
+    (when (> (length gptel-agent-runtime--playbook-invocations)
+             gptel-agent-runtime-playbook-invocations-max-memory)
+      (setcdr (nthcdr (1- gptel-agent-runtime-playbook-invocations-max-memory)
+                      gptel-agent-runtime--playbook-invocations)
+              nil))
+    ;; Bump the playbook's coarse totals so all-time rate stays useful.
+    ;; `setf' on the playbook accessors lives in gar-agents (where the
+    ;; struct is defined) so we delegate to the bump helper there. Calling
+    ;; `setf' inline here would expand at gar-memory's load time, before
+    ;; gar-agents has installed the struct's setter machinery.
+    (when (and (boundp 'gptel-agent-runtime-playbook-registry)
+               (fboundp 'gptel-agent-runtime-playbook-bump))
+      (let ((pb (cl-find-if
+                 (lambda (p)
+                   (equal (gptel-agent-runtime-playbook-id p) playbook-id))
+                 gptel-agent-runtime-playbook-registry)))
+        (gptel-agent-runtime-playbook-bump pb outcome now)))
+    (gptel-agent-runtime--save-playbook-invocations)
+    (gptel-agent-runtime-emit-event
+     'playbook-invocation-recorded
+     :source "memory"
+     :session-id session-id
+     :payload (list :playbook-id playbook-id :outcome outcome
+                    :iteration-count iteration-count)
+     :taint 'trusted)
+    inv))
+
+(defun gptel-agent-runtime-playbook-invocations-for (playbook-id &optional limit)
+  "Return invocation plists for PLAYBOOK-ID, newest first, capped at LIMIT."
+  (let ((results
+         (cl-loop for inv in gptel-agent-runtime--playbook-invocations
+                  when (equal (plist-get inv :playbook-id) playbook-id)
+                  collect inv)))
+    (if (and limit (numberp limit))
+        (cl-subseq results 0 (min limit (length results)))
+      results)))
+
+(defun gptel-agent-runtime-playbook-recent-success-rate (playbook)
+  "Return rolling success rate for PLAYBOOK over the recent invocations.
+The window is `gptel-agent-runtime-playbook-recent-window'. Returns
+nil when no invocations have been recorded for this playbook yet, so
+callers can fall back to the coarse total-based rate."
+  (let* ((id (gptel-agent-runtime-playbook-id playbook))
+         (window (max 1 gptel-agent-runtime-playbook-recent-window))
+         (invs (gptel-agent-runtime-playbook-invocations-for id window)))
+    (when invs
+      (let ((successes (cl-count-if
+                        (lambda (i) (eq (plist-get i :outcome) 'success))
+                        invs)))
+        (/ (float successes) (length invs))))))
+
 (defun gptel-agent-runtime-playbook-last-used-at (playbook)
-  "Return the last-used timestamp string for PLAYBOOK.
-Currently derived from `updated-at' until per-invocation tracking lands."
-  (gptel-agent-runtime-playbook-updated-at playbook))
+  "Return the timestamp of the most recent recorded invocation, or nil.
+Falls back to the playbook struct's `updated-at' slot when no
+invocations are on file."
+  (let* ((id (gptel-agent-runtime-playbook-id playbook))
+         (recent (car (gptel-agent-runtime-playbook-invocations-for id 1))))
+    (or (and recent (plist-get recent :finished-at))
+        (gptel-agent-runtime-playbook-updated-at playbook))))
 
 (defun gptel-agent-runtime-rank-playbooks-by-success (&optional limit)
-  "Return registered playbooks ordered by best recent-success rate.
-LIMIT defaults to all. Playbooks with no usage history sort last but are
-included so unused candidates are still discoverable."
+  "Return registered playbooks ordered by best success rate.
+Prefers the rolling-window rate from per-invocation tracking; falls
+back to the coarse all-time `success-count' / `failure-count' totals
+on the playbook struct. Playbooks with no usage history sort last but
+are included so unused candidates are still discoverable."
   (let* ((scored
           (mapcar
            (lambda (pb)
-             (cons pb (or (gptel-agent-runtime-playbook-success-rate pb)
-                          -1.0)))
+             (cons pb
+                   (or (gptel-agent-runtime-playbook-recent-success-rate pb)
+                       (gptel-agent-runtime-playbook-success-rate pb)
+                       -1.0)))
            gptel-agent-runtime-playbook-registry))
          (sorted (sort scored (lambda (a b) (> (cdr a) (cdr b)))))
          (heads (mapcar #'car sorted)))
     (if limit (cl-subseq heads 0 (min limit (length heads))) heads)))
 
 (defun gptel-agent-runtime-next-time-do-this-first (text)
-  "Return a one-line hint about which playbook to try first for TEXT, or nil."
+  "Return a one-line hint about which playbook to try first for TEXT, or nil.
+Reports the rolling-window rate when available."
   (let* ((matches (and (fboundp 'gptel-agent-runtime-match-playbooks)
                        (gptel-agent-runtime-match-playbooks text)))
          (best (car matches))
-         (rate (and best (gptel-agent-runtime-playbook-success-rate best))))
+         (recent (and best
+                      (gptel-agent-runtime-playbook-recent-success-rate best)))
+         (rate (or recent
+                   (and best (gptel-agent-runtime-playbook-success-rate best))))
+         (total (or (length (and best
+                                 (gptel-agent-runtime-playbook-invocations-for
+                                  (gptel-agent-runtime-playbook-id best))))
+                    0)))
     (when (and best rate (>= rate 0.5))
-      (format "Next time, start with playbook `%s' (%.0f%% success on %d runs)."
-              (or (gptel-agent-runtime-playbook-id best)
-                  (gptel-agent-runtime-playbook-summary best))
-              (* 100 rate)
-              (+ (or (gptel-agent-runtime-playbook-success-count best) 0)
-                 (or (gptel-agent-runtime-playbook-failure-count best) 0))))))
+      (format
+       "Next time, start with playbook `%s' (%.0f%% success on %d %s)."
+       (or (gptel-agent-runtime-playbook-id best)
+           (gptel-agent-runtime-playbook-summary best))
+       (* 100 rate)
+       (if recent total
+         (+ (or (gptel-agent-runtime-playbook-success-count best) 0)
+            (or (gptel-agent-runtime-playbook-failure-count best) 0)))
+       (if recent "recent runs" "lifetime runs")))))
+
+(defun gptel-agent-runtime--session-finalized-outcome (reason)
+  "Map a `--finalize-task' REASON symbol to a playbook outcome symbol."
+  (pcase reason
+    ('done 'success)
+    ('completed 'success)
+    ('failed 'failure)
+    ('max-iterations 'abandoned)
+    ('cancelled 'abandoned)
+    (_ (if (memq reason '(error abort)) 'failure 'abandoned))))
+
+(defun gptel-agent-runtime--record-playbook-invocations-on-finalize (event)
+  "Subscriber: at `session-finalized', record one invocation per matched playbook.
+Reads the session's most recent route via `match-playbooks' against the
+goal text, then records one invocation entry per matched playbook with
+the session's outcome derived from the finalize REASON in the event
+payload."
+  (when (fboundp 'gptel-agent-runtime-match-playbooks)
+    (let* ((payload (gptel-agent-runtime-event-payload event))
+           (session-id (gptel-agent-runtime-event-session-id event))
+           (reason (plist-get payload :reason))
+           (outcome (gptel-agent-runtime--session-finalized-outcome reason))
+           ;; The session struct is no longer in scope here, but the
+           ;; finalize event carries the memory path which holds the
+           ;; persisted session. Cheaper: re-read the most recent goal
+           ;; via the current session if available.
+           (session (and (boundp 'gptel-agent-runtime--current-session)
+                         gptel-agent-runtime--current-session))
+           (goal (and session
+                      (let ((task (gptel-agent-runtime-session-current-task
+                                   session)))
+                        (and task (gptel-agent-runtime-task-goal task)))))
+           (matched (and goal (gptel-agent-runtime-match-playbooks goal))))
+      (when (and session-id matched)
+        (dolist (pb matched)
+          (gptel-agent-runtime-record-playbook-invocation
+           (gptel-agent-runtime-playbook-id pb)
+           session-id outcome
+           :iteration-count (and session
+                                 (gptel-agent-runtime-session-iteration
+                                  session))))))))
+
+(defun gptel-agent-runtime-show-playbook-history (&optional limit)
+  "Open a buffer summarising the most recent playbook invocations.
+LIMIT defaults to 50."
+  (interactive "P")
+  (let* ((limit (or (and (numberp limit) limit) 50))
+         (entries (cl-subseq gptel-agent-runtime--playbook-invocations
+                             0 (min limit
+                                    (length
+                                     gptel-agent-runtime--playbook-invocations))))
+         (buf (get-buffer-create "*gptel-agent-playbook-history*")))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert (format "gptel-agent-runtime playbook invocations\n"))
+        (insert (format "Recent window: %d   Total in memory: %d\n\n"
+                        gptel-agent-runtime-playbook-recent-window
+                        (length gptel-agent-runtime--playbook-invocations)))
+        (if (null entries)
+            (insert "  (no invocations recorded yet)\n")
+          (dolist (inv entries)
+            (insert
+             (format "  %s  %-10s  %s  it=%s  session=%s\n"
+                     (or (plist-get inv :finished-at) "?")
+                     (or (plist-get inv :outcome) "?")
+                     (or (plist-get inv :playbook-id) "?")
+                     (or (plist-get inv :iteration-count) "-")
+                     (or (plist-get inv :session-id) "?")))))
+        (goto-char (point-min))
+        (special-mode)))
+    (display-buffer buf)))
+
+(gptel-agent-runtime-subscribe
+ 'session-finalized
+ #'gptel-agent-runtime--record-playbook-invocations-on-finalize)
 
 ;; ----- Strategy synthesis: candidate playbooks -----
 
