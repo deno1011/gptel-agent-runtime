@@ -1,0 +1,406 @@
+;;; gar-skeptic.el --- Advocatus Diaboli skeptic gate -*- lexical-binding: t; -*-
+
+;; Part of deno1011/gptel-agent-runtime. Extracted from gar-safety.org
+;; on 2026-05-27 as PR 3 of the gar-safety sub-split.
+
+;;; Commentary:
+
+;; Runs before the policy broker finalizes a decision on a risky tool
+;; call. Produces a verdict plist:
+;;
+;;   (:risk high|medium|low
+;;    :concerns ("..." ...)
+;;    :recommended-mitigations ("..." ...)
+;;    :tool TOOL :agent AGENT :mode rule-based|model-based)
+;;
+;; The verdict is attached as decision metadata. `high' verdicts force
+;; confirmation regardless of the policy preset.
+;;
+;; Loaded BEFORE gar-safety so the policy broker calls into this module
+;; directly. Calls into gar-safety's `caps-for-tool' via late binding
+;; (defun bodies resolve at call time, after every module has loaded).
+
+;;; Code:
+
+(require 'cl-lib)
+(require 'json)
+(require 'subr-x)
+
+(declare-function gptel-agent-runtime-emit-event "gptel-agent-runtime"
+                  (type &rest args))
+(declare-function gptel-agent-runtime--timestamp "gptel-agent-runtime" ())
+(declare-function gptel-agent-runtime--normalize-args "gptel-agent-runtime"
+                  (args))
+(declare-function gptel-agent-runtime-plan-step-p "gptel-agent-runtime" (obj))
+(declare-function gptel-agent-runtime-plan-step-suggested-tool
+                  "gptel-agent-runtime" (step))
+(declare-function gptel-agent-runtime-plan-step-args "gptel-agent-runtime"
+                  (step))
+(declare-function gptel-agent-runtime-plan-step-risk "gptel-agent-runtime"
+                  (step))
+(declare-function gptel-agent-runtime-plan-step-agent "gptel-agent-runtime"
+                  (step))
+(declare-function gptel-agent-runtime-policy-decision-metadata
+                  "gptel-agent-runtime" (decision))
+(declare-function gptel-agent-runtime-policy-decision-confirmation-required-p
+                  "gptel-agent-runtime" (decision))
+(declare-function gptel-agent-runtime-caps-for-tool
+                  "gar-safety" (tool &optional risk))
+(declare-function gptel-agent-runtime-find-agent "gar-agents" (name))
+(declare-function gptel-agent-runtime-agent-system-prompt
+                  "gptel-agent-runtime" (agent))
+(declare-function gptel-request "gptel" (&optional prompt &rest keys))
+(declare-function gptel-abort "gptel" (&optional buf))
+(defvar gptel-model)
+(defvar gptel-use-tools)
+(defvar gptel-stream)
+
+(defcustom gptel-agent-runtime-skeptic-enabled t
+  "When non-nil, run the Advocatus Diaboli skeptic before risky tool calls.
+The skeptic produces a verdict (`high'/`medium'/`low' risk plus concerns and
+recommended mitigations). High-risk verdicts force confirmation regardless of
+the policy preset; medium-risk verdicts are attached as decision metadata.
+Default is on so risky tool calls are always pre-reviewed."
+  :type 'boolean
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-skeptic-mode 'rule-based
+  "How the skeptic produces verdicts.
+`rule-based' uses deterministic capability/risk/argument heuristics with no
+model call. `model-based' calls the registered `skeptic' agent via gptel
+with `gptel-agent-runtime-skeptic-budget-ms' as a timeout and falls back
+to rule-based on timeout, error, or unparseable model output."
+  :type '(choice (const :tag "Rule-based (deterministic)" rule-based)
+                 (const :tag "Model-based" model-based))
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-skeptic-budget-ms 3000
+  "Maximum milliseconds the model-based skeptic may spend before falling back."
+  :type 'integer
+  :safe #'integerp
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-skeptic-model nil
+  "Model symbol used for the model-based skeptic, or nil to reuse `gptel-model'.
+Set this to a small, fast local model (e.g. a 3B-class instruct model) to
+keep skeptic latency below `gptel-agent-runtime-skeptic-budget-ms'. A nil
+value reuses whichever backend/model is currently active."
+  :type '(choice (const :tag "Use current gptel-model" nil)
+                 (symbol :tag "Model id symbol"))
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-skeptic-trigger-risks
+  '(write shell destructive)
+  "Step risks that trigger the skeptic gate."
+  :type '(repeat symbol)
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-skeptic-trigger-caps
+  '(write-fs write-org shell-exec elisp-eval code-exec)
+  "Required-cap symbols that trigger the skeptic gate.
+A tool whose required-caps intersect this list is always reviewed."
+  :type '(repeat symbol)
+  :group 'gptel-agent-runtime)
+
+(defvar gptel-agent-runtime--last-skeptic-verdicts nil
+  "Recent skeptic verdicts, newest first, for the mission-control dashboard.")
+
+(defun gptel-agent-runtime--skeptic-applies-p (risk required-caps)
+  "Return non-nil when the skeptic should fire for RISK and REQUIRED-CAPS."
+  (or (memq risk gptel-agent-runtime-skeptic-trigger-risks)
+      (cl-intersection required-caps
+                       gptel-agent-runtime-skeptic-trigger-caps)))
+
+(defun gptel-agent-runtime--skeptic-rule-based-verdict
+    (tool args risk required-caps agent)
+  "Return a rule-based skeptic verdict plist.
+TOOL is the tool name, ARGS is the normalized argument plist, RISK is the
+step risk, REQUIRED-CAPS is the tool's required cap list, AGENT is the
+invoking agent name."
+  (let* ((concerns nil)
+         (mitigations nil)
+         (level 'low)
+         (push-concern (lambda (s) (push s concerns)))
+         (push-mit (lambda (s) (push s mitigations)))
+         (paths (delq nil (list (plist-get args :path)
+                                (plist-get args :file)
+                                (plist-get args :directory))))
+         (command (or (plist-get args :command) (plist-get args :code)))
+         (url (plist-get args :url)))
+    (when (eq risk 'destructive)
+      (setq level 'high)
+      (funcall push-concern (format "Risk class is destructive for tool `%s'." tool))
+      (funcall push-mit "Require explicit human confirmation."))
+    (when (memq 'shell-exec required-caps)
+      (setq level (if (eq level 'low) 'medium level))
+      (funcall push-concern "Tool can execute arbitrary shell commands.")
+      (funcall push-mit "Confirm the exact command string before running."))
+    (when (memq 'elisp-eval required-caps)
+      (setq level (if (eq level 'low) 'medium level))
+      (funcall push-concern "Tool can evaluate Elisp inside the running Emacs.")
+      (funcall push-mit "Inspect the code; check for delete-file, shell-command, set, intern."))
+    (when (memq 'code-exec required-caps)
+      (setq level (if (eq level 'low) 'medium level))
+      (funcall push-concern "Tool can execute generated source code."))
+    (dolist (p paths)
+      (when (stringp p)
+        (when (or (string-prefix-p "/" p)
+                  (string-match-p "\\`~/?\\'" p)
+                  (string= p "/"))
+          (setq level 'high)
+          (funcall push-concern (format "Path argument `%s' targets a root/home boundary." p))
+          (funcall push-mit "Refuse without a narrower path scope."))
+        (when (string-match-p "\\.\\." p)
+          (setq level (if (eq level 'low) 'medium level))
+          (funcall push-concern (format "Path argument `%s' contains `..' segments." p)))))
+    (when (stringp command)
+      (when (string-match-p "\\brm\\s-+-r\\(f\\|fr\\)\\b" command)
+        (setq level 'high)
+        (funcall push-concern "Command performs recursive removal.")
+        (funcall push-mit "Refuse without an explicit target whitelist."))
+      (when (string-match-p "\\bcurl\\b.*\\|\\bwget\\b.*" command)
+        (when (string-match-p "\\bsh\\b\\|\\bbash\\b\\|\\bzsh\\b" command)
+          (setq level 'high)
+          (funcall push-concern "Command pipes downloaded content into a shell.")
+          (funcall push-mit "Refuse; download to a file and review first.")))
+      (when (string-match-p "\\bsudo\\b" command)
+        (setq level 'high)
+        (funcall push-concern "Command escalates privileges with sudo.")))
+    (when (and (stringp url)
+               (not (string-match-p "\\`https?://" url)))
+      (setq level (if (eq level 'low) 'medium level))
+      (funcall push-concern (format "URL `%s' is not http(s)." url)))
+    (when (null concerns)
+      (push (format "No rule-based concerns for `%s'." tool) concerns))
+    (list :risk level
+          :concerns (nreverse concerns)
+          :recommended-mitigations (nreverse mitigations)
+          :tool tool
+          :agent agent
+          :mode 'rule-based)))
+
+(defconst gptel-agent-runtime--skeptic-fallback-system-prompt
+  "You are the runtime skeptic. Be adversarial.
+
+Inspect the proposed tool call (tool name, arguments, agent, risk class, required capabilities). Return a single JSON object EXACTLY in this shape:
+
+{
+  \"risk\": \"high\" | \"medium\" | \"low\",
+  \"concerns\": [\"concern 1\", \"concern 2\"],
+  \"recommended_mitigations\": [\"mitigation 1\"]
+}
+
+Be specific. Cite exact arguments, paths, patterns, or capability mismatches when you flag a concern. Never approve a destructive or shell tool with `risk` lower than `medium` unless the arguments are obviously safe and explicit (no wildcards, no `/`, no piping, no `eval`).
+
+Return ONLY the JSON object. No prose before or after."
+  "Fallback skeptic system prompt used when no registered `skeptic' agent is found.
+The real system prompt is read from the agent registry at call time via
+`gptel-agent-runtime-find-agent' (defined in gar-agents); this constant
+is the safety net for tests or partial loads.")
+
+(defun gptel-agent-runtime--skeptic-system-prompt ()
+  "Return the system prompt used for the model-based skeptic call.
+Tries the registered `skeptic' agent's system-prompt first, falls back to
+the constant baked into this module."
+  (or (and (fboundp 'gptel-agent-runtime-find-agent)
+           (fboundp 'gptel-agent-runtime-agent-system-prompt)
+           (let ((sk (gptel-agent-runtime-find-agent "skeptic")))
+             (and sk (gptel-agent-runtime-agent-system-prompt sk))))
+      gptel-agent-runtime--skeptic-fallback-system-prompt))
+
+(defun gptel-agent-runtime--skeptic-build-prompt
+    (tool args risk required-caps agent)
+  "Format the user-facing skeptic prompt for one proposed tool call."
+  (format
+   (concat
+    "Proposed tool call:\n"
+    "  tool: %s\n"
+    "  agent: %s\n"
+    "  risk class: %s\n"
+    "  required capabilities: %s\n"
+    "  arguments: %S\n\n"
+    "Return the JSON verdict now.")
+   (or tool "?")
+   (or agent "?")
+   (or risk 'safe)
+   (or required-caps '())
+   (or args '())))
+
+(defun gptel-agent-runtime--skeptic-extract-json-object (text)
+  "Return the first balanced JSON object embedded in TEXT, or nil."
+  (when (stringp text)
+    (let ((start (string-match "{" text)))
+      (when start
+        (let ((depth 0) (in-string nil) (escape nil)
+              (i start) (end nil) (len (length text)))
+          (while (and (< i len) (not end))
+            (let ((c (aref text i)))
+              (cond
+               (escape (setq escape nil))
+               (in-string
+                (cond ((eq c ?\\) (setq escape t))
+                      ((eq c ?\") (setq in-string nil))))
+               ((eq c ?\")
+                (setq in-string t))
+               ((eq c ?{) (setq depth (1+ depth)))
+               ((eq c ?}) (setq depth (1- depth))
+                (when (zerop depth) (setq end (1+ i))))))
+            (setq i (1+ i)))
+          (when end (substring text start end)))))))
+
+(defun gptel-agent-runtime--skeptic-parse-verdict (text tool agent)
+  "Parse a JSON skeptic verdict from TEXT into the verdict plist shape.
+Returns nil when the text cannot be parsed into a valid verdict."
+  (condition-case nil
+      (let* ((json-fragment (gptel-agent-runtime--skeptic-extract-json-object
+                             text))
+             (parsed (and json-fragment
+                          (let ((json-object-type 'plist)
+                                (json-array-type 'list)
+                                (json-key-type 'keyword)
+                                (json-false :json-false))
+                            (with-temp-buffer
+                              (insert json-fragment)
+                              (goto-char (point-min))
+                              (json-read)))))
+             (risk-raw (and parsed
+                            (or (plist-get parsed :risk)
+                                (plist-get parsed :Risk))))
+             (risk-sym (cond ((null risk-raw) 'low)
+                             ((symbolp risk-raw) risk-raw)
+                             ((stringp risk-raw)
+                              (intern (downcase risk-raw)))
+                             (t 'low)))
+             (concerns (and parsed
+                            (or (plist-get parsed :concerns)
+                                (plist-get parsed :Concerns)
+                                '())))
+             (mitigations (and parsed
+                               (or (plist-get parsed :recommended_mitigations)
+                                   (plist-get parsed :recommended-mitigations)
+                                   (plist-get parsed :mitigations)
+                                   '()))))
+        (when parsed
+          (list :risk (if (memq risk-sym '(high medium low)) risk-sym 'low)
+                :concerns (mapcar (lambda (s) (format "%s" s)) concerns)
+                :recommended-mitigations
+                (mapcar (lambda (s) (format "%s" s)) mitigations)
+                :tool tool
+                :agent agent
+                :mode 'model-based)))
+    (error nil)))
+
+(defun gptel-agent-runtime--skeptic-model-based-verdict
+    (tool args risk required-caps agent)
+  "Synchronously ask a model for a skeptic verdict on this proposed tool call.
+Returns the verdict plist on success; falls back to the rule-based verdict
+on timeout, abort, error, or unparseable model output.
+
+Uses `gptel-request' with `:buffer' set to a hidden temp buffer so the
+request can be cancelled via `gptel-abort' on timeout. Waits via
+`accept-process-output' so Emacs stays responsive."
+  (unless (and (fboundp 'gptel-request) (boundp 'gptel-model))
+    (cl-return-from gptel-agent-runtime--skeptic-model-based-verdict
+      (gptel-agent-runtime--skeptic-rule-based-verdict
+       tool args risk required-caps agent)))
+  (let* ((fallback (gptel-agent-runtime--skeptic-rule-based-verdict
+                    tool args risk required-caps agent))
+         (budget-secs (max 0.5 (/ (or gptel-agent-runtime-skeptic-budget-ms
+                                      3000)
+                                  1000.0)))
+         (system (gptel-agent-runtime--skeptic-system-prompt))
+         (prompt (gptel-agent-runtime--skeptic-build-prompt
+                  tool args risk required-caps agent))
+         (req-buf (generate-new-buffer " *gar-skeptic-request*"))
+         (result nil) (done nil)
+         ;; Pin the skeptic to its own model if configured; otherwise use
+         ;; whichever model is currently active.
+         (gptel-model (or gptel-agent-runtime-skeptic-model
+                          (and (boundp 'gptel-model) gptel-model)))
+         ;; Force no-tools and no streaming so the callback fires once
+         ;; with the full text. Skeptic does not need tool calling.
+         (gptel-use-tools nil)
+         (gptel-stream nil))
+    (unwind-protect
+        (condition-case _err
+            (progn
+              (with-current-buffer req-buf
+                (gptel-request prompt
+                  :buffer req-buf
+                  :stream nil
+                  :system system
+                  :callback (lambda (response _info)
+                              (setq result response done t))))
+              (let ((deadline (+ (float-time) budget-secs)))
+                (while (and (not done) (< (float-time) deadline))
+                  (accept-process-output nil 0.05))
+                (unless done
+                  (ignore-errors (gptel-abort req-buf))
+                  (setq result :timeout))))
+          (error (setq result :error)))
+      (when (buffer-live-p req-buf)
+        (kill-buffer req-buf)))
+    (cond
+     ((eq result :timeout) fallback)
+     ((eq result :error) fallback)
+     ((eq result 'abort) fallback)
+     ((stringp result)
+      (or (gptel-agent-runtime--skeptic-parse-verdict result tool agent)
+          fallback))
+     (t fallback))))
+
+(defun gptel-agent-runtime-skeptic-evaluate (step decision)
+  "Return a skeptic verdict for STEP given the policy DECISION, or nil.
+Returns nil when the skeptic is disabled or does not apply to STEP."
+  (when (and gptel-agent-runtime-skeptic-enabled
+             (gptel-agent-runtime-plan-step-p step))
+    (let* ((tool (or (gptel-agent-runtime-plan-step-suggested-tool step) ""))
+           (risk (or (gptel-agent-runtime-plan-step-risk step) 'safe))
+           (required-caps (gptel-agent-runtime-caps-for-tool tool risk))
+           (agent (or (gptel-agent-runtime-plan-step-agent step)
+                      (plist-get
+                       (gptel-agent-runtime-policy-decision-metadata decision)
+                       :agent)
+                      "assistant"))
+           (args (gptel-agent-runtime--normalize-args
+                  (gptel-agent-runtime-plan-step-args step))))
+      (when (gptel-agent-runtime--skeptic-applies-p risk required-caps)
+        (let ((verdict
+               (pcase gptel-agent-runtime-skeptic-mode
+                 ('rule-based
+                  (gptel-agent-runtime--skeptic-rule-based-verdict
+                   tool args risk required-caps agent))
+                 ('model-based
+                  (gptel-agent-runtime--skeptic-model-based-verdict
+                   tool args risk required-caps agent))
+                 (_ (gptel-agent-runtime--skeptic-rule-based-verdict
+                     tool args risk required-caps agent)))))
+          (push (cons (gptel-agent-runtime--timestamp) verdict)
+                gptel-agent-runtime--last-skeptic-verdicts)
+          (when (> (length gptel-agent-runtime--last-skeptic-verdicts) 50)
+            (setcdr (nthcdr 49 gptel-agent-runtime--last-skeptic-verdicts)
+                    nil))
+          (gptel-agent-runtime-emit-event
+           'skeptic-verdict
+           :source "skeptic"
+           :payload verdict
+           :taint 'trusted)
+          verdict)))))
+
+(defun gptel-agent-runtime--apply-skeptic-to-decision (decision verdict)
+  "Mutate DECISION metadata with VERDICT and escalate confirmation for `high'.
+Returns DECISION."
+  (when verdict
+    (let* ((meta (gptel-agent-runtime-policy-decision-metadata decision))
+           (level (plist-get verdict :risk)))
+      (setf (gptel-agent-runtime-policy-decision-metadata decision)
+            (plist-put meta :skeptic-verdict verdict))
+      (when (eq level 'high)
+        (setf (gptel-agent-runtime-policy-decision-confirmation-required-p
+               decision)
+              t))))
+  decision)
+
+(provide 'gar-skeptic)
+
+;;; gar-skeptic.el ends here
