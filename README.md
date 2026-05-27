@@ -1,122 +1,173 @@
 # gptel-agent-runtime
 
-Emacs-native agent runtime scaffolding built on top of
+Emacs-native agent runtime built on top of
 [gptel](https://github.com/karthink/gptel).
 
 This repository was extracted from Denis Butic's private Emacs configuration so
 the AI implementation can evolve as a standalone package and later be prepared
 for MELPA.
 
-## Current Status
+## Status
 
-- Package-shaped first extraction.
-- Literate source: edit `gptel-agent-runtime.org` first.
-- Generated package artifact: `gptel-agent-runtime.el`.
-- Agent/skill registry scaffold with a lightweight router.
-- Autonomous execution loop: observe, plan, delegate, act with tools,
-  observe result, reflect, remember, and continue.
-- Worker records for parallel safe/read tools and policy-gated mutating tools.
-- Deterministic JSON repair plus internal/external schema validation hooks.
-- Lexical memory retrieval, optional cached Ollama embeddings, and session resume.
-- Skill outcome statistics, richer verification, and safety policies for tool execution.
-- Installs from Git via `package-vc-install`.
-- `main` and `stable` initially point to the same current version.
-- The implementation is still monolithic and keeps compatibility names such as
-  `my/gptel-*` and `claude-executor-*`.
+- Multi-file package: a thin master entrypoint + 11 focused modules.
+- Literate sources: edit the matching `gar-*.org` (or `gptel-agent-runtime.org`
+  for the master); generated `.el` files are tangle output.
+- OpenClaw-style substrate (tick + event pump + provenance + versioned state)
+  underpins every other module.
+- Zero-trust capability gate per agent, Advocatus Diaboli skeptic, per-source
+  evidence quarantine, prompt-injection canaries, unified mission-control
+  dashboard.
+- Diverse swarm roles (planner / executor / reviewer / memory-curator + skeptic
+  / inventor / researcher / simplifier / risk-officer / implementer).
+- Novelty detection, deterministic strategy synthesis (writes candidate
+  playbooks for human review on idle ticks), hypothesis-test scaffolding.
+- Tool-invention pipeline: `propose → static check → emacs -Q --batch sandbox
+  → manual approval → register`.
+- Autonomous loop: observe → plan → delegate → act → reflect → remember →
+  continue. Parallel safe/read worker batches with reviewer barrier.
+- Auto-update from GitHub via `package-vc-install`.
+- `main` and `stable` track in parallel; `stable` is the slower-moving install
+  target.
 
-## Installation From Emacs
+## Installation
 
 ```elisp
 (package-vc-install
  '(gptel-agent-runtime
    :url "https://github.com/deno1011/gptel-agent-runtime"
-   :branch "main"))
+   :branch "main"))   ; or :branch "stable"
 (require 'gptel-agent-runtime)
 ```
 
-## Agents And Skills
+Backend registration (Anthropic / OpenAI / LM Studio / MLX / Ollama)
+intentionally lives outside the package — see the bootstrap template at
+[`emacs-mac-setup/gptel-setup.org`](https://github.com/deno1011/emacs-mac-setup)
+for a starting point, or the user-host pattern documented in the module split
+handover.
 
-The package includes first-class registries for agents and skills:
+## Module layout
 
-- agents describe specialist roles such as `assistant`, `planner`, `executor`,
-  `reviewer`, and `memory-curator`
-- skills describe reusable strategies such as `inline-rendering`,
-  `web-research`, `org-task-management`, `code-change`, and `memory-update`
-- a lightweight router matches recent task text to skills and selects an agent
-- `gptel-send` applies the route by appending relevant skill instructions to
-  the active system message
+The package loads in this order (each `(require)` lives in the thin master
+`gptel-agent-runtime.el`):
 
-Useful inspection command:
+| Module | Concern |
+|---|---|
+| `gar-core` | `defgroup`, ~50 defcustoms, all `cl-defstruct`s, base helpers (`--symbol-name`, `--tokenize-text`, `--trigger-matches-p`, native-tool dispatch, status / mode-line / sync helpers) |
+| `gar-substrate` | OpenClaw tick + event pump + idle pump, evidence struct + provenance, versioned state header, swarm trace buffer, `emit-event` (universal event constructor) |
+| `gar-safety` | Policy broker (`policy-evaluate-step`, `safety-check-step`), capability gate, untrusted/trusted context wrappers, per-source quarantine + `promote-evidence`, Advocatus Diaboli skeptic, 5 prompt-injection canaries, 5 policy presets, unified mission-control dashboard |
+| `gar-memory` | Sessions persistence, embedding cache (lexical + optional Ollama), novelty detector, playbook success-rate scoring, strategy synthesis (writes candidate playbooks), hypothesis-test scaffolding |
+| `gar-tools` | Tool registry + `action-result` data model, 22 native `gptel-make-tool` registrations, tool-invention pipeline (propose / static-check / subprocess sandbox / manual approval) |
+| `gar-backend` | Ollama runtime utilities (`-running-p`, `-start-ollama-if-needed`, `-active-ollama-model`, `-use-default-local-model`), model-id normalization across symbol / cons / vector shapes |
+| `gar-directives` | The four gptel directives (`assistant`, `emacs-local-assistant` with CRITICAL RULES + CRITICAL REASONING blocks, `emacs-planner`, `emacs-assistant`) + selection helpers + `gptel-mode-hook` re-sync |
+| `gar-context` | Clipboard image capture (`my/insert-clipboard-image`) with sips-based shrink + org-download integration, HTTP fetch helpers (`my/web-fetch`, `my/web-text`, `my/web-search-ddg`, `my/web-fetch-image`, `my/web-extract-images`) |
+| `gar-executor` | Response Executor Compatibility Layer: Babel auto-execution, AUTORUN elisp blocks, file-output Babel rendering (`:file` / `gnuplot` / `dot` / `plantuml` / `mermaid`), tutorial-response repair. Keeps the legacy `claude-executor-*` symbol prefix for backward compatibility |
+| `gar-agents` | Agent / skill / organization-unit / playbook registries; 11 built-in agent roles; chat router (classify-chat-request, swarm-mode toggle); 8-dimension model router (length/code/introspection/creativity/tool-risk/web/privacy/speed); workspace context collectors; `gptel-send :around` advice |
+| `gar-loop` | Autonomous execution loop (observe → plan → delegate → act → reflect → continue), worker dispatcher with queued/running/done/failed/cancelled/requeued lifecycle, parallel worker batches + reviewer barrier, session resume + requeue |
+
+Each module's `.org` file carries a manual `See also:` header pointing to
+related modules and an auto-maintained `Required by:` footer regenerated by
+`scripts/refresh-backlinks.el`.
+
+## Top user-facing commands
+
+```text
+M-x gptel-agent-runtime-start                  ; kick off an autonomous session
+M-x gptel-agent-runtime-resume-session         ; resume a saved session
+M-x gptel-agent-runtime-mission-control        ; unified safety/observability dashboard
+M-x gptel-agent-runtime-show-guardrails        ; policy state + protected paths
+M-x gptel-agent-runtime-trace-evidence         ; evidence lineage DAG
+M-x gptel-agent-runtime-show-event-pump        ; subscribers + recent dispatches
+M-x gptel-agent-runtime-promote-evidence       ; release quarantine on a specific evidence ID
+M-x gptel-agent-runtime-toggle-idle-pump       ; OpenClaw background tick
+M-x gptel-agent-runtime-run-injection-canaries ; structural canary suite
+M-x gptel-agent-runtime-workers-summary        ; worker queue + status
+M-x gptel-agent-runtime-worker-self-test       ; visible no-tool worker self-test
+M-x gptel-agent-runtime-review-playbook-candidates  ; pending synthesized playbooks
+M-x gptel-agent-runtime-review-proposed-tools  ; pending tool-invention proposals
+M-x gptel-agent-runtime-toggle-model-router    ; enable / disable model router
+M-x gptel-agent-runtime-toggle-swarm-routing   ; enable / disable swarm routing
+M-x gptel-agent-runtime-apply-policy-preset    ; open / balanced / strict / research-only / coding-only
+M-x gptel-agent-runtime-migrate-state          ; report persisted-state schema mismatches
+```
+
+## Backend setup (lives in the consuming setup file)
+
+The runtime is provider-neutral. The package forward-declares
+`my/gptel-backends` and `my/gptel-ollama-backend`; the consuming setup file
+populates them. Minimal example (Ollama only):
 
 ```elisp
-(gptel-agent-runtime-route-summary
- "plot a 3d math function inline and search current rules")
+(require 'gptel-ollama nil t)
+(when (executable-find "ollama")
+  (let ((backend (gptel-make-ollama "Ollama"
+                   :stream t
+                   :host "localhost:11434"
+                   :models '((qwen2.5-coder:7b :capabilities (tool-use json))
+                             (qwen2.5:7b-instruct :capabilities (tool-use json))))))
+    (setq my/gptel-ollama-backend backend
+          my/gptel-backends `(("Qwen 2.5 Coder 7B (Ollama)"  ,backend . qwen2.5-coder:7b)
+                              ("Qwen 2.5 Instruct (Ollama)" ,backend . qwen2.5:7b-instruct))))
+  (when (fboundp 'gptel-agent-runtime-use-default-local-model)
+    (gptel-agent-runtime-use-default-local-model)))
 ```
 
-## Autonomous Loop
+For cloud backends use `gptel-make-anthropic`, `gptel-make-openai` (with an
+explicit `:endpoint "/v1/chat/completions"` to avoid the Responses API),
+`gptel-make-gemini`. The bootstrap template at
+`emacs-mac-setup/gptel-setup.org` includes pre-flight that auto-starts Ollama
+and pulls the standard models on a fresh install.
 
-`M-x gptel-agent-runtime-start` starts the first autonomous session loop:
+## Development workflow
 
-1. observe the current Emacs/workspace context
-2. ask the planner for strict JSON steps
-3. delegate each step to an agent role
-4. execute `direct_response`, `remember`, or a native gptel tool with JSON args
-5. record observations and tool results
-6. ask the reviewer for JSON reflection
-7. write session memory and continue, replan, finish, or fail
+1. **Identify the right module.** Edit the matching `gar-*.org` (or
+   `gptel-agent-runtime.org` for the thin master).
+2. **Tangle:** generate the matching `.el`.
 
-The planner can mark safe/read steps with `"parallel": true`. Those steps are
-launched as independent worker records and can run direct responses, read-only
-file/buffer/Org tools, and web search/fetch tools. Mutating tools stay
-serialized unless `gptel-agent-runtime-enable-parallel-mutations` is enabled,
-the step passes safety checks, confirmation policy permits it, and target paths
-do not conflict with other selected workers.
+   ```sh
+   emacs -Q --batch --eval "(progn (require 'org) (org-babel-tangle-file \"gar-FOO.org\"))"
+   ```
 
-The loop retrieves relevant prior memory before planning. Retrieval defaults to
-lexical matching and can optionally use Ollama embeddings with
-`gptel-agent-runtime-memory-retrieval-method`. Embeddings are cached in
-`embedding-cache.el` when `gptel-agent-runtime-embedding-cache-enabled` is
-non-nil. Sessions are written as readable Elisp data and can be resumed with
-`M-x gptel-agent-runtime-resume-last-session` or
-`M-x gptel-agent-runtime-resume-session`; in-flight workers are requeued into
-draft steps because HTTP requests cannot literally survive an Emacs restart.
+3. **Refresh backlinks** so `Required by:` footers stay accurate:
 
-Planner/reviewer JSON is repaired for common local-model mistakes and then
-validated against runtime schemas before execution. If
-`check-jsonschema` or another compatible command is available, the runtime can
-use it through `gptel-agent-runtime-json-schema-validator`; otherwise it falls
-back to internal schema checks. Verification checks are tool/skill-aware for
-web research, inline rendering, writes, Org mutations, exports, and code
-execution.
+   ```sh
+   emacs -Q --batch -l scripts/refresh-backlinks.el -f gar-refresh-backlinks-and-exit
+   ```
 
-Useful inspection commands:
+4. **Validate:**
+   - `check-parens` on each affected `.el`.
+   - Batch load: `emacs -Q --batch -L /path/to/gptel -L . -l gptel-agent-runtime.el` should print only `Response Executor activated`.
+   - End-to-end load with the host setup if any cross-module change.
+5. **`git diff --check`** for whitespace.
+6. **Commit, push `main`, cherry-pick to `stable`, push `stable`**, and
+   fast-forward the installed clone at
+   `~/.emacs.d/elpa/gptel-agent-runtime`.
 
-```elisp
-(gptel-agent-runtime-session-summary)
-(gptel-agent-runtime-describe-session)
-(gptel-agent-runtime-resume-last-session)
-```
+## Adding a new module
 
-This is a real loop now, but it is still conservative. Parallel mutation
-requires explicit policy support, embedding retrieval depends on a local Ollama
-embedding model being available, and local model planner quality still
-determines how good the JSON steps are.
+1. Create `gar-NEWMODULE.org` modeled on any existing module. The header line
+   must declare `:tangle gar-NEWMODULE.el :lexical t`.
+2. Add a `See also:` header listing related modules.
+3. End the file with `(provide 'gar-newmodule)` inside a final source block
+   and `<!-- gar:auto-backlinks:start -->` / `<!-- gar:auto-backlinks:end -->`
+   sentinels for the regenerator.
+4. Add `(require 'gar-newmodule)` to the master at the right point in the
+   load order.
+5. Tangle, refresh backlinks, validate, commit.
 
-## Development Notes
+## Backlinks regenerator
 
-- Do not develop directly in `gptel-agent-runtime.el`. It is tangled from
-  `gptel-agent-runtime.org`.
-- After editing the Org source, run:
+`scripts/refresh-backlinks.el` scans tangled `gar-*.el` files for hard
+`(require 'gar-...)` forms (soft `(require ... nil t)` forms are ignored) and
+rewrites each `gar-NAME.org`'s `Required by:` section to reflect the current
+edges. Run it after any change that adds or removes a `(require 'gar-…)` form.
 
-```sh
-emacs --batch --eval '(require (quote org))' \
-  --eval '(org-babel-tangle-file "gptel-agent-runtime.org")'
-```
+## Pre-MELPA cleanup
 
-- Validate the generated file with `check-parens` and a batch load smoke test.
-- The package currently expects the host config to define personal paths such
-  as `my/data-dir` before loading.
-- The next cleanup should split the monolithic file into core, backends,
-  prompts, executor, tools, context, and planner modules.
-- Before MELPA submission, remove personal defaults, reduce top-level side
-  effects, add autoloads, and add ERT smoke tests.
+- Remove personal defaults (`my/data-dir`, `my/web-search-ddg` references in
+  prompt directives).
+- Reduce top-level side effects in `gar-context` (auto-install of
+  `pngpaste` / `xclip`).
+- Add autoloads.
+- Add ERT smoke tests per module.
+- Consider renaming `claude-executor-*` to `gar-response-executor-*` with
+  `defvaralias` / `defalias` shims.
