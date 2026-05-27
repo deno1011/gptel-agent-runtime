@@ -103,7 +103,7 @@ normal init path.")
 (require 'gar-backend)     ; Ollama runtime utilities + model-id normalization
 (require 'gar-directives)  ; emacs-local-assistant / planner / assistant directives
 (require 'gar-context)     ; image capture + web fetch helpers
-(require 'gar-executor)    ; Response Executor Compatibility Layer (claude-executor-*)
+(require 'gar-executor)    ; Response Executor (formerly claude-executor-*; aliases kept)
 (require 'gar-agents)      ; agent/skill/org-unit/playbook registries + chat + model router
 (require 'gar-loop)        ; autonomous execution loop + worker dispatcher
 
@@ -111,9 +111,11 @@ normal init path.")
 ;; has finished loading because they consult cross-module helpers.
 
 ;; Activate the Response Executor (defined in gar-executor) now that
-;; every module has loaded.
-(when (fboundp 'claude-executor-mode)
-  (claude-executor-mode 1))
+;; every module has loaded. The function is `gar-response-executor-mode';
+;; the legacy `claude-executor-mode' name remains available via
+;; `defalias' for any user config that still binds it.
+(when (fboundp 'gar-response-executor-mode)
+  (gar-response-executor-mode 1))
 
 ;; Select the local model only after directives, tools, and
 ;; compatibility helpers have been defined.
