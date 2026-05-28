@@ -1,0 +1,225 @@
+;;; gar-validator.el --- structural validation of tool arguments -*- lexical-binding: t; -*-
+
+;; Part of deno1011/gptel-agent-runtime. Added on 2026-05-28.
+
+;;; Commentary:
+
+;; A JSON-Schema-inspired validator for tool argument plists/alists. Tools
+;; that declare an `:arg-schema' during `gptel-agent-runtime-register-tool'
+;; get their proposed arguments pre-flighted by
+;; `gptel-agent-runtime-policy-evaluate-step'; violations are surfaced as
+;; a deny-reason on the policy decision.
+;;
+;; The validator walks the schema and returns a list of human-readable
+;; violation strings (each prefixed with the JSON-pointer-like path that
+;; located it). A nil return means the args satisfy the schema.
+
+;;; Code:
+
+(require 'cl-lib)
+(require 'subr-x)
+
+(defun gptel-agent-runtime--validator-type-ok-p (value type)
+  "Return non-nil when VALUE matches a primitive TYPE symbol."
+  (pcase type
+    ('any t)
+    ('string (stringp value))
+    ('number (numberp value))
+    ('integer (integerp value))
+    ('boolean (or (eq value t) (eq value nil) (eq value :json-false)))
+    ('null (null value))
+    ('array (listp value))
+    ('object (or (and (listp value)
+                      (or (null value)
+                          (keywordp (car value))))
+                 (and (listp value)
+                      (consp (car value)))))
+    (_ nil)))
+
+(defun gptel-agent-runtime--validator-types-ok-p (value spec)
+  "Return non-nil when VALUE matches SPEC.
+SPEC may be a single type symbol or a list of acceptable type symbols."
+  (cond
+   ((null spec) t)
+   ((symbolp spec)
+    (gptel-agent-runtime--validator-type-ok-p value spec))
+   ((listp spec)
+    (cl-some (lambda (s) (gptel-agent-runtime--validator-type-ok-p value s))
+             spec))
+   (t nil)))
+
+(defun gptel-agent-runtime--validator-format-path (path)
+  "Format PATH (list of keys, newest first) as a JSON-pointer-like string."
+  (if (null path)
+      "/"
+    (concat "/" (mapconcat (lambda (p)
+                             (cond
+                              ((keywordp p) (substring (symbol-name p) 1))
+                              ((symbolp p) (symbol-name p))
+                              ((numberp p) (number-to-string p))
+                              (t (format "%s" p))))
+                           (reverse path)
+                           "/"))))
+
+(defun gptel-agent-runtime--validator-plist-keys (value)
+  "Return the keys of VALUE when it looks like a plist or alist, else nil."
+  (cond
+   ((null value) nil)
+   ((keywordp (car-safe value))
+    (let (keys)
+      (while value
+        (push (car value) keys)
+        (setq value (cddr value)))
+      (nreverse keys)))
+   ((consp (car-safe value))
+    (mapcar #'car value))
+   (t nil)))
+
+(defun gptel-agent-runtime--validator-plist-get (value key)
+  "Return KEY's value from VALUE (a plist OR alist), or nil."
+  (cond
+   ((null value) nil)
+   ((keywordp (car-safe value))
+    (plist-get value key))
+   ((consp (car-safe value))
+    (cdr (assoc key value)))
+   (t nil)))
+
+(defun gptel-agent-runtime--validator-step (value schema path)
+  "Validate VALUE against SCHEMA at PATH. Return a list of violation strings."
+  (let (errs)
+    (cl-labels ((push-err (fmt &rest args)
+                  (push (format "%s: %s"
+                                (gptel-agent-runtime--validator-format-path path)
+                                (apply #'format fmt args))
+                        errs)))
+      (let ((type (plist-get schema :type)))
+        (when (and type
+                   (not (gptel-agent-runtime--validator-types-ok-p value type)))
+          (push-err "expected type %s, got %s" type (type-of value))))
+      (when-let ((enum (plist-get schema :enum)))
+        (unless (member value enum)
+          (push-err "value %S is not in :enum %S" value enum)))
+      (when (stringp value)
+        (when-let ((min-len (plist-get schema :min-length)))
+          (when (< (length value) min-len)
+            (push-err "string length %d < min-length %d"
+                      (length value) min-len)))
+        (when-let ((max-len (plist-get schema :max-length)))
+          (when (> (length value) max-len)
+            (push-err "string length %d > max-length %d"
+                      (length value) max-len)))
+        (when-let ((pattern (plist-get schema :pattern)))
+          (unless (string-match-p pattern value)
+            (push-err "string %S does not match :pattern %S" value pattern))))
+      (when (numberp value)
+        (when-let ((minimum (plist-get schema :minimum)))
+          (when (< value minimum)
+            (push-err "value %s < minimum %s" value minimum)))
+        (when-let ((maximum (plist-get schema :maximum)))
+          (when (> value maximum)
+            (push-err "value %s > maximum %s" value maximum))))
+      (when (listp value)
+        ;; Decide object-vs-array using the schema's declared type when it
+        ;; says so; fall back to inspecting the value's shape. This lets
+        ;; an empty plist `()' satisfy `:type object' instead of slipping
+        ;; through the array branch.
+        (let* ((declared-type (plist-get schema :type))
+               (declared-types (cond ((null declared-type) nil)
+                                     ((listp declared-type) declared-type)
+                                     (t (list declared-type))))
+               (is-object (cond
+                           ((memq 'object declared-types) t)
+                           ((memq 'array declared-types) nil)
+                           (t (and value
+                                   (or (keywordp (car-safe value))
+                                       (consp (car-safe value))))))))
+          (when (and (not is-object) (plist-get schema :type))
+            ;; It's an array type. Walk items + cardinality.
+            (when-let ((min-items (plist-get schema :min-items)))
+              (when (< (length value) min-items)
+                (push-err "array length %d < min-items %d"
+                          (length value) min-items)))
+            (when-let ((max-items (plist-get schema :max-items)))
+              (when (> (length value) max-items)
+                (push-err "array length %d > max-items %d"
+                          (length value) max-items)))
+            (when-let ((item-schema (plist-get schema :items)))
+              (let ((i 0))
+                (dolist (item value)
+                  (setq errs (append (gptel-agent-runtime--validator-step
+                                      item item-schema (cons i path))
+                                     errs))
+                  (setq i (1+ i))))))
+          (when (and is-object
+                     (or (plist-get schema :properties)
+                         (plist-get schema :required)
+                         (plist-member schema :additional-properties)))
+            (let ((props (plist-get schema :properties))
+                  (required (plist-get schema :required))
+                  (addl (if (plist-member schema :additional-properties)
+                            (plist-get schema :additional-properties)
+                          t))
+                  (seen (gptel-agent-runtime--validator-plist-keys value)))
+              (dolist (key required)
+                (unless (memq key seen)
+                  (push-err "missing required key %s" key)))
+              ;; Walk known properties. Only recurse into keys that are
+              ;; actually present in VALUE — a missing required key was
+              ;; already flagged above; recursing on nil would produce a
+              ;; redundant secondary type-mismatch error.
+              (let ((p props))
+                (while p
+                  (let* ((key (car p))
+                         (sub-schema (cadr p))
+                         (sub-val (gptel-agent-runtime--validator-plist-get
+                                   value key)))
+                    (when (memq key seen)
+                      (setq errs
+                            (append (gptel-agent-runtime--validator-step
+                                     sub-val sub-schema (cons key path))
+                                    errs))))
+                  (setq p (cddr p))))
+              ;; Flag unknown keys when :additional-properties is nil.
+              (when (eq addl nil)
+                (let ((known (let ((p props) acc)
+                               (while p (push (car p) acc) (setq p (cddr p)))
+                               acc)))
+                  (dolist (k seen)
+                    (unless (memq k known)
+                      (push-err "unknown property %s (additional-properties=nil)"
+                                k))))))))))
+    (nreverse errs)))
+
+(defun gptel-agent-runtime-validate-args (args schema)
+  "Validate ARGS against SCHEMA.
+ARGS may be a plist with keyword keys or an alist with symbol keys.
+SCHEMA is a plist describing constraints. Returns nil on success, or a
+list of human-readable violation strings (one per failed constraint).
+
+Supported schema keys:
+  :type                 symbol or list of symbols (string number integer
+                        boolean array object null any)
+  :properties           plist (KEY SCHEMA KEY SCHEMA ...) for object
+                        properties; KEY is a keyword
+  :required             list of required property keywords
+  :additional-properties nil (default t = allow) to forbid unknown keys
+  :enum                 list of allowed values (equal comparison)
+  :min-length           integer (strings)
+  :max-length           integer (strings)
+  :pattern              regexp (strings, Emacs regex flavor)
+  :minimum              number (numbers)
+  :maximum              number (numbers)
+  :min-items            integer (arrays)
+  :max-items            integer (arrays)
+  :items                sub-schema for array elements
+  :description          ignored by the validator; for documentation only"
+  (gptel-agent-runtime--validator-step args schema nil))
+
+(defun gptel-agent-runtime-args-valid-p (args schema)
+  "Return non-nil when ARGS satisfies SCHEMA."
+  (null (gptel-agent-runtime-validate-args args schema)))
+
+(provide 'gar-validator)
+
+;;; gar-validator.el ends here

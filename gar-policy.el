@@ -86,6 +86,10 @@
 (declare-function gptel-agent-runtime--apply-skeptic-to-decision
                   "gar-skeptic" (decision verdict))
 (declare-function my/gptel-protected-p "ext" (path))
+(declare-function gptel-agent-runtime-validate-args "gar-validator"
+                  (args schema))
+(declare-function gptel-agent-runtime-find-tool "gar-tools" (name))
+(declare-function gptel-agent-runtime-tool-arg-schema "gar-tools" (tool))
 
 (defcustom gptel-agent-runtime-protected-paths
   nil
@@ -491,6 +495,20 @@ load-bearing zero-trust gate that stacks before the policy alist."
            tool
            (or allowed '())))))))
 
+(defun gptel-agent-runtime--schema-violations-for-tool (tool args)
+  "Return the list of validator violations for ARGS under TOOL's :arg-schema.
+Returns nil when the tool is not registered, has no schema, or ARGS satisfy
+the schema. Uses late binding via `fboundp' so gar-validator and gar-tools
+load order does not bind us here."
+  (when (and (fboundp 'gptel-agent-runtime-find-tool)
+             (fboundp 'gptel-agent-runtime-validate-args)
+             (fboundp 'gptel-agent-runtime-tool-arg-schema))
+    (let* ((tool-rec (gptel-agent-runtime-find-tool tool))
+           (schema (and tool-rec
+                        (gptel-agent-runtime-tool-arg-schema tool-rec))))
+      (when schema
+        (gptel-agent-runtime-validate-args args schema)))))
+
 (defun gptel-agent-runtime-policy-evaluate-step (step &optional context)
   "Return policy decision for STEP in CONTEXT.
 CONTEXT is a plist that may include :source, :agent, :session-id, and :raw-call."
@@ -511,7 +529,14 @@ CONTEXT is a plist that may include :source, :agent, :session-id, and :raw-call.
          (reason nil)
          (allowed t)
          (cap-deny (gptel-agent-runtime--capability-check tool agent risk))
+         (schema-violations
+          (and (not cap-deny)
+               (gptel-agent-runtime--schema-violations-for-tool tool args)))
+         (schema-deny (and schema-violations
+                           (format "Tool arguments violate registered schema: %s"
+                                   (string-join schema-violations "; "))))
          (quarantine-deny (and (not cap-deny)
+                               (not schema-deny)
                                (gptel-agent-runtime--quarantine-conflict-p
                                 step))))
     ;; Zero-trust capability gate runs BEFORE the per-tool policy alist so
@@ -520,6 +545,11 @@ CONTEXT is a plist that may include :source, :agent, :session-id, and :raw-call.
     (when cap-deny
       (setq allowed nil
             reason cap-deny))
+    ;; Structural argument validation (gar-validator) fires when the tool
+    ;; was registered with an :arg-schema. Tools without a schema skip it.
+    (when (and allowed schema-deny)
+      (setq allowed nil
+            reason schema-deny))
     ;; Quarantine pre-flight: deny when step arguments come straight from
     ;; un-promoted quarantined evidence.
     (when (and allowed quarantine-deny)

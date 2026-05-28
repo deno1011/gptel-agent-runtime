@@ -36,6 +36,7 @@ normal init path.")
 (require 'gar-substrate)   ; tick, event pump, evidence, versioned state
 (require 'gar-quarantine)  ; per-source quarantine + promote + pre-flight conflict check
 (require 'gar-skeptic)     ; Advocatus Diaboli skeptic (rule-based + model-based)
+(require 'gar-validator)   ; JSON-Schema-inspired tool-arg validator
 (require 'gar-policy)      ; policy broker, capability gate, presets, context wrappers
 (require 'gar-mission-control) ; unified runtime dashboard
 (require 'gar-canaries)    ; prompt-injection canary suite (wraps gar-policy's untrusted-context)

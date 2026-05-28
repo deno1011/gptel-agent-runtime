@@ -95,7 +95,8 @@ status uniformly.
   package-ready-p
   local-only-p
   gptel-tool
-  notes)
+  notes
+  arg-schema)
 
 (defvar gptel-agent-runtime-tool-registry nil
   "List of `gptel-agent-runtime-tool' entries registered for agent use.")
@@ -105,7 +106,8 @@ status uniformly.
   "Register tool metadata.
 NAME is a string or symbol. CATEGORY and RISK are symbols. DESCRIPTION is a
 human-readable summary. PLIST may include :package-ready-p, :local-only-p,
-:gptel-tool, and :notes."
+:gptel-tool, :notes, and :arg-schema (consumed by `gar-validator' as a
+pre-flight gate inside the policy broker)."
   (let* ((tool-name (if (symbolp name) (symbol-name name) name))
          (entry (gptel-agent-runtime-tool-create
                  :name tool-name
@@ -115,7 +117,8 @@ human-readable summary. PLIST may include :package-ready-p, :local-only-p,
                  :package-ready-p (plist-get plist :package-ready-p)
                  :local-only-p (plist-get plist :local-only-p)
                  :gptel-tool (plist-get plist :gptel-tool)
-                 :notes (plist-get plist :notes))))
+                 :notes (plist-get plist :notes)
+                 :arg-schema (plist-get plist :arg-schema))))
     (setq gptel-agent-runtime-tool-registry
           (cons entry
                 (cl-remove tool-name gptel-agent-runtime-tool-registry

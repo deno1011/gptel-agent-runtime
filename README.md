@@ -184,12 +184,13 @@ emacs -Q --batch -l test/run-tests.el
 ```
 
 Coverage today: every submodule with non-trivial behavior — substrate
-(tick / event-pump / evidence trace), policy + capability gate +
-context wrappers, the Advocatus Diaboli skeptic, per-source quarantine,
-the injection canary suite, memory (novelty / playbook ranking /
-invocation log), tools (registry / safe-form walker for the invention
-pipeline), the autonomous loop's pure helpers (planner / plan-review /
-brainstorm prompt builders + alternative parser), and the
+(tick / event-pump / evidence trace), the policy broker + capability
+gate + context wrappers + the new tool-arg schema gate, the Advocatus
+Diaboli skeptic, per-source quarantine, the injection canary suite,
+the JSON-Schema-inspired argument validator, memory (novelty / playbook
+ranking / invocation log), tools (registry / safe-form walker for the
+invention pipeline), the autonomous loop's pure helpers (planner /
+plan-review / brainstorm prompt builders + alternative parser), and the
 mission-control dashboard + tool-policy editor.
 
 ## Dependency graph regenerator
