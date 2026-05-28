@@ -19,11 +19,12 @@
 ;;  - the `gptel-mode-hook' that re-syncs the directive when a new gptel
 ;;    session starts.
 ;;
-;; `my/data-dir' must be defined before this module loads -- it is supplied
-;; by the host config (~/emacs/.../init.el) and forward-declared by the
-;; master file. `my/gptel-model-id' is also referenced and provided by the
-;; master file's runtime helpers section (will move to `gar-backend' in a
-;; later PR).
+;; `my/data-dir' must be defined before this module loads -- it can be
+;; supplied by the host config or falls back to `user-emacs-directory'
+;; (see `gptel-agent-runtime-data-directory' in gar-core for the
+;; package-canonical defcustom). `my/gptel-model-id' is also referenced
+;; and provided by the master file's runtime helpers section (will move
+;; to `gar-backend' in a later PR).
 
 ;;; Code:
 
@@ -100,7 +101,7 @@ For arbitrary M-x commands use call-interactively or funcall."
         (append gptel-directives
                 `((emacs-local-assistant
                    . ,(replace-regexp-in-string
-                       "~/emacs-data" data-d
+                       "<DATA-DIR>" data-d
                        "You are an Emacs assistant running inside Emacs.
 Always answer in English.
 
@@ -252,7 +253,7 @@ WEB SEARCH:
 #+end_src
 
 ORG FILES:
-- Org directory: ~/emacs-data/data/org/
+- Org directory: <DATA-DIR>/data/org/
 - New tasks usually go to inbox.org.
 - Do not overwrite config.org, init.el, or config.el.
 
@@ -288,7 +289,7 @@ Never invent tool names unless no registered tool applies."))))
         (append gptel-directives
                 `((emacs-assistant
                    . ,(replace-regexp-in-string
-                       "~/emacs-data" data-d
+                       "<DATA-DIR>" data-d
                        "You are an Emacs assistant running inside Emacs.
 Answer in English. Use tools or executable Org blocks to do requested work.
 For plots and diagrams, emit Org Babel blocks with :file and a [[file:...]] result link.

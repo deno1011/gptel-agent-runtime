@@ -13,10 +13,9 @@
 ;;
 ;; Backend CONSTRUCTORS (`gptel-make-anthropic', `gptel-make-openai',
 ;; `gptel-make-ollama' ...) intentionally do NOT live here -- they belong
-;; to the host setup file (`~/emacs/config/gptel-setup.org' for the live
-;; private host, `~/emacs-mac-setup/gptel-setup.org' for the bootstrap
-;; template). Keeping API keys and machine preferences out of the package
-;; lets the package stay reusable across hosts.
+;; in the user's host configuration where API keys and machine
+;; preferences are kept. Keeping those out of the package lets it stay
+;; reusable across hosts and safe to distribute.
 
 ;;; Code:
 
