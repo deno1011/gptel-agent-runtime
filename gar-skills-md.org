@@ -1,0 +1,381 @@
+#+TITLE: gar-skills-md: markdown skill format
+#+PROPERTY: header-args:emacs-lisp :tangle gar-skills-md.el :lexical t
+
+Module of [[file:gptel-agent-runtime.org][gptel-agent-runtime]]. Adds a human-readable =.md= format for
+skills/playbooks. Two complementary use cases:
+
+- /Hand-author/: a user writes a skill in markdown -- frontmatter for
+  the metadata, an =elisp= code block for the structured steps, free
+  prose for notes -- drops it under
+  =gptel-agent-runtime-skills-directory=, and the runtime loads it as
+  a playbook at startup.
+- /Refinement readability/: when =gar-playbook-refine= produces a
+  candidate playbook, it now ALSO writes a markdown version alongside
+  the elisp file in =candidates/=. The =.el= remains the source of
+  truth (parsed directly by the runtime), but the =.md= is the
+  reviewable artifact.
+
+File format:
+
+#+begin_example
+  ---
+  id: write-config
+  summary: Write config files with verification
+  triggers: config, file, write
+  ---
+
+  # write-config
+
+  Free-form prose explaining when this skill applies and how it works.
+
+  ## Steps
+
+  \`\`\`elisp
+  ((:title "Verify write access"
+    :tool "read_file"
+    :args (:path "<CONFIG_PATH>")
+    :rationale "confirm the path is real before writing")
+   (:title "Write the file"
+    :tool "write_file"
+    :args (:path "<CONFIG_PATH>" :content "<CONTENT>")
+    :rationale "the actual write"))
+  \`\`\`
+
+  ## Notes
+
+  Variants, caveats, anything humans want recorded.
+#+end_example
+
+The frontmatter is a tiny YAML-ish subset: =key: value= lines, lists
+as comma-separated. The steps are a single =elisp= code block holding
+a list of step plists -- so the runtime gets exact elisp structure
+without ambiguity, and the human gets a readable narrative.
+
+See also:
+- [[file:gptel-agent-runtime.org][gptel-agent-runtime]] (master entrypoint)
+- [[file:gar-memory.org][gar-memory]] (playbook registry; loaded markdown skills register here)
+- [[file:gar-playbook-refine.org][gar-playbook-refine]] (the refinement layer calls
+  =emit-candidate-as-markdown= via =fboundp= when this module is loaded)
+
+* File header
+
+#+begin_src emacs-lisp
+;;; gar-skills-md.el --- markdown skill format -*- lexical-binding: t; -*-
+
+;; Part of deno1011/gptel-agent-runtime. Added on 2026-05-29 as PR 6 of
+;; the self-reflective / learning / memorising track.
+
+;;; Commentary:
+
+;; A markdown front-end for skills/playbooks. Frontmatter for metadata,
+;; one elisp code block for structured steps, prose anywhere else.
+;; Hand-author skills under skills-directory and they get registered as
+;; playbooks at startup; let gar-playbook-refine emit refinement
+;; candidates as .md alongside the elisp so humans can read them.
+
+;;; Code:
+
+(require 'cl-lib)
+(require 'subr-x)
+
+(declare-function gptel-agent-runtime--timestamp "gar-substrate" ())
+(declare-function gptel-agent-runtime-emit-event "gptel-agent-runtime"
+                  (type &rest args))
+
+;; gar-core playbook struct.
+(defvar gptel-agent-runtime-playbook-registry)
+(defvar gptel-agent-runtime-memory-directory)
+(declare-function gptel-agent-runtime-playbook-create
+                  "gptel-agent-runtime" (&rest plist))
+(declare-function gptel-agent-runtime-playbook-p "gptel-agent-runtime" (obj))
+(declare-function gptel-agent-runtime-playbook-id "gptel-agent-runtime" (pb))
+(declare-function gptel-agent-runtime-playbook-summary
+                  "gptel-agent-runtime" (pb))
+(declare-function gptel-agent-runtime-playbook-triggers
+                  "gptel-agent-runtime" (pb))
+(declare-function gptel-agent-runtime-playbook-steps "gptel-agent-runtime"
+                  (pb))
+(declare-function gptel-agent-runtime-playbook-success-count
+                  "gptel-agent-runtime" (pb))
+(declare-function gptel-agent-runtime-playbook-failure-count
+                  "gptel-agent-runtime" (pb))
+
+#+end_src
+
+* Defcustoms
+
+#+begin_src emacs-lisp
+(defcustom gptel-agent-runtime-skills-directory
+  (expand-file-name "skills/"
+                    (or (and (boundp 'gptel-agent-runtime-memory-directory)
+                             gptel-agent-runtime-memory-directory)
+                        (expand-file-name "gptel-agent-runtime/"
+                                          user-emacs-directory)))
+  "Directory where hand-authored markdown skill files live.
+Loaded via `gptel-agent-runtime-load-skills-from-directory' at startup."
+  :type 'directory
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-skills-auto-register t
+  "When non-nil, markdown skills loaded from the skills directory are
+registered as playbooks in `gptel-agent-runtime-playbook-registry'."
+  :type 'boolean
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-skills-refinement-emit-markdown t
+  "When non-nil, `gar-playbook-refine' also writes a .md version of
+each refinement candidate alongside the .el. The .el is what the
+runtime parses; the .md is the reviewable artifact."
+  :type 'boolean
+  :group 'gptel-agent-runtime)
+
+#+end_src
+
+* Parser: markdown -> plist
+
+#+begin_src emacs-lisp
+(defun gptel-agent-runtime--skills-md-trim (s)
+  "Trim whitespace from S; return nil when empty."
+  (let ((trimmed (and (stringp s) (string-trim s))))
+    (and trimmed (not (string-empty-p trimmed)) trimmed)))
+
+(defun gptel-agent-runtime--skills-md-parse-list-value (s)
+  "Parse a frontmatter LIST value S.
+Accepts either inline comma-separated (\"a, b, c\") or bracketed JSON-
+style (\"[a, b, c]\"). Returns a list of trimmed strings."
+  (let* ((s (gptel-agent-runtime--skills-md-trim s)))
+    (cond
+     ((null s) nil)
+     ;; Strip surrounding brackets if present.
+     ((and (string-prefix-p "[" s) (string-suffix-p "]" s))
+      (mapcar #'gptel-agent-runtime--skills-md-trim
+              (split-string (substring s 1 -1) "," t)))
+     (t
+      (mapcar #'gptel-agent-runtime--skills-md-trim
+              (split-string s "," t))))))
+
+(defconst gptel-agent-runtime--skills-md-list-keys
+  '("triggers" "tags")
+  "Frontmatter keys whose values are parsed as comma-separated lists.")
+
+(defun gptel-agent-runtime--skills-md-parse-frontmatter (text)
+  "Return a plist parsed from TEXT (the frontmatter body, between ---).
+Each `key: value' line becomes a `:key value' pair; list keys
+(per `--skills-md-list-keys') get split on commas. The returned
+plist uses keyword keys; values are strings (lists for list-keys)."
+  (let ((plist nil))
+    (dolist (line (split-string text "\n"))
+      (when (string-match "\\`[ \t]*\\([a-zA-Z0-9_-]+\\)[ \t]*:[ \t]*\\(.*\\)\\'"
+                          line)
+        (let* ((key (match-string 1 line))
+               (raw (match-string 2 line))
+               (val (if (member key gptel-agent-runtime--skills-md-list-keys)
+                        (gptel-agent-runtime--skills-md-parse-list-value raw)
+                      (gptel-agent-runtime--skills-md-trim raw))))
+          (setq plist
+                (plist-put plist (intern (concat ":" key)) val)))))
+    plist))
+
+(defun gptel-agent-runtime--skills-md-extract-frontmatter (text)
+  "If TEXT begins with `---' delimited frontmatter, return (FRONTMATTER . BODY).
+Otherwise return (nil . TEXT)."
+  (if (string-match "\\`---[ \t]*\n\\(\\(?:.\\|\n\\)*?\\)\n---[ \t]*\n\\(\\(?:.\\|\n\\)*\\)\\'"
+                    text)
+      (cons (match-string 1 text) (match-string 2 text))
+    (cons nil text)))
+
+(defun gptel-agent-runtime--skills-md-extract-elisp-block (text)
+  "Return the contents of the FIRST ```elisp ...``` fenced block in TEXT, or nil."
+  (when (string-match "```[ \t]*elisp[ \t]*\n\\(\\(?:.\\|\n\\)*?\\)\n```"
+                      text)
+    (match-string 1 text)))
+
+(defun gptel-agent-runtime-skill-from-markdown (text)
+  "Parse TEXT as a markdown skill file. Returns a skill plist:
+  (:id :summary :triggers :steps :body :raw)
+where :steps is the elisp list parsed from the first elisp code block,
+:body is the markdown prose (frontmatter stripped), and :raw is the
+original text. Returns nil when the input has no id."
+  (let* ((parts (gptel-agent-runtime--skills-md-extract-frontmatter text))
+         (frontmatter (car parts))
+         (body (cdr parts))
+         (meta (and frontmatter
+                    (gptel-agent-runtime--skills-md-parse-frontmatter
+                     frontmatter)))
+         (steps-text (gptel-agent-runtime--skills-md-extract-elisp-block body))
+         (steps (and steps-text
+                     (condition-case nil
+                         (car (read-from-string steps-text))
+                       (error nil)))))
+    (when (plist-get meta :id)
+      (list :id (plist-get meta :id)
+            :summary (plist-get meta :summary)
+            :triggers (or (plist-get meta :triggers) '())
+            :steps (or steps '())
+            :body body
+            :raw text))))
+
+;;;###autoload
+(defun gptel-agent-runtime-skill-from-file (file)
+  "Read and parse the markdown skill at FILE. Returns the skill plist or nil."
+  (interactive "fSkill file: ")
+  (when (file-exists-p file)
+    (with-temp-buffer
+      (insert-file-contents file)
+      (gptel-agent-runtime-skill-from-markdown (buffer-string)))))
+
+#+end_src
+
+* Serializer: plist -> markdown
+
+#+begin_src emacs-lisp
+(defun gptel-agent-runtime--skills-md-format-list (values)
+  "Format VALUES (a list of strings) for the frontmatter."
+  (mapconcat (lambda (v) (format "%s" v)) (or values '()) ", "))
+
+(defun gptel-agent-runtime-skill-to-markdown (skill)
+  "Serialize SKILL (a plist) as a markdown skill document.
+SKILL should carry :id, :summary, :triggers, :steps, optional :body /
+:notes / :rationale. The output is suitable for `--to-file'."
+  (let* ((id (or (plist-get skill :id) "?"))
+         (summary (or (plist-get skill :summary) ""))
+         (triggers (or (plist-get skill :triggers) '()))
+         (steps (or (plist-get skill :steps) '()))
+         (body (or (plist-get skill :body)
+                   (plist-get skill :notes)
+                   (plist-get skill :rationale)
+                   "")))
+    (concat
+     "---\n"
+     (format "id: %s\n" id)
+     (format "summary: %s\n" summary)
+     (format "triggers: %s\n"
+             (gptel-agent-runtime--skills-md-format-list triggers))
+     "---\n\n"
+     (format "# %s\n\n" id)
+     summary "\n\n"
+     "## Steps\n\n"
+     "```elisp\n"
+     (let ((print-level nil) (print-length nil))
+       (pp-to-string steps))
+     "```\n\n"
+     (when (and body (not (string-empty-p (string-trim body))))
+       (concat "## Notes\n\n" body "\n")))))
+
+;;;###autoload
+(defun gptel-agent-runtime-skill-to-file (skill file)
+  "Write SKILL (plist) as markdown to FILE. Returns FILE."
+  (with-temp-file file
+    (insert (gptel-agent-runtime-skill-to-markdown skill)))
+  file)
+
+#+end_src
+
+* Bridge: skill plist <-> playbook + auto-load
+
+#+begin_src emacs-lisp
+(defun gptel-agent-runtime--skills-md-skill->playbook (skill)
+  "Convert a SKILL plist into a playbook struct ready for the registry."
+  (gptel-agent-runtime-playbook-create
+   :id (plist-get skill :id)
+   :summary (plist-get skill :summary)
+   :triggers (or (plist-get skill :triggers) '())
+   :steps (or (plist-get skill :steps) '())
+   :success-count 0
+   :failure-count 0
+   :updated-at (gptel-agent-runtime--timestamp)))
+
+(defun gptel-agent-runtime--skills-md-register-playbook (playbook)
+  "Add PLAYBOOK to the registry, replacing any entry with the same id."
+  (when (gptel-agent-runtime-playbook-p playbook)
+    (let ((id (gptel-agent-runtime-playbook-id playbook)))
+      (setq gptel-agent-runtime-playbook-registry
+            (cons playbook
+                  (cl-remove id gptel-agent-runtime-playbook-registry
+                             :key #'gptel-agent-runtime-playbook-id
+                             :test #'equal)))
+      playbook)))
+
+;;;###autoload
+(defun gptel-agent-runtime-load-skills-from-directory ()
+  "Load every .md skill file under `gptel-agent-runtime-skills-directory'.
+When `gptel-agent-runtime-skills-auto-register' is non-nil, each loaded
+skill is registered as a playbook. Returns the count of loaded skills."
+  (interactive)
+  (let* ((dir gptel-agent-runtime-skills-directory)
+         (files (and (file-directory-p dir)
+                     (directory-files dir t "\\.md\\'")))
+         (count 0))
+    (dolist (f (or files '()))
+      (let ((skill (gptel-agent-runtime-skill-from-file f)))
+        (when skill
+          (when gptel-agent-runtime-skills-auto-register
+            (gptel-agent-runtime--skills-md-register-playbook
+             (gptel-agent-runtime--skills-md-skill->playbook skill)))
+          (setq count (1+ count)))))
+    (gptel-agent-runtime-emit-event
+     'skills-loaded
+     :source "skills-md"
+     :payload (list :count count :directory dir)
+     :taint 'trusted)
+    (when (called-interactively-p 'interactive)
+      (message "Loaded %d markdown skill(s) from %s" count dir))
+    count))
+
+;;;###autoload
+(defun gptel-agent-runtime-show-skills ()
+  "Open a buffer listing all hand-authored skills from the skills directory."
+  (interactive)
+  (let* ((dir gptel-agent-runtime-skills-directory)
+         (files (and (file-directory-p dir)
+                     (directory-files dir t "\\.md\\'")))
+         (buf (get-buffer-create "*gptel-agent-skills*")))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert (format "gptel-agent-runtime skills\nDirectory: %s\nCount: %d\n\n"
+                        dir (length (or files '()))))
+        (if (null files)
+            (insert "  (no skill files yet)\n")
+          (dolist (f files)
+            (let ((skill (gptel-agent-runtime-skill-from-file f)))
+              (insert
+               (format "  %s\n    id: %s\n    summary: %s\n    triggers: %S\n    steps: %d\n\n"
+                       (file-name-nondirectory f)
+                       (or (plist-get skill :id) "?")
+                       (or (plist-get skill :summary) "")
+                       (or (plist-get skill :triggers) '())
+                       (length (or (plist-get skill :steps) '())))))))
+        (goto-char (point-min))
+        (special-mode))
+    (display-buffer buf))))
+
+#+end_src
+
+* Candidate-as-markdown emitter (consumed by gar-playbook-refine)
+
+#+begin_src emacs-lisp
+(defun gptel-agent-runtime-emit-candidate-as-markdown (candidate elisp-file)
+  "Write CANDIDATE (a candidate playbook plist) as a markdown sibling of
+ELISP-FILE. Returns the .md path. Called by `gar-playbook-refine' via
+`fboundp' when `--skills-refinement-emit-markdown' is on."
+  (when gptel-agent-runtime-skills-refinement-emit-markdown
+    (let ((md-file (concat (file-name-sans-extension elisp-file) ".md")))
+      (gptel-agent-runtime-skill-to-file candidate md-file)
+      md-file)))
+
+#+end_src
+
+* File footer
+
+#+begin_src emacs-lisp
+(provide 'gar-skills-md)
+
+;;; gar-skills-md.el ends here
+#+end_src
+
+<!-- gar:auto-backlinks:start -->
+* Required by
+
+  (no other modules require this one yet)
+<!-- gar:auto-backlinks:end -->

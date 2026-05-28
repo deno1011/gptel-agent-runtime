@@ -487,6 +487,14 @@ consistent failure pattern or the model call fails."
            (t
             (let ((file (gptel-agent-runtime--write-candidate-playbook
                          candidate)))
+              ;; When gar-skills-md is loaded, also drop a readable .md
+              ;; sibling next to the .el. The .el remains the source of
+              ;; truth the runtime parses; the .md is the artifact a
+              ;; human can scan and edit before approving.
+              (when (fboundp 'gptel-agent-runtime-emit-candidate-as-markdown)
+                (ignore-errors
+                  (gptel-agent-runtime-emit-candidate-as-markdown
+                   candidate file)))
               ;; Record in history + dashboard ring.
               (setf (alist-get playbook-id
                                gptel-agent-runtime--refinement-history
