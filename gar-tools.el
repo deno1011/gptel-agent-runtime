@@ -886,6 +886,94 @@ provenance and is renamed with a `.approved' suffix."
 (defvar gptel-agent-runtime--origin-buffer nil
   "Buffer where the current agent session should render user-visible output.")
 
+(gptel-agent-runtime-register-tool
+ "run_elisp" 'invoke 'destructive
+ "Evaluate Emacs Lisp; pre-flighted via arg-schema."
+ :arg-schema
+ '(:type object
+   :properties (:code (:type string :min-length 1))
+   :required (:code)
+   :additional-properties nil))
+
+(gptel-agent-runtime-register-tool
+ "execute_code" 'invoke 'destructive
+ "Execute a code snippet; pre-flighted via arg-schema."
+ :arg-schema
+ '(:type object
+   :properties (:language (:type string
+                           :enum ("python" "bash" "sh" "R" "emacs-lisp"))
+                :code (:type string :min-length 1))
+   :required (:language :code)
+   :additional-properties nil))
+
+(gptel-agent-runtime-register-tool
+ "write_file" 'mutate 'write
+ "Write content to a file; pre-flighted via arg-schema."
+ :arg-schema
+ '(:type object
+   :properties (:path (:type string :min-length 1)
+                :content (:type string))
+   :required (:path :content)
+   :additional-properties nil))
+
+(gptel-agent-runtime-register-tool
+ "write_org_file" 'mutate 'write
+ "Overwrite an org file; pre-flighted via arg-schema."
+ :arg-schema
+ '(:type object
+   :properties (:path (:type string :min-length 1
+                       :pattern "\\.org\\'")
+                :content (:type string))
+   :required (:path :content)
+   :additional-properties nil))
+
+(gptel-agent-runtime-register-tool
+ "add_todo" 'mutate 'write
+ "Append a TODO heading to an org file; pre-flighted via arg-schema."
+ :arg-schema
+ '(:type object
+   :properties (:file (:type string :min-length 1)
+                :heading (:type string :min-length 1)
+                :state (:type string :min-length 1)
+                :body (:type string))
+   :required (:file :heading :state)
+   :additional-properties nil))
+
+(gptel-agent-runtime-register-tool
+ "change_todo_state" 'mutate 'write
+ "Change the TODO state of an org heading; pre-flighted via arg-schema."
+ :arg-schema
+ '(:type object
+   :properties (:file (:type string :min-length 1)
+                :heading (:type string :min-length 1)
+                :state (:type string :min-length 1))
+   :required (:file :heading :state)
+   :additional-properties nil))
+
+(gptel-agent-runtime-register-tool
+ "set_deadline" 'mutate 'write
+ "Set DEADLINE on an org heading; pre-flighted via arg-schema."
+ :arg-schema
+ '(:type object
+   :properties (:file (:type string :min-length 1)
+                :heading (:type string :min-length 1)
+                :date (:type string
+                       :pattern "\\`[0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}\\'"))
+   :required (:file :heading :date)
+   :additional-properties nil))
+
+(gptel-agent-runtime-register-tool
+ "add_tag" 'mutate 'write
+ "Add a tag to an org heading; pre-flighted via arg-schema."
+ :arg-schema
+ '(:type object
+   :properties (:file (:type string :min-length 1)
+                :heading (:type string :min-length 1)
+                :tag (:type string :min-length 1
+                      :pattern "\\`[A-Za-z0-9_@]+\\'"))
+   :required (:file :heading :tag)
+   :additional-properties nil))
+
 (provide 'gar-tools)
 
 ;;; gar-tools.el ends here

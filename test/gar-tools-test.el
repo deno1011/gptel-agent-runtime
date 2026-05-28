@@ -79,6 +79,34 @@
                '(defun bad () (eval form)))))
     (should vios)))
 
+;; --- arg-schema backfill smoke ---
+
+(ert-deftest gar-tools-arg-schema-backfill-covers-mutation-tools ()
+  "The 8 high-risk native tools are registered with an :arg-schema after package load."
+  (dolist (name '("run_elisp" "execute_code" "write_file" "write_org_file"
+                  "add_todo" "change_todo_state" "set_deadline" "add_tag"))
+    (let ((tool (gptel-agent-runtime-find-tool name)))
+      (should tool)
+      (should (gptel-agent-runtime-tool-arg-schema tool)))))
+
+(ert-deftest gar-tools-arg-schema-rejects-non-iso-date-on-set-deadline ()
+  "The set_deadline schema enforces YYYY-MM-DD via :pattern."
+  (let* ((tool (gptel-agent-runtime-find-tool "set_deadline"))
+         (schema (gptel-agent-runtime-tool-arg-schema tool))
+         (errs (gptel-agent-runtime-validate-args
+                '(:file "todo.org" :heading "x" :date "tomorrow") schema)))
+    (should errs)
+    (should (cl-some (lambda (e) (string-match-p ":pattern" e)) errs))))
+
+(ert-deftest gar-tools-arg-schema-execute-code-enum-rejects-unknown-language ()
+  "The execute_code schema enforces the language enum."
+  (let* ((tool (gptel-agent-runtime-find-tool "execute_code"))
+         (schema (gptel-agent-runtime-tool-arg-schema tool))
+         (errs (gptel-agent-runtime-validate-args
+                '(:language "ruby" :code "puts 1") schema)))
+    (should errs)
+    (should (cl-some (lambda (e) (string-match-p ":enum" e)) errs))))
+
 (provide 'gar-tools-test)
 
 ;;; gar-tools-test.el ends here
