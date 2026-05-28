@@ -31,9 +31,9 @@ What this module owns:
   =--normalize-args=, =--path-under-directory-p=,
   =protected-path-p=, risk-level helpers, =--find-native-tool= /
   =--call-native-tool= used by the loop.
-- /Compatibility glue/: =my/gptel-tools-all=, =my/gptel-sync-tools=,
-  =my/gptel-select-model=, =my/gptel-mode-line=, =my/gptel-status=,
-  =my/gptel-sync-and-status=, the C-c bindings for status/select.
+- /Compatibility glue/: =gptel-agent-runtime-tools-all=, =gptel-agent-runtime-sync-tools=,
+  =gptel-agent-runtime-select-model=, =gptel-agent-runtime-mode-line=, =gptel-agent-runtime-status=,
+  =gptel-agent-runtime-sync-and-status=, the C-c bindings for status/select.
 - /Executor mode activation/: the =gar-response-executor-*= setq block
   and the activation call at the master's tail (these only kick in
   once =gar-executor= has actually defined the mode). The
@@ -885,7 +885,7 @@ evidence back to its source so the full lineage DAG can be reconstructed."
 (require 'gptel)
 
 
-(defun my/gptel-tools-all ()
+(defun gptel-agent-runtime-tools-all ()
   "Return list of all registered gptel-tool structs.
 gptel--known-tools is a two-level alist: (category . ((name . struct) ...))."
   (when (and (boundp 'gptel--known-tools)
@@ -894,14 +894,14 @@ gptel--known-tools is a two-level alist: (category . ((name . struct) ...))."
              append (cl-loop for (_name . tool) in tools
                              when (gptel-tool-p tool) collect tool))))
 
-(defun my/gptel-sync-tools ()
+(defun gptel-agent-runtime-sync-tools ()
   "Enable all registered gptel tools in the current buffer."
   (when (boundp 'gptel--known-tools)
     (setq-local gptel-use-tools t)
-    (setq-local gptel-tools (my/gptel-tools-all))))
+    (setq-local gptel-tools (gptel-agent-runtime-tools-all))))
 
 
-(defun my/gptel-select-model ()
+(defun gptel-agent-runtime-select-model ()
   "Select backend+model — sets globally AND in the active gptel buffer."
   (interactive)
   (let* ((choice  (completing-read
@@ -928,14 +928,14 @@ gptel--known-tools is a two-level alist: (category . ((name . struct) ...))."
     (message "→ %s  (%s, directive: %s)" choice model directive)))
 
 ;; C-c M  — quick model switch in the current buffer
-(global-set-key (kbd "C-c M") #'my/gptel-select-model)
+(global-set-key (kbd "C-c M") #'gptel-agent-runtime-select-model)
 
-(defun my/gptel-mode-line ()
+(defun gptel-agent-runtime-mode-line ()
   "Show the active gptel model in the mode line."
   (when (bound-and-true-p gptel-mode)
     (format " [%s]" gptel-model)))
 
-(defun my/gptel-status ()
+(defun gptel-agent-runtime-status ()
   "Display active gptel backend, model, directive, and tool count."
   (interactive)
   (message "gptel model=%s directive=%s use-tools=%s tools=%s web-tools=%s backend=%s"
@@ -953,11 +953,11 @@ gptel--known-tools is a two-level alist: (category . ((name . struct) ...))."
              0)
            (if (boundp 'gptel-backend) gptel-backend "<unset>")))
 
-(defun my/gptel-sync-and-status ()
+(defun gptel-agent-runtime-sync-and-status ()
   "Synchronize the directive for the active runtime and display status."
   (interactive)
   (let ((directive (gptel-agent-runtime-sync-directive-for-current-runtime)))
-    (my/gptel-sync-tools)
+    (gptel-agent-runtime-sync-tools)
     (message "gptel model=%s synced-directive=%s use-tools=%s tools=%s web-tools=%s backend=%s"
              (if (boundp 'gptel-model) gptel-model "<unset>")
              directive
@@ -973,12 +973,23 @@ gptel--known-tools is a two-level alist: (category . ((name . struct) ...))."
                0)
              (if (boundp 'gptel-backend) gptel-backend "<unset>"))))
 
-(global-set-key (kbd "C-c G s") #'my/gptel-status)
-(global-set-key (kbd "C-c G S") #'my/gptel-sync-and-status)
+(global-set-key (kbd "C-c G s") #'gptel-agent-runtime-status)
+(global-set-key (kbd "C-c G S") #'gptel-agent-runtime-sync-and-status)
 
-(unless (member '(:eval (my/gptel-mode-line)) mode-line-format)
+(unless (member '(:eval (gptel-agent-runtime-mode-line)) mode-line-format)
   (setq mode-line-format
-        (append mode-line-format '((:eval (my/gptel-mode-line))))))
+        (append mode-line-format '((:eval (gptel-agent-runtime-mode-line))))))
+
+;; Backwards-compat aliases for the legacy `my/gptel-*' UI command names.
+;; Users may have bound these to keys directly or referenced them from
+;; setup hooks; the aliases keep both names working until callers move
+;; to the `gptel-agent-runtime-*' API.
+(defalias 'my/gptel-tools-all      #'gptel-agent-runtime-tools-all)
+(defalias 'my/gptel-sync-tools     #'gptel-agent-runtime-sync-tools)
+(defalias 'my/gptel-select-model   #'gptel-agent-runtime-select-model)
+(defalias 'my/gptel-mode-line      #'gptel-agent-runtime-mode-line)
+(defalias 'my/gptel-status         #'gptel-agent-runtime-status)
+(defalias 'my/gptel-sync-and-status #'gptel-agent-runtime-sync-and-status)
 
 
 

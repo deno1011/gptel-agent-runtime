@@ -70,7 +70,7 @@ See also:
 * Directive selection helpers
 
 These decide which gptel directive applies to the active backend/model.
-They are called from =my/gptel-select-model=, the autonomous loop, the
+They are called from =gptel-agent-runtime-select-model=, the autonomous loop, the
 model router, and the =gptel-mode-hook= installed below.
 
 #+begin_src emacs-lisp

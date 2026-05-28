@@ -95,14 +95,14 @@ the master load sequence. New setups should customise
            my/gptel-ollama-backend)
   (gptel-agent-runtime-use-default-local-model))
 
-;; Finish wiring gar-tools' global tool list now that my/gptel-tools-all
+;; Finish wiring gar-tools' global tool list now that gptel-agent-runtime-tools-all
 ;; is defined (it lives in gar-core which loads before gar-tools, so
 ;; this with-eval-after-load runs only when gptel itself is loaded).
 (with-eval-after-load 'gptel
-  (when (and (fboundp 'my/gptel-tools-all)
+  (when (and (fboundp 'gptel-agent-runtime-tools-all)
              (boundp 'gptel-use-tools))
     (setq gptel-use-tools t
-          gptel-tools (my/gptel-tools-all))))
+          gptel-tools (gptel-agent-runtime-tools-all))))
 
 (provide 'gptel-agent-runtime)
 

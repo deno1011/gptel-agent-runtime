@@ -1630,13 +1630,13 @@ With prefix SAVE, persist the preference through Customize."
   (if (not my/gptel-context-enabled)
       (progn
         (gptel-agent-runtime-sync-directive-for-current-runtime)
-        (my/gptel-sync-tools)
+        (gptel-agent-runtime-sync-tools)
         (apply orig-fn args))
     (if gptel-agent-runtime-enable-routing
         (gptel-agent-runtime-apply-route-to-current-buffer
          (gptel-agent-runtime-current-buffer-task-text))
       (gptel-agent-runtime-sync-directive-for-current-runtime))
-    (my/gptel-sync-tools)
+    (gptel-agent-runtime-sync-tools)
     (let* ((task-text (gptel-agent-runtime-current-buffer-task-text))
            (_model-route
             (when gptel-agent-runtime-model-router-enabled
