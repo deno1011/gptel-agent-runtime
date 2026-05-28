@@ -620,7 +620,14 @@ the mutation to this function to avoid a load-order conflict."
 Returns a plist with :agent, :skills, :all-agents, and :reason."
   (let* ((organization (gptel-agent-runtime-route-organization text))
          (skills (gptel-agent-runtime-match-skills text))
-         (playbooks (gptel-agent-runtime-match-playbooks text))
+         ;; gar-playbook-experiment, when loaded, intercepts match results
+         ;; for playbooks that are currently being A/B tested -- forks the
+         ;; matched playbook with the candidate body for some fraction of
+         ;; sessions and records the arm assignment so session-finalized
+         ;; can update the experiment counts.
+         (playbooks (if (fboundp 'gptel-agent-runtime--experiment-resolve-matches)
+                        (gptel-agent-runtime--experiment-resolve-matches text)
+                      (gptel-agent-runtime-match-playbooks text)))
          (agents (cl-remove-if-not
                   (lambda (agent)
                     (gptel-agent-runtime--organization-agent-allowed-p
@@ -930,6 +937,8 @@ Be specific. Cite exact arguments, paths, patterns, or capability mismatches whe
   (gptel-agent-runtime-load-playbook-invocations))
 (when (fboundp 'gptel-agent-runtime-load-trajectories)
   (gptel-agent-runtime-load-trajectories))
+(when (fboundp 'gptel-agent-runtime-load-experiments)
+  (gptel-agent-runtime-load-experiments))
 
 (defun gptel-agent-runtime--model-router-count-matches (patterns text)
   "Return number of PATTERNS matching TEXT."

@@ -1,0 +1,617 @@
+;;; gar-playbook-experiment.el --- A/B test refined playbooks -*- lexical-binding: t; -*-
+
+;; Part of deno1011/gptel-agent-runtime. Added on 2026-05-28 as PR 4 of
+;; the self-reflective / learning / memorising track.
+
+;;; Commentary:
+
+;; Wires the candidate playbooks produced by gar-playbook-refine into a
+;; real A/B test: at routing time, with probability 0.5 the session
+;; gets the candidate body instead of the original. The arm choice is
+;; deterministic per (session-id, playbook-id) so every step in a
+;; session sees the same arm. At session-finalized the experiment's
+;; counts get updated and (if auto-decide is on and the signal is
+;; strong) the candidate is promoted into the registry or rolled back.
+
+;;; Code:
+
+(require 'cl-lib)
+(require 'subr-x)
+
+(declare-function gptel-agent-runtime--timestamp "gar-substrate" ())
+(declare-function gptel-agent-runtime--state-header "gar-substrate"
+                  (&optional written-by))
+(declare-function gptel-agent-runtime--read-versioned "gar-substrate" (file))
+(declare-function gptel-agent-runtime-emit-event "gptel-agent-runtime"
+                  (type &rest args))
+(declare-function gptel-agent-runtime-event-payload "gptel-agent-runtime"
+                  (event))
+(declare-function gptel-agent-runtime-event-session-id "gptel-agent-runtime"
+                  (event))
+(declare-function gptel-agent-runtime-subscribe "gar-substrate"
+                  (event-type handler))
+
+;; gar-core playbook struct.
+(defvar gptel-agent-runtime-playbook-registry)
+(defvar gptel-agent-runtime-memory-directory)
+(declare-function gptel-agent-runtime-playbook-create
+                  "gptel-agent-runtime" (&rest plist))
+(declare-function gptel-agent-runtime-playbook-p "gptel-agent-runtime" (obj))
+(declare-function gptel-agent-runtime-playbook-id "gptel-agent-runtime" (pb))
+(declare-function gptel-agent-runtime-playbook-summary
+                  "gptel-agent-runtime" (pb))
+(declare-function gptel-agent-runtime-playbook-triggers
+                  "gptel-agent-runtime" (pb))
+(declare-function gptel-agent-runtime-playbook-steps "gptel-agent-runtime"
+                  (pb))
+(declare-function gptel-agent-runtime-playbook-success-count
+                  "gptel-agent-runtime" (pb))
+(declare-function gptel-agent-runtime-playbook-failure-count
+                  "gptel-agent-runtime" (pb))
+(declare-function gptel-agent-runtime-playbook-updated-at
+                  "gptel-agent-runtime" (pb))
+
+;; gar-agents: the resolver wraps this.
+(declare-function gptel-agent-runtime-match-playbooks "gar-agents" (text))
+
+;; gar-memory: shares the candidates directory + the
+;; --session-finalized-outcome mapping for consistent outcome semantics.
+(declare-function gptel-agent-runtime--candidates-directory "gar-memory" ())
+(declare-function gptel-agent-runtime-save-playbooks "gar-memory" ())
+(declare-function gptel-agent-runtime--session-finalized-outcome
+                  "gar-memory" (reason))
+
+(defvar gptel-agent-runtime--current-session)
+(declare-function gptel-agent-runtime-session-id "gptel-agent-runtime" (s))
+
+(cl-defstruct (gptel-agent-runtime-experiment
+               (:constructor gptel-agent-runtime-experiment-create))
+  "One A/B test between an existing playbook and a refined candidate.
+The experiment is `running' until enough sessions hit each arm AND a
+clear winner emerges by the margin rule -- at which point it becomes
+`promoted' (candidate replaces original) or `rolled-back' (candidate
+moves to /rejected/, original keeps its slot). When the signal is
+inconclusive the experiment keeps running."
+  id
+  playbook-id              ; original playbook this experiment is testing
+  candidate-id             ; id of the source candidate file
+  candidate-summary        ; the refined body the candidate-arm uses
+  candidate-triggers
+  candidate-steps
+  decision-threshold       ; min samples per arm before deciding
+  margin                   ; success-rate margin for promote/rollback
+  status                   ; running | promoted | rolled-back | paused
+  original-successes
+  original-failures
+  candidate-successes
+  candidate-failures
+  started-at
+  decided-at
+  source-candidate-file
+  metadata)
+
+(defcustom gptel-agent-runtime-experiments-directory
+  (expand-file-name "experiments/"
+                    (or (and (boundp 'gptel-agent-runtime-memory-directory)
+                             gptel-agent-runtime-memory-directory)
+                        (expand-file-name "gptel-agent-runtime/"
+                                          user-emacs-directory)))
+  "Directory where running and decided experiments are persisted."
+  :type 'directory
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-experiment-auto-decide t
+  "When non-nil, auto-promote or auto-rollback once the margin holds.
+When nil, the decision waits for an explicit
+`M-x gptel-agent-runtime-experiment-promote' / `-rollback'."
+  :type 'boolean
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-experiment-default-threshold 5
+  "Minimum number of samples PER ARM before the experiment can decide.
+Below this on either arm, `maybe-decide' keeps the experiment running
+regardless of the observed rates."
+  :type 'integer
+  :safe #'integerp
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-experiment-default-margin 0.2
+  "Minimum success-rate margin between arms for a decision.
+A candidate must beat (or be beaten by) the original by at least this
+margin on success rate before promotion / rollback fires."
+  :type 'float
+  :safe #'floatp
+  :group 'gptel-agent-runtime)
+
+(defvar gptel-agent-runtime--experiments nil
+  "In-memory list of all known experiments (running + decided), newest first.")
+
+(defvar gptel-agent-runtime--session-arm-assignments nil
+  "Alist mapping (SESSION-ID . PLAYBOOK-ID) to the chosen arm symbol.
+Populated by `--experiment-resolve-matches' at routing time, consumed by
+`--record-experiment-outcome-on-finalize' at session-finalize time and
+then dropped to keep the alist bounded.")
+
+(defvar gptel-agent-runtime--last-experiment-events nil
+  "Recent experiment events for the mission-control dashboard.")
+
+(defun gptel-agent-runtime-experiment-active-for-playbook (playbook-id)
+  "Return the running experiment for PLAYBOOK-ID, or nil."
+  (cl-find-if (lambda (exp)
+                (and (eq (gptel-agent-runtime-experiment-status exp) 'running)
+                     (equal (gptel-agent-runtime-experiment-playbook-id exp)
+                            playbook-id)))
+              gptel-agent-runtime--experiments))
+
+(defun gptel-agent-runtime-experiment-by-id (experiment-id)
+  "Return the experiment with EXPERIMENT-ID, or nil."
+  (cl-find-if (lambda (exp)
+                (equal (gptel-agent-runtime-experiment-id exp) experiment-id))
+              gptel-agent-runtime--experiments))
+
+(defun gptel-agent-runtime--experiment-pick-arm (experiment session-id)
+  "Pick `original' or `candidate' arm for EXPERIMENT given SESSION-ID.
+Deterministic per (experiment-id, session-id): the same session always
+gets the same arm so every step inside one run sees the same playbook
+body. Uses `secure-hash' (md5) for good distribution -- `sxhash' on
+sequential keys (sess-0, sess-1, sess-2 ...) clusters parity in a way
+that breaks the 50-50 split."
+  (let* ((exp-id (gptel-agent-runtime-experiment-id experiment))
+         (key (format "%s|%s" (or exp-id "?") (or session-id "?")))
+         (hex (secure-hash 'md5 key))
+         ;; First hex digit gives 16 buckets; parity selects the arm.
+         (bucket (string-to-number (substring hex 0 1) 16)))
+    (if (zerop (mod bucket 2)) 'original 'candidate)))
+
+(defun gptel-agent-runtime--experiment-fork-playbook (playbook experiment arm)
+  "Return PLAYBOOK unchanged when ARM is `original'; otherwise return a fork
+with the EXPERIMENT's candidate body but the SAME id as PLAYBOOK so
+accounting and trajectories keep the right key."
+  (if (eq arm 'candidate)
+      (gptel-agent-runtime-playbook-create
+       :id (gptel-agent-runtime-playbook-id playbook)
+       :summary (gptel-agent-runtime-experiment-candidate-summary experiment)
+       :triggers (gptel-agent-runtime-experiment-candidate-triggers experiment)
+       :steps (gptel-agent-runtime-experiment-candidate-steps experiment)
+       :success-count (or (gptel-agent-runtime-playbook-success-count playbook)
+                          0)
+       :failure-count (or (gptel-agent-runtime-playbook-failure-count playbook)
+                          0)
+       :updated-at (or (gptel-agent-runtime-playbook-updated-at playbook)
+                       (gptel-agent-runtime--timestamp)))
+    playbook))
+
+(defun gptel-agent-runtime--experiment-resolve-matches (text)
+  "Resolver wired into `gar-agents.route-task' via fboundp.
+Calls `match-playbooks' for TEXT; for each matched playbook with a
+running experiment, picks an arm and substitutes the candidate body
+when the arm is `candidate'. Records the arm in
+`--session-arm-assignments' so `session-finalized' can debit / credit
+the right experiment counter."
+  (let ((playbooks (gptel-agent-runtime-match-playbooks text))
+        (session-id (and (boundp 'gptel-agent-runtime--current-session)
+                         gptel-agent-runtime--current-session
+                         (gptel-agent-runtime-session-id
+                          gptel-agent-runtime--current-session))))
+    (mapcar
+     (lambda (pb)
+       (let* ((pid (gptel-agent-runtime-playbook-id pb))
+              (exp (gptel-agent-runtime-experiment-active-for-playbook pid)))
+         (cond
+          ((and exp session-id)
+           (let ((arm (gptel-agent-runtime--experiment-pick-arm exp
+                                                                session-id)))
+             (push (cons (cons session-id pid) arm)
+                   gptel-agent-runtime--session-arm-assignments)
+             (gptel-agent-runtime--experiment-fork-playbook pb exp arm)))
+          (t pb))))
+     playbooks)))
+
+(defun gptel-agent-runtime--experiment-success-rate (successes failures)
+  "Return success rate (0.0-1.0) from SUCCESSES and FAILURES; nil if no samples."
+  (let ((total (+ (or successes 0) (or failures 0))))
+    (when (> total 0)
+      (/ (float (or successes 0)) total))))
+
+(defun gptel-agent-runtime--experiment-bump-arm (experiment arm outcome)
+  "Increment EXPERIMENT's counter for ARM given OUTCOME (success/failure).
+Returns EXPERIMENT for convenience."
+  (when (memq outcome '(success failure))
+    (let* ((success-p (eq outcome 'success)))
+      (pcase arm
+        ('original
+         (if success-p
+             (setf (gptel-agent-runtime-experiment-original-successes experiment)
+                   (1+ (or (gptel-agent-runtime-experiment-original-successes experiment) 0)))
+           (setf (gptel-agent-runtime-experiment-original-failures experiment)
+                 (1+ (or (gptel-agent-runtime-experiment-original-failures experiment) 0)))))
+        ('candidate
+         (if success-p
+             (setf (gptel-agent-runtime-experiment-candidate-successes experiment)
+                   (1+ (or (gptel-agent-runtime-experiment-candidate-successes experiment) 0)))
+           (setf (gptel-agent-runtime-experiment-candidate-failures experiment)
+                 (1+ (or (gptel-agent-runtime-experiment-candidate-failures experiment) 0))))))))
+  experiment)
+
+(defun gptel-agent-runtime--experiment-decision (experiment)
+  "Inspect EXPERIMENT's counters and return a decision plist or nil.
+Returns one of:
+- nil                                 -- insufficient data; keep running
+- (:decision promote   :rates ...)    -- candidate > original by margin
+- (:decision rollback  :rates ...)    -- original  > candidate by margin
+- (:decision inconclusive :rates ...) -- enough samples, no winner"
+  (let* ((threshold (or (gptel-agent-runtime-experiment-decision-threshold
+                         experiment)
+                        gptel-agent-runtime-experiment-default-threshold))
+         (margin (or (gptel-agent-runtime-experiment-margin experiment)
+                     gptel-agent-runtime-experiment-default-margin))
+         (orig-s (or (gptel-agent-runtime-experiment-original-successes
+                      experiment) 0))
+         (orig-f (or (gptel-agent-runtime-experiment-original-failures
+                      experiment) 0))
+         (cand-s (or (gptel-agent-runtime-experiment-candidate-successes
+                      experiment) 0))
+         (cand-f (or (gptel-agent-runtime-experiment-candidate-failures
+                      experiment) 0))
+         (orig-n (+ orig-s orig-f))
+         (cand-n (+ cand-s cand-f))
+         (orig-rate (gptel-agent-runtime--experiment-success-rate orig-s orig-f))
+         (cand-rate (gptel-agent-runtime--experiment-success-rate cand-s cand-f)))
+    (when (and (>= orig-n threshold) (>= cand-n threshold))
+      (cond
+       ((>= (- cand-rate orig-rate) margin)
+        (list :decision 'promote
+              :original-rate orig-rate
+              :candidate-rate cand-rate
+              :margin-observed (- cand-rate orig-rate)))
+       ((>= (- orig-rate cand-rate) margin)
+        (list :decision 'rollback
+              :original-rate orig-rate
+              :candidate-rate cand-rate
+              :margin-observed (- orig-rate cand-rate)))
+       (t
+        (list :decision 'inconclusive
+              :original-rate orig-rate
+              :candidate-rate cand-rate
+              :margin-observed (abs (- cand-rate orig-rate))))))))
+
+(defun gptel-agent-runtime--experiment-record-outcome
+    (playbook-id session-id outcome)
+  "Look up the arm assignment for (SESSION-ID, PLAYBOOK-ID), bump the
+matching experiment's counter, drop the assignment, save state, and
+possibly trigger an auto-decision."
+  (let* ((key (cons session-id playbook-id))
+         (entry (assoc key gptel-agent-runtime--session-arm-assignments))
+         (arm (and entry (cdr entry)))
+         (exp (gptel-agent-runtime-experiment-active-for-playbook playbook-id)))
+    (when (and arm exp)
+      (gptel-agent-runtime--experiment-bump-arm exp arm outcome)
+      (setq gptel-agent-runtime--session-arm-assignments
+            (cl-remove key gptel-agent-runtime--session-arm-assignments
+                       :key #'car :test #'equal))
+      (gptel-agent-runtime--save-experiment exp)
+      (gptel-agent-runtime-emit-event
+       'experiment-outcome-recorded
+       :source "experiment"
+       :payload (list :experiment (gptel-agent-runtime-experiment-id exp)
+                      :playbook playbook-id
+                      :session-id session-id
+                      :arm arm
+                      :outcome outcome)
+       :taint 'trusted)
+      (when gptel-agent-runtime-experiment-auto-decide
+        (gptel-agent-runtime--experiment-maybe-decide exp)))))
+
+(defun gptel-agent-runtime--experiment-maybe-decide (experiment)
+  "Consult the decision rule on EXPERIMENT; auto-promote / -rollback when
+the rule fires (or do nothing when inconclusive). The `:inconclusive'
+verdict is recorded as an event but the experiment stays `running' --
+more samples may break the tie. Returns the decision plist or nil."
+  (let ((decision (gptel-agent-runtime--experiment-decision experiment)))
+    (when decision
+      (pcase (plist-get decision :decision)
+        ('promote
+         (gptel-agent-runtime-experiment-promote
+          (gptel-agent-runtime-experiment-id experiment)
+          :decision decision))
+        ('rollback
+         (gptel-agent-runtime-experiment-rollback
+          (gptel-agent-runtime-experiment-id experiment)
+          :decision decision))
+        ('inconclusive
+         (gptel-agent-runtime-emit-event
+          'experiment-decision-inconclusive
+          :source "experiment"
+          :payload (cons (cons :experiment
+                               (gptel-agent-runtime-experiment-id experiment))
+                         decision)
+          :taint 'trusted))))
+    decision))
+
+(defun gptel-agent-runtime--experiments-ensure-dir ()
+  "Ensure the experiments directory exists; return its absolute path."
+  (let ((dir gptel-agent-runtime-experiments-directory))
+    (unless (file-directory-p dir)
+      (make-directory dir t))
+    dir))
+
+(defun gptel-agent-runtime--experiment-file (experiment)
+  "Return the on-disk path for EXPERIMENT."
+  (expand-file-name
+   (concat (gptel-agent-runtime-experiment-id experiment) ".el")
+   (gptel-agent-runtime--experiments-ensure-dir)))
+
+(defun gptel-agent-runtime--save-experiment (experiment)
+  "Persist EXPERIMENT to its on-disk file."
+  (let ((file (gptel-agent-runtime--experiment-file experiment))
+        (print-level nil)
+        (print-length nil))
+    (with-temp-file file
+      (prin1 (gptel-agent-runtime--state-header "gar-playbook-experiment")
+             (current-buffer))
+      (insert "\n")
+      (prin1 experiment (current-buffer))
+      (insert "\n"))))
+
+(defun gptel-agent-runtime-load-experiments ()
+  "Read persisted experiments from disk into the in-memory list."
+  (let* ((dir gptel-agent-runtime-experiments-directory)
+         (files (and (file-directory-p dir)
+                     (directory-files dir t "\\.el\\'")))
+         (loaded nil))
+    (dolist (f (or files '()))
+      (condition-case _err
+          (let* ((versioned (gptel-agent-runtime--read-versioned f))
+                 (rest-pos (cdr versioned)))
+            (when rest-pos
+              (with-temp-buffer
+                (insert-file-contents f)
+                (goto-char rest-pos)
+                (let ((obj (condition-case nil (read (current-buffer))
+                             (error nil))))
+                  (when (gptel-agent-runtime-experiment-p obj)
+                    (push obj loaded))))))
+        (error nil)))
+    (setq gptel-agent-runtime--experiments
+          (sort loaded
+                (lambda (a b)
+                  (string> (or (gptel-agent-runtime-experiment-started-at a)
+                               "")
+                           (or (gptel-agent-runtime-experiment-started-at b)
+                               "")))))
+    (length gptel-agent-runtime--experiments)))
+
+(defun gptel-agent-runtime--experiment-read-candidate-file (file)
+  "Read the candidate plist from FILE (under candidates/ directory).
+Returns the plist or nil."
+  (when (file-exists-p file)
+    (with-temp-buffer
+      (insert-file-contents file)
+      (goto-char (point-min))
+      (let ((header (condition-case nil (read (current-buffer)) (error nil))))
+        ;; Skip the state header when present.
+        (unless (and (listp header)
+                     (plist-get header :gptel-agent-runtime-state))
+          (goto-char (point-min)))
+        (condition-case nil (read (current-buffer)) (error nil))))))
+
+;;;###autoload
+(defun gptel-agent-runtime-experiment-start (candidate-file &optional playbook-id)
+  "Create and register an experiment from CANDIDATE-FILE.
+PLAYBOOK-ID is the original playbook the candidate refines; when nil it
+is taken from the candidate's `:source-playbooks' field. Returns the
+experiment struct on success."
+  (interactive
+   (list (read-file-name "Candidate playbook file: "
+                         (and (fboundp 'gptel-agent-runtime--candidates-directory)
+                              (gptel-agent-runtime--candidates-directory)))
+         nil))
+  (let* ((cand (gptel-agent-runtime--experiment-read-candidate-file
+                candidate-file)))
+    (unless cand
+      (user-error "Could not read candidate from %s" candidate-file))
+    (let* ((source-playbooks (plist-get cand :source-playbooks))
+           (pid (or playbook-id (car source-playbooks))))
+      (unless pid
+        (user-error
+         "Candidate has no :source-playbooks; pass PLAYBOOK-ID explicitly"))
+      (when (gptel-agent-runtime-experiment-active-for-playbook pid)
+        (user-error
+         "Experiment already running for playbook %s; promote/rollback first"
+         pid))
+      (let ((exp (gptel-agent-runtime-experiment-create
+                  :id (format "experiment-%s-%s"
+                              pid (format-time-string "%Y%m%dT%H%M%S"))
+                  :playbook-id pid
+                  :candidate-id (plist-get cand :id)
+                  :candidate-summary (plist-get cand :summary)
+                  :candidate-triggers (plist-get cand :triggers)
+                  :candidate-steps (plist-get cand :steps)
+                  :decision-threshold
+                  gptel-agent-runtime-experiment-default-threshold
+                  :margin gptel-agent-runtime-experiment-default-margin
+                  :status 'running
+                  :original-successes 0
+                  :original-failures 0
+                  :candidate-successes 0
+                  :candidate-failures 0
+                  :started-at (gptel-agent-runtime--timestamp)
+                  :source-candidate-file candidate-file)))
+        (push exp gptel-agent-runtime--experiments)
+        (gptel-agent-runtime--save-experiment exp)
+        (gptel-agent-runtime-emit-event
+         'experiment-started
+         :source "experiment"
+         :payload (list :experiment (gptel-agent-runtime-experiment-id exp)
+                        :playbook pid
+                        :candidate (gptel-agent-runtime-experiment-candidate-id
+                                    exp))
+         :taint 'trusted)
+        (push (list :type 'started
+                    :experiment (gptel-agent-runtime-experiment-id exp)
+                    :playbook pid
+                    :at (gptel-agent-runtime--timestamp))
+              gptel-agent-runtime--last-experiment-events)
+        (when (called-interactively-p 'interactive)
+          (message "Started experiment %s for playbook %s"
+                   (gptel-agent-runtime-experiment-id exp) pid))
+        exp))))
+
+(defun gptel-agent-runtime--experiment-find-playbook (playbook-id)
+  "Return the registered playbook struct for PLAYBOOK-ID, or nil."
+  (cl-find-if (lambda (pb)
+                (equal (gptel-agent-runtime-playbook-id pb) playbook-id))
+              gptel-agent-runtime-playbook-registry))
+
+;;;###autoload
+(cl-defun gptel-agent-runtime-experiment-promote (experiment-id
+                                                  &key decision)
+  "Promote the candidate of EXPERIMENT-ID into the playbook registry.
+DECISION is the decision plist from `--experiment-decision' when this
+is being called from auto-decide; nil for manual promotion."
+  (interactive
+   (list (completing-read
+          "Promote experiment: "
+          (mapcar #'gptel-agent-runtime-experiment-id
+                  (cl-remove-if-not
+                   (lambda (e) (eq (gptel-agent-runtime-experiment-status e)
+                                   'running))
+                   gptel-agent-runtime--experiments))
+          nil t)))
+  (let* ((exp (gptel-agent-runtime-experiment-by-id experiment-id)))
+    (unless exp (user-error "No experiment with id %s" experiment-id))
+    (let* ((pid (gptel-agent-runtime-experiment-playbook-id exp))
+           (pb (gptel-agent-runtime--experiment-find-playbook pid)))
+      (when pb
+        ;; Replace the original playbook's body in place.
+        (setf (gptel-agent-runtime-playbook-summary pb)
+              (gptel-agent-runtime-experiment-candidate-summary exp))
+        (setf (gptel-agent-runtime-playbook-triggers pb)
+              (gptel-agent-runtime-experiment-candidate-triggers exp))
+        (setf (gptel-agent-runtime-playbook-steps pb)
+              (gptel-agent-runtime-experiment-candidate-steps exp))
+        (setf (gptel-agent-runtime-playbook-updated-at pb)
+              (gptel-agent-runtime--timestamp))
+        (when (fboundp 'gptel-agent-runtime-save-playbooks)
+          (gptel-agent-runtime-save-playbooks)))
+      (setf (gptel-agent-runtime-experiment-status exp) 'promoted)
+      (setf (gptel-agent-runtime-experiment-decided-at exp)
+            (gptel-agent-runtime--timestamp))
+      (gptel-agent-runtime--save-experiment exp)
+      (gptel-agent-runtime-emit-event
+       'experiment-promoted
+       :source "experiment"
+       :payload (list :experiment experiment-id
+                      :playbook pid
+                      :decision decision)
+       :taint 'trusted)
+      (push (list :type 'promoted
+                  :experiment experiment-id
+                  :playbook pid
+                  :at (gptel-agent-runtime--timestamp))
+            gptel-agent-runtime--last-experiment-events)
+      (when (called-interactively-p 'interactive)
+        (message "Promoted candidate of experiment %s into playbook %s"
+                 experiment-id pid))
+      exp)))
+
+;;;###autoload
+(cl-defun gptel-agent-runtime-experiment-rollback (experiment-id
+                                                   &key decision)
+  "Mark EXPERIMENT-ID as rolled back; the original playbook keeps its slot."
+  (interactive
+   (list (completing-read
+          "Rollback experiment: "
+          (mapcar #'gptel-agent-runtime-experiment-id
+                  (cl-remove-if-not
+                   (lambda (e) (eq (gptel-agent-runtime-experiment-status e)
+                                   'running))
+                   gptel-agent-runtime--experiments))
+          nil t)))
+  (let* ((exp (gptel-agent-runtime-experiment-by-id experiment-id)))
+    (unless exp (user-error "No experiment with id %s" experiment-id))
+    (setf (gptel-agent-runtime-experiment-status exp) 'rolled-back)
+    (setf (gptel-agent-runtime-experiment-decided-at exp)
+          (gptel-agent-runtime--timestamp))
+    (gptel-agent-runtime--save-experiment exp)
+    (gptel-agent-runtime-emit-event
+     'experiment-rolled-back
+     :source "experiment"
+     :payload (list :experiment experiment-id
+                    :playbook (gptel-agent-runtime-experiment-playbook-id exp)
+                    :decision decision)
+     :taint 'trusted)
+    (push (list :type 'rolled-back
+                :experiment experiment-id
+                :playbook (gptel-agent-runtime-experiment-playbook-id exp)
+                :at (gptel-agent-runtime--timestamp))
+          gptel-agent-runtime--last-experiment-events)
+    (when (called-interactively-p 'interactive)
+      (message "Rolled back experiment %s" experiment-id))
+    exp))
+
+;;;###autoload
+(defun gptel-agent-runtime-experiment-status ()
+  "Open a buffer summarizing all known experiments."
+  (interactive)
+  (let ((buf (get-buffer-create "*gptel-agent-experiments*")))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert "gptel-agent-runtime experiments\n\n")
+        (if (null gptel-agent-runtime--experiments)
+            (insert "  (no experiments)\n")
+          (dolist (exp gptel-agent-runtime--experiments)
+            (let* ((decision (gptel-agent-runtime--experiment-decision exp))
+                   (orig-rate (and decision (plist-get decision :original-rate)))
+                   (cand-rate (and decision (plist-get decision :candidate-rate))))
+              (insert
+               (format "  [%s] %s playbook=%s   orig: %d/%d   cand: %d/%d%s\n"
+                       (gptel-agent-runtime-experiment-status exp)
+                       (gptel-agent-runtime-experiment-id exp)
+                       (gptel-agent-runtime-experiment-playbook-id exp)
+                       (or (gptel-agent-runtime-experiment-original-successes
+                            exp) 0)
+                       (+ (or (gptel-agent-runtime-experiment-original-successes
+                               exp) 0)
+                          (or (gptel-agent-runtime-experiment-original-failures
+                               exp) 0))
+                       (or (gptel-agent-runtime-experiment-candidate-successes
+                            exp) 0)
+                       (+ (or (gptel-agent-runtime-experiment-candidate-successes
+                               exp) 0)
+                          (or (gptel-agent-runtime-experiment-candidate-failures
+                               exp) 0))
+                       (if (and orig-rate cand-rate)
+                           (format "   rates: orig=%.0f%% cand=%.0f%%"
+                                   (* 100 orig-rate) (* 100 cand-rate))
+                         "")))))))
+      (goto-char (point-min))
+      (special-mode))
+    (display-buffer buf)))
+
+(defun gptel-agent-runtime--record-experiment-outcome-on-finalize (event)
+  "Subscriber on `session-finalized': for each running experiment whose
+playbook matched this session, record the arm + outcome."
+  (let* ((payload (gptel-agent-runtime-event-payload event))
+         (session-id (gptel-agent-runtime-event-session-id event))
+         (reason (plist-get payload :reason))
+         (outcome (and (fboundp 'gptel-agent-runtime--session-finalized-outcome)
+                       (gptel-agent-runtime--session-finalized-outcome
+                        reason))))
+    (when (and session-id outcome (memq outcome '(success failure)))
+      ;; Walk session-arm-assignments looking for entries with this session-id.
+      ;; (Snapshot the list because we mutate it inside the loop.)
+      (dolist (entry (cl-copy-list gptel-agent-runtime--session-arm-assignments))
+        (when (equal (caar entry) session-id)
+          (let ((playbook-id (cdar entry)))
+            (gptel-agent-runtime--experiment-record-outcome
+             playbook-id session-id outcome)))))))
+
+(gptel-agent-runtime-subscribe
+ 'session-finalized
+ #'gptel-agent-runtime--record-experiment-outcome-on-finalize)
+
+(provide 'gar-playbook-experiment)
+
+;;; gar-playbook-experiment.el ends here

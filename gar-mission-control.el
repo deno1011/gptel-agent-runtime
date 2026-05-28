@@ -96,6 +96,22 @@
 (defvar gptel-agent-runtime-refine-failure-threshold)
 (defvar gptel-agent-runtime--last-refinements)
 
+;; gar-playbook-experiment (loaded AFTER gar-mission-control; late-bound).
+(defvar gptel-agent-runtime--experiments)
+(defvar gptel-agent-runtime--last-experiment-events)
+(declare-function gptel-agent-runtime-experiment-status
+                  "gar-playbook-experiment" (exp))
+(declare-function gptel-agent-runtime-experiment-playbook-id
+                  "gar-playbook-experiment" (exp))
+(declare-function gptel-agent-runtime-experiment-original-successes
+                  "gar-playbook-experiment" (exp))
+(declare-function gptel-agent-runtime-experiment-original-failures
+                  "gar-playbook-experiment" (exp))
+(declare-function gptel-agent-runtime-experiment-candidate-successes
+                  "gar-playbook-experiment" (exp))
+(declare-function gptel-agent-runtime-experiment-candidate-failures
+                  "gar-playbook-experiment" (exp))
+
 ;; gar-memory (loaded after gar-mission-control; late-bound).
 (defvar gptel-agent-runtime-novelty-threshold)
 (defvar gptel-agent-runtime-novelty-min-tokens)
@@ -332,6 +348,37 @@ status, and the registered agent capability allowlist."
                 (cl-subseq gptel-agent-runtime--last-refinements
                            0 (min 5 (length gptel-agent-runtime--last-refinements)))
                 "\n"))))
+    (gptel-agent-runtime--mission-control-section
+     "Experiments (A/B)"
+     (let* ((exps (and (boundp 'gptel-agent-runtime--experiments)
+                       gptel-agent-runtime--experiments))
+            (running (cl-count-if (lambda (e)
+                                    (eq (gptel-agent-runtime-experiment-status e)
+                                        'running))
+                                  (or exps '()))))
+       (if (null exps)
+           "  (no experiments)"
+         (format "  Total: %d   Running: %d\n%s"
+                 (length exps) running
+                 (mapconcat
+                  (lambda (e)
+                    (format "    [%s] playbook=%s  orig=%d/%d  cand=%d/%d"
+                            (gptel-agent-runtime-experiment-status e)
+                            (gptel-agent-runtime-experiment-playbook-id e)
+                            (or (gptel-agent-runtime-experiment-original-successes
+                                 e) 0)
+                            (+ (or (gptel-agent-runtime-experiment-original-successes
+                                    e) 0)
+                               (or (gptel-agent-runtime-experiment-original-failures
+                                    e) 0))
+                            (or (gptel-agent-runtime-experiment-candidate-successes
+                                 e) 0)
+                            (+ (or (gptel-agent-runtime-experiment-candidate-successes
+                                    e) 0)
+                               (or (gptel-agent-runtime-experiment-candidate-failures
+                                    e) 0))))
+                  (cl-subseq exps 0 (min 5 (length exps)))
+                  "\n")))))
     (gptel-agent-runtime--mission-control-section
      "Agents / capability allowlists"
      (if (null gptel-agent-runtime-agent-registry)
