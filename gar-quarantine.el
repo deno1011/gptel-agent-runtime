@@ -90,6 +90,7 @@ been explicitly promoted via `gptel-agent-runtime-promote-evidence'."
   (cl-remove-if-not #'gptel-agent-runtime-evidence-quarantined-p
                     gptel-agent-runtime--evidence-trace))
 
+;;;###autoload
 (defun gptel-agent-runtime-promote-evidence (evidence-id)
   "Promote EVIDENCE-ID out of quarantine so its text may route tool calls.
 Emits a `policy-changed' event with the promoted ID. Interactively, prompts

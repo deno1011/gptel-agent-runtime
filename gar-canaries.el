@@ -45,6 +45,7 @@ model call."
 (defvar gptel-agent-runtime--last-canary-results nil
   "Most recent canary results: list of (NAME PASS-P REASON).")
 
+;;;###autoload
 (defun gptel-agent-runtime-run-injection-canaries (&optional verbose)
   "Run the prompt-injection canary suite against the untrusted wrappers.
 Returns a list of (NAME PASS-P REASON). When VERBOSE is non-nil (interactive),

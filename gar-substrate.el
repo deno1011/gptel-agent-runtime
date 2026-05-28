@@ -163,6 +163,7 @@ know about them.")
   "Return the live swarm activity buffer, creating it when needed."
   (get-buffer-create gptel-agent-runtime-swarm-buffer-name))
 
+;;;###autoload
 (defun gptel-agent-runtime-show-swarm ()
   "Display the live swarm activity buffer."
   (interactive)
@@ -423,6 +424,7 @@ buffer."
       (setcdr (nthcdr 99 gptel-agent-runtime--last-dispatched-events) nil))
     event))
 
+;;;###autoload
 (defun gptel-agent-runtime-show-event-pump ()
   "Open a buffer showing event-pump subscribers and recent dispatched events."
   (interactive)
@@ -478,6 +480,7 @@ buffer."
     (cancel-timer gptel-agent-runtime--idle-pump-timer)
     (setq gptel-agent-runtime--idle-pump-timer nil)))
 
+;;;###autoload
 (defun gptel-agent-runtime-toggle-idle-pump (&optional arg)
   "Toggle the OpenClaw substrate idle pump.
 With prefix ARG positive, force on; with non-positive ARG, force off."
@@ -547,6 +550,7 @@ from. When RECORD is non-nil (default t), the new evidence is pushed onto
             (or tick 0)
             (if agent (format " agent:%s" agent) ""))))
 
+;;;###autoload
 (defun gptel-agent-runtime-trace-evidence ()
   "Open a buffer showing the recent evidence DAG, newest first."
   (interactive)
@@ -598,6 +602,7 @@ detect legacy files written before schema versioning landed."
             (cons first (point))
           (cons nil (point-min)))))))
 
+;;;###autoload
 (defun gptel-agent-runtime-migrate-state ()
   "Inspect persisted runtime state files for schema compatibility.
 Currently a no-op for schema 1, but reports any files whose header version
@@ -662,6 +667,7 @@ through `gptel-agent-runtime--dispatch-event'."
     (gptel-agent-runtime--dispatch-event event)
     event))
 
+;;;###autoload
 (defun gptel-agent-runtime-list-events (&optional limit)
   "Return recent runtime events, newest first.
 LIMIT defaults to 50 when called interactively."

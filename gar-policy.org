@@ -334,6 +334,7 @@ Allowed values are `safe', `read', `write', `shell', and `destructive'."
   (plist-get (alist-get preset gptel-agent-runtime--policy-preset-settings)
              :description))
 
+;;;###autoload
 (defun gptel-agent-runtime-apply-policy-preset (preset &optional save)
   "Apply named policy PRESET.
 With SAVE, persist the preset and derived policy variables through Customize."

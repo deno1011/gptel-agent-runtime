@@ -395,6 +395,7 @@ payload."
                                  (gptel-agent-runtime-session-iteration
                                   session))))))))
 
+;;;###autoload
 (defun gptel-agent-runtime-show-playbook-history (&optional limit)
   "Open a buffer summarising the most recent playbook invocations.
 LIMIT defaults to 50."
@@ -483,6 +484,7 @@ Returns the absolute path written."
         (insert "\n")))
     file))
 
+;;;###autoload
 (defun gptel-agent-runtime-synthesize-candidate-playbook (&optional reason)
   "Produce one candidate playbook from the top-2 successful playbooks.
 This is deterministic (no model call): it picks the two highest-success-rate
@@ -552,6 +554,7 @@ there are not enough successful playbooks to synthesize from."
   (when (file-directory-p (gptel-agent-runtime--candidates-directory))
     (directory-files (gptel-agent-runtime--candidates-directory) t "\\.el\\'")))
 
+;;;###autoload
 (defun gptel-agent-runtime-review-playbook-candidates ()
   "Open a buffer listing pending candidate playbooks for human review."
   (interactive)

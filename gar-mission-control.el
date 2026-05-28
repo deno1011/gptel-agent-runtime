@@ -150,6 +150,7 @@
                 (concat "\n  failing: "
                         (mapconcat (lambda (r) (nth 0 r)) fails ", ")))))))
 
+;;;###autoload
 (defun gptel-agent-runtime-mission-control ()
   "Open the unified mission-control dashboard buffer.
 Shows the OpenClaw tick, idle-pump state, recent dispatched events, active
