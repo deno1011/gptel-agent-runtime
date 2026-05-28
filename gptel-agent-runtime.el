@@ -63,6 +63,7 @@ the master load sequence. New setups should customise
 (require 'gar-memory)      ; sessions, embedding cache, novelty, synthesis, hypothesis-test
 (require 'gar-trajectory)  ; per-goal trajectory storage (substrate for learning loop)
 (require 'gar-playbook-refine) ; auto-refine playbooks on consistent failure
+(require 'gar-playbook-experiment) ; A/B test refined playbooks against originals
 (require 'gar-tools)       ; tool registry, native gptel tools, tool-invention pipeline
 (require 'gar-backend)     ; Ollama runtime utilities + model-id normalization
 (require 'gar-directives)  ; emacs-local-assistant / planner / assistant directives
