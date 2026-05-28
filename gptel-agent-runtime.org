@@ -40,9 +40,9 @@ travels through this layered stack:
 
 The master =(require)='s modules in this order, which respects the
 dependency DAG: =gar-core= -> =gar-substrate= -> =gar-quarantine= ->
-=gar-skeptic= -> =gar-safety= -> =gar-canaries= -> =gar-memory= ->
-=gar-tools= -> =gar-backend= -> =gar-directives= -> =gar-context= ->
-=gar-executor= -> =gar-agents= -> =gar-loop=.
+=gar-skeptic= -> =gar-policy= -> =gar-safety= -> =gar-canaries= ->
+=gar-memory= -> =gar-tools= -> =gar-backend= -> =gar-directives= ->
+=gar-context= -> =gar-executor= -> =gar-agents= -> =gar-loop=.
 
 Modules forward-declare cross-module callees with =declare-function= and
 read defcustoms from =gar-core= via =defvar= forward declarations so
@@ -100,8 +100,9 @@ normal init path.")
 (require 'gar-substrate)   ; tick, event pump, evidence, versioned state
 (require 'gar-quarantine)  ; per-source quarantine + promote + pre-flight conflict check
 (require 'gar-skeptic)     ; Advocatus Diaboli skeptic (rule-based + model-based)
-(require 'gar-safety)      ; policy broker, caps, mission-control
-(require 'gar-canaries)    ; prompt-injection canary suite (wraps gar-safety's untrusted-context)
+(require 'gar-policy)      ; policy broker, capability gate, presets, context wrappers
+(require 'gar-safety)      ; mission-control unified dashboard
+(require 'gar-canaries)    ; prompt-injection canary suite (wraps gar-policy's untrusted-context)
 (require 'gar-memory)      ; sessions, embedding cache, novelty, synthesis, hypothesis-test
 (require 'gar-tools)       ; tool registry, native gptel tools, tool-invention pipeline
 (require 'gar-backend)     ; Ollama runtime utilities + model-id normalization
