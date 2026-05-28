@@ -704,6 +704,49 @@ from `gptel-agent-runtime-backends'."
   started-at
   updated-at)
 
+(cl-defstruct (gptel-agent-runtime-trajectory-step
+               (:constructor gptel-agent-runtime-trajectory-step-create))
+  "Frozen snapshot of one plan-step at session-finalize time.
+Part of a `gptel-agent-runtime-trajectory'. Stores enough state to
+reconstruct what happened on this step without keeping the live
+plan-step struct (which may be garbage-collected once the session is
+finalized)."
+  step-id
+  title
+  rationale
+  suggested-tool
+  args
+  risk
+  attempts
+  status
+  result-status        ; symbol: ok | error | nil
+  result-output        ; shortened output string (max 4000 chars)
+  result-error
+  observations
+  reflections)
+
+(cl-defstruct (gptel-agent-runtime-trajectory
+               (:constructor gptel-agent-runtime-trajectory-create))
+  "Complete observable record of one goal attempt.
+Built at session-finalize time by snapshotting the session's plan-steps
+plus out-of-band signals filtered to the session's lifetime: verifier
+verdicts, matched playbook ids, decisions. This is the substrate the
+learning loop (auto-refine playbooks, case-based retrieval) reads from."
+  id                   ; uuid; derived from session-id + finalize timestamp
+  goal                 ; goal text
+  session-id           ; original session id
+  started-at           ; ISO timestamp
+  finalized-at         ; ISO timestamp
+  outcome              ; success | failure | abandoned
+  reason               ; finalize REASON symbol (done/failed/max-iterations/...)
+  iteration-count
+  steps                ; list of trajectory-step, oldest first
+  verifier-verdicts    ; list of verdict plists captured during the session window
+  playbook-ids         ; list of strings — playbooks that matched at routing
+  reflections          ; list of strings (collected from each step + the session)
+  decisions            ; copy of session-decisions textual log
+  metadata)            ; extension plist
+
 (cl-defstruct (gptel-agent-runtime-worker
                (:constructor gptel-agent-runtime-worker-create))
   "State for one delegated specialist worker."

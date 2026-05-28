@@ -928,6 +928,8 @@ Be specific. Cite exact arguments, paths, patterns, or capability mismatches whe
 (gptel-agent-runtime-load-embedding-cache)
 (when (fboundp 'gptel-agent-runtime-load-playbook-invocations)
   (gptel-agent-runtime-load-playbook-invocations))
+(when (fboundp 'gptel-agent-runtime-load-trajectories)
+  (gptel-agent-runtime-load-trajectories))
 
 (defun gptel-agent-runtime--model-router-count-matches (patterns text)
   "Return number of PATTERNS matching TEXT."

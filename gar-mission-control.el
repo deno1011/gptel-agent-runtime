@@ -81,6 +81,15 @@
 (defvar gptel-agent-runtime-verifier-trigger-risks)
 (defvar gptel-agent-runtime--last-verifier-verdicts)
 
+;; gar-trajectory (loaded AFTER gar-mission-control; late-bound).
+(defvar gptel-agent-runtime--trajectories)
+(declare-function gptel-agent-runtime-trajectory-outcome
+                  "gar-trajectory" (traj))
+(declare-function gptel-agent-runtime-trajectory-finalized-at
+                  "gar-trajectory" (traj))
+(declare-function gptel-agent-runtime-trajectory-goal
+                  "gar-trajectory" (traj))
+
 ;; gar-memory (loaded after gar-mission-control; late-bound).
 (defvar gptel-agent-runtime-novelty-threshold)
 (defvar gptel-agent-runtime-novelty-min-tokens)
@@ -275,6 +284,29 @@ status, and the registered agent capability allowlist."
                                   (gptel-agent-runtime-playbook-summary pb))
                               (if rate (format "%.0f%%" (* 100 rate)) "unused"))))
                   top "\n")))))
+    (gptel-agent-runtime--mission-control-section
+     "Trajectories"
+     (let* ((traj gptel-agent-runtime--trajectories)
+            (n (length traj))
+            (outcomes (let (acc)
+                        (dolist (t (cl-subseq traj 0 (min n 20)))
+                          (let ((o (gptel-agent-runtime-trajectory-outcome t)))
+                            (setf (alist-get o acc 0) (1+ (alist-get o acc 0)))))
+                        acc)))
+       (if (zerop n)
+           "  (no trajectories recorded yet)"
+         (format "  In-memory: %d   Recent outcomes: %s\n  Recent goals:\n%s"
+                 n
+                 (or outcomes "—")
+                 (mapconcat
+                  (lambda (t)
+                    (format "    [%s] %s -- %s"
+                            (or (gptel-agent-runtime-trajectory-outcome t) "?")
+                            (or (gptel-agent-runtime-trajectory-finalized-at t) "?")
+                            (gptel-agent-runtime--shorten
+                             (or (gptel-agent-runtime-trajectory-goal t) "") 60)))
+                  (cl-subseq traj 0 (min n 5))
+                  "\n")))))
     (gptel-agent-runtime--mission-control-section
      "Agents / capability allowlists"
      (if (null gptel-agent-runtime-agent-registry)
