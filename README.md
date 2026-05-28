@@ -183,11 +183,14 @@ when available) before running. Run the whole suite in batch:
 emacs -Q --batch -l test/run-tests.el
 ```
 
-Coverage today: the post-sub-split safety surfaces that earlier PRs
-validated by ad-hoc smoke tests — `gar-canaries`, `gar-quarantine`,
-`gar-skeptic`, `gar-policy`, and `gar-mission-control` (including the
-tool-policy editor). Other modules (substrate, memory, loop) can be
-covered in follow-ups.
+Coverage today: every submodule with non-trivial behavior — substrate
+(tick / event-pump / evidence trace), policy + capability gate +
+context wrappers, the Advocatus Diaboli skeptic, per-source quarantine,
+the injection canary suite, memory (novelty / playbook ranking /
+invocation log), tools (registry / safe-form walker for the invention
+pipeline), the autonomous loop's pure helpers (planner / plan-review /
+brainstorm prompt builders + alternative parser), and the
+mission-control dashboard + tool-policy editor.
 
 ## Dependency graph regenerator
 
