@@ -65,6 +65,7 @@ the master load sequence. New setups should customise
 (require 'gar-playbook-refine) ; auto-refine playbooks on consistent failure
 (require 'gar-playbook-experiment) ; A/B test refined playbooks against originals
 (require 'gar-memory-sqlite) ; SQLite/FTS5 + vector trajectory retrieval (optional)
+(require 'gar-skills-md)   ; markdown skill format + load + emit refinement candidates as md
 (require 'gar-tools)       ; tool registry, native gptel tools, tool-invention pipeline
 (require 'gar-backend)     ; Ollama runtime utilities + model-id normalization
 (require 'gar-directives)  ; emacs-local-assistant / planner / assistant directives

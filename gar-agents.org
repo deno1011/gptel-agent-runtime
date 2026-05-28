@@ -1012,6 +1012,8 @@ Be specific. Cite exact arguments, paths, patterns, or capability mismatches whe
   (gptel-agent-runtime-load-trajectories))
 (when (fboundp 'gptel-agent-runtime-load-experiments)
   (gptel-agent-runtime-load-experiments))
+(when (fboundp 'gptel-agent-runtime-load-skills-from-directory)
+  (gptel-agent-runtime-load-skills-from-directory))
 #+end_src
 
 * Model router
