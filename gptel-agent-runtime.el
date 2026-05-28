@@ -55,6 +55,7 @@ the master load sequence. New setups should customise
 (require 'gar-quarantine)  ; per-source quarantine + promote + pre-flight conflict check
 (require 'gar-skeptic)     ; Advocatus Diaboli core (rule-based + dispatcher)
 (require 'gar-skeptic-model) ; model-based skeptic verdict path
+(require 'gar-verifier)    ; post-execution verifier + auto-retry signal
 (require 'gar-validator)   ; JSON-Schema-inspired tool-arg validator
 (require 'gar-policy)      ; policy broker, capability gate, presets, context wrappers
 (require 'gar-mission-control) ; unified runtime dashboard

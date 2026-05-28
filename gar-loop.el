@@ -65,6 +65,12 @@
                   (step &optional context))
 (declare-function gptel-agent-runtime-skeptic-evaluate "gar-safety"
                   (step decision))
+(declare-function gptel-agent-runtime-verify-action-result "gar-verifier"
+                  (step result &optional task))
+(declare-function gptel-agent-runtime--verifier-should-retry-p
+                  "gar-verifier" (step verdict))
+(declare-function gptel-agent-runtime--verifier-prepare-retry
+                  "gar-verifier" (step verdict))
 (declare-function gptel-agent-runtime-route-task "gar-agents" (text))
 (declare-function gptel-agent-runtime-find-agent "gar-agents" (name))
 (declare-function gptel-agent-runtime-match-playbooks "gar-agents" (text))
@@ -2130,7 +2136,34 @@ CONTEXT is passed to the policy broker."
           (message "Worker finished; waiting for remaining parallel workers."))
       (when worker-p
         (gptel-agent-runtime--complete-parallel-worker-batch session))
-      (gptel-agent-runtime--reflect step result session))))
+      ;; gar-verifier hook: run the post-execution verifier on the
+      ;; just-completed step. When the verdict says `:passed nil' and
+      ;; retries remain, requeue the step with the suggested correction
+      ;; appended to its rationale and short-circuit --reflect for this
+      ;; iteration -- the next --continue will pick up the requeued step
+      ;; and re-attempt with the verifier's diagnosis as context.
+      (let* ((task (gptel-agent-runtime-session-current-task session))
+             (verdict (gptel-agent-runtime-verify-action-result
+                       step result task)))
+        (cond
+         ((gptel-agent-runtime--verifier-should-retry-p step verdict)
+          (gptel-agent-runtime--verifier-prepare-retry step verdict)
+          (message "Agent [%s] verifier rejected step '%s'; retrying with correction."
+                   (gptel-agent-runtime-session-id session)
+                   (gptel-agent-runtime-plan-step-title step))
+          (gptel-agent-runtime--continue session))
+         (t
+          (when (and verdict (not (plist-get verdict :passed)))
+            (gptel-agent-runtime-emit-event
+             'verifier-gave-up
+             :source "verifier"
+             :session-id (gptel-agent-runtime-session-id session)
+             :payload (list :step (gptel-agent-runtime-plan-step-title step)
+                            :reason (plist-get verdict :reason)
+                            :attempts (gptel-agent-runtime-plan-step-attempts
+                                       step))
+             :taint 'trusted))
+          (gptel-agent-runtime--reflect step result session)))))))
 
 (defun gptel-agent-runtime--reflection-system ()
   "Return the strict system prompt for reflection JSON."
