@@ -462,7 +462,7 @@ remember -> continue."
       (let* ((agent (gptel-agent-runtime-find-agent agent-name))
              (directive (gptel-agent-runtime-agent-directive-symbol agent))
              (system (or (alist-get directive gptel-directives)
-                         (alist-get (my/gptel-directive-for-current-runtime)
+                         (alist-get (gptel-agent-runtime-directive-for-current-runtime)
                                     gptel-directives)
                          (gptel-agent-runtime--delphi-system)))
              (prompt (format
@@ -1532,7 +1532,7 @@ The preferred format is JSON with a top-level :steps list. A single
                  (gptel-agent-runtime-worker-agent worker)))
          (directive (gptel-agent-runtime-agent-directive-symbol agent))
          (system (or (alist-get directive gptel-directives)
-                     (alist-get (my/gptel-directive-for-current-runtime)
+                     (alist-get (gptel-agent-runtime-directive-for-current-runtime)
                                 gptel-directives)
                      "You are an Emacs assistant.")))
     (setf (gptel-agent-runtime-worker-handle worker)
@@ -1782,7 +1782,7 @@ CONTEXT is passed to the policy broker."
                  (or (gptel-agent-runtime-plan-step-agent step) "assistant")))
          (directive (gptel-agent-runtime-agent-directive-symbol agent))
          (base-system (or (alist-get directive gptel-directives)
-                          (alist-get (my/gptel-directive-for-current-runtime)
+                          (alist-get (gptel-agent-runtime-directive-for-current-runtime)
                                      gptel-directives)
                           "You are an Emacs assistant."))
          (skill-text (gptel-agent-runtime-format-skill-instructions

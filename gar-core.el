@@ -849,7 +849,7 @@ gptel--known-tools is a two-level alist: (category . ((name . struct) ...))."
          (entry   (assoc choice my/gptel-backends))
          (backend (cadr entry))
          (model   (my/gptel-model-id (cddr entry)))
-         (directive (my/gptel-directive-for-choice choice))
+         (directive (gptel-agent-runtime-directive-for-choice choice))
          (system-message (alist-get directive gptel-directives)))
     ;; Set globally (applies to new gptel sessions)
     (setq gptel-backend backend
@@ -879,7 +879,7 @@ gptel--known-tools is a two-level alist: (category . ((name . struct) ...))."
   (interactive)
   (message "gptel model=%s directive=%s use-tools=%s tools=%s web-tools=%s backend=%s"
            (if (boundp 'gptel-model) gptel-model "<unset>")
-           (or (my/gptel-current-directive-name) "<custom/unknown>")
+           (or (gptel-agent-runtime-current-directive-name) "<custom/unknown>")
            (if (boundp 'gptel-use-tools) gptel-use-tools "<unset>")
            (if (boundp 'gptel-tools) (length gptel-tools) 0)
            (if (boundp 'gptel-tools)
@@ -895,7 +895,7 @@ gptel--known-tools is a two-level alist: (category . ((name . struct) ...))."
 (defun my/gptel-sync-and-status ()
   "Synchronize the directive for the active runtime and display status."
   (interactive)
-  (let ((directive (my/gptel-sync-directive-for-current-runtime)))
+  (let ((directive (gptel-agent-runtime-sync-directive-for-current-runtime)))
     (my/gptel-sync-tools)
     (message "gptel model=%s synced-directive=%s use-tools=%s tools=%s web-tools=%s backend=%s"
              (if (boundp 'gptel-model) gptel-model "<unset>")
