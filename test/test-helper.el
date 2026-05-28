@@ -7,6 +7,13 @@
 
 ;;; Code:
 
+;; Always prefer .el over a stale .elc. Without this, a byte-compiled
+;; master from an earlier commit can mask freshly-extracted modules and
+;; cause spurious `void-function' failures in batch tests. The compiler
+;; only emits a warning, not an error, so the bad load slips through
+;; silently otherwise. Set this BEFORE the (require) below.
+(setq load-prefer-newer t)
+
 (defvar gar-test-package-root
   (or (and load-file-name
            (file-name-directory
