@@ -133,12 +133,24 @@ and pulls the standard models on a fresh install.
    emacs -Q --batch -l scripts/refresh-backlinks.el -f gar-refresh-backlinks-and-exit
    ```
 
-4. **Validate:**
+4. **Refresh the dependency graph** when load order or hard `(require)`
+   edges change:
+
+   ```sh
+   emacs -Q --batch -l scripts/refresh-dep-graph.el -f gar-refresh-dep-graph-and-exit
+   ```
+
+   Writes `docs/dependency-graph.dot` and renders it via `graphviz` to
+   `docs/dependency-graph.svg`. Requires `dot` on `PATH`
+   (`brew install graphviz` on macOS); the DOT file is produced even
+   when `dot` is missing so a manual render still works.
+
+5. **Validate:**
    - `check-parens` on each affected `.el`.
    - Batch load: `emacs -Q --batch -L /path/to/gptel -L . -l gptel-agent-runtime.el` should print only `Response Executor activated`.
    - End-to-end load with the host setup if any cross-module change.
-5. **`git diff --check`** for whitespace.
-6. **Commit, push `main`, cherry-pick to `stable`, push `stable`**, and
+6. **`git diff --check`** for whitespace.
+7. **Commit, push `main`, cherry-pick to `stable`, push `stable`**, and
    fast-forward the installed clone at
    `~/.emacs.d/elpa/gptel-agent-runtime`.
 
@@ -160,6 +172,16 @@ and pulls the standard models on a fresh install.
 `(require 'gar-...)` forms (soft `(require ... nil t)` forms are ignored) and
 rewrites each `gar-NAME.org`'s `Required by:` section to reflect the current
 edges. Run it after any change that adds or removes a `(require 'gar-…)` form.
+
+## Dependency graph regenerator
+
+`scripts/refresh-dep-graph.el` scans the same hard `(require 'gar-...)` forms
+across the master and every submodule, emits `docs/dependency-graph.dot`,
+and shells out to `graphviz` `dot` to render `docs/dependency-graph.svg`.
+Nodes are laid out in actual master-require order rather than alphabetical
+so the picture reads left-to-right in load order. Re-run after any change
+that adds or removes a hard `(require 'gar-…)` form, or that reorders the
+master's require sequence.
 
 ## Pre-MELPA cleanup
 
