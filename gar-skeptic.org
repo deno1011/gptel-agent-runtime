@@ -1,42 +1,49 @@
-#+TITLE: gar-skeptic: Advocatus Diaboli skeptic (rule-based + model-based)
+#+TITLE: gar-skeptic: Advocatus Diaboli skeptic core (rule-based + dispatcher)
 #+PROPERTY: header-args:emacs-lisp :tangle gar-skeptic.el :lexical t
 
 Module of [[file:gptel-agent-runtime.org][gptel-agent-runtime]]. Implements the Advocatus Diaboli skeptic
 gate that pre-reviews risky tool calls before the policy broker
 finalizes its decision.
 
-Two operating modes:
+This module owns the always-loaded surface:
 
-- /rule-based/ (default): deterministic capability/risk/argument
-  heuristics with no model call. Flags shell, elisp-eval, code-exec,
-  recursive-rm, curl|sh, sudo, root/home paths, non-https URLs, etc.
-- /model-based/: synchronously calls the registered =skeptic= agent
-  via =gptel-request= with =gptel-agent-runtime-skeptic-budget-ms= as
-  the deadline. Pins to =gptel-agent-runtime-skeptic-model= when set
-  (recommended: a fast local instruct model). Returns a JSON verdict
-  with the same shape as the rule-based variant. Falls back to
-  rule-based on timeout, abort, error, or unparseable output.
+- defcustoms (=skeptic-enabled=, =skeptic-mode=, =skeptic-budget-ms=,
+  =skeptic-model=, =skeptic-trigger-risks=, =skeptic-trigger-caps=)
+- =--last-skeptic-verdicts= defvar (read by mission-control)
+- =--skeptic-applies-p= predicate (does the skeptic fire for this
+  risk/caps combination?)
+- =--skeptic-rule-based-verdict= (the deterministic engine — no model
+  call; flags shell, elisp-eval, code-exec, recursive-rm, curl|sh,
+  sudo, root/home paths, non-https URLs, etc.)
+- =skeptic-evaluate= (dispatcher that picks rule-based or model-based
+  per =gptel-agent-runtime-skeptic-mode= and emits a =skeptic-verdict=
+  event)
+- =--apply-skeptic-to-decision= (=high= verdicts force confirmation;
+  =medium= attaches verdict as decision metadata)
 
-The integration point with the policy broker is
-=--apply-skeptic-to-decision=: =high= verdicts force confirmation;
-=medium= verdicts are attached as decision metadata.
+The model-based path lives in [[file:gar-skeptic-model.org][gar-skeptic-model]] (split out of this
+module on 2026-05-28 so the always-loaded rule-based surface stays
+lean). The dispatcher calls into it via =fboundp= guard, so a
+deployment that wants pure rule-based behavior can drop the model
+module from the require sequence and still work.
 
 Split out of =gar-safety= on 2026-05-27.
 
 See also:
 - [[file:gptel-agent-runtime.org][gptel-agent-runtime]] (master entrypoint that requires this module)
 - [[file:gar-substrate.org][gar-substrate]] (provides =emit-event= and =--timestamp=)
-- [[file:gar-safety.org][gar-safety]] (=policy-evaluate-step= calls =skeptic-evaluate= here)
-- [[file:gar-agents.org][gar-agents]] (=find-agent "skeptic"= supplies the system prompt at
-  call time; falls back to the constant baked into this module)
+- [[file:gar-policy.org][gar-policy]] (=policy-evaluate-step= calls =skeptic-evaluate= here)
+- [[file:gar-skeptic-model.org][gar-skeptic-model]] (model-based verdict path; loaded after this module)
 
 * File header
 
 #+begin_src emacs-lisp
-;;; gar-skeptic.el --- Advocatus Diaboli skeptic gate -*- lexical-binding: t; -*-
+;;; gar-skeptic.el --- Advocatus Diaboli skeptic core (rule-based + dispatcher) -*- lexical-binding: t; -*-
 
-;; Part of deno1011/gptel-agent-runtime. Extracted from gar-safety.org
-;; on 2026-05-27 as PR 3 of the gar-safety sub-split.
+;; Part of deno1011/gptel-agent-runtime. Originally extracted from gar-safety
+;; on 2026-05-27 as PR 3 of the gar-safety sub-split; the model-based path
+;; was split into gar-skeptic-model on 2026-05-28 to keep the always-loaded
+;; rule-based surface lean.
 
 ;;; Commentary:
 
@@ -51,14 +58,14 @@ See also:
 ;; The verdict is attached as decision metadata. `high' verdicts force
 ;; confirmation regardless of the policy preset.
 ;;
-;; Loaded BEFORE gar-safety so the policy broker calls into this module
-;; directly. Calls into gar-safety's `caps-for-tool' via late binding
-;; (defun bodies resolve at call time, after every module has loaded).
+;; The model-based path lives in gar-skeptic-model. The dispatcher uses
+;; `fboundp' to call into it, so a deployment that only wants rule-based
+;; behavior can drop the model module from the require sequence and the
+;; dispatcher will gracefully treat `model-based' as `rule-based'.
 
 ;;; Code:
 
 (require 'cl-lib)
-(require 'json)
 (require 'subr-x)
 
 (declare-function gptel-agent-runtime-emit-event "gptel-agent-runtime"
@@ -81,14 +88,12 @@ See also:
                   "gptel-agent-runtime" (decision))
 (declare-function gptel-agent-runtime-caps-for-tool
                   "gar-policy" (tool &optional risk))
-(declare-function gptel-agent-runtime-find-agent "gar-agents" (name))
-(declare-function gptel-agent-runtime-agent-system-prompt
-                  "gptel-agent-runtime" (agent))
-(declare-function gptel-request "gptel" (&optional prompt &rest keys))
-(declare-function gptel-abort "gptel" (&optional buf))
-(defvar gptel-model)
-(defvar gptel-use-tools)
-(defvar gptel-stream)
+;; gar-skeptic-model loads AFTER this module; the dispatcher resolves the
+;; symbol via late binding (fboundp guard) so this module is loadable
+;; standalone in rule-based-only deployments.
+(declare-function gptel-agent-runtime--skeptic-model-based-verdict
+                  "gar-skeptic-model"
+                  (tool args risk required-caps agent))
 
 #+end_src
 
@@ -226,181 +231,6 @@ invoking agent name."
 
 #+end_src
 
-* Model-based verdict: prompt building, JSON extraction, parsing
-
-#+begin_src emacs-lisp
-(defconst gptel-agent-runtime--skeptic-fallback-system-prompt
-  "You are the runtime skeptic. Be adversarial.
-
-Inspect the proposed tool call (tool name, arguments, agent, risk class, required capabilities). Return a single JSON object EXACTLY in this shape:
-
-{
-  \"risk\": \"high\" | \"medium\" | \"low\",
-  \"concerns\": [\"concern 1\", \"concern 2\"],
-  \"recommended_mitigations\": [\"mitigation 1\"]
-}
-
-Be specific. Cite exact arguments, paths, patterns, or capability mismatches when you flag a concern. Never approve a destructive or shell tool with `risk` lower than `medium` unless the arguments are obviously safe and explicit (no wildcards, no `/`, no piping, no `eval`).
-
-Return ONLY the JSON object. No prose before or after."
-  "Fallback skeptic system prompt used when no registered `skeptic' agent is found.
-The real system prompt is read from the agent registry at call time via
-`gptel-agent-runtime-find-agent' (defined in gar-agents); this constant
-is the safety net for tests or partial loads.")
-
-(defun gptel-agent-runtime--skeptic-system-prompt ()
-  "Return the system prompt used for the model-based skeptic call.
-Tries the registered `skeptic' agent's system-prompt first, falls back to
-the constant baked into this module."
-  (or (and (fboundp 'gptel-agent-runtime-find-agent)
-           (fboundp 'gptel-agent-runtime-agent-system-prompt)
-           (let ((sk (gptel-agent-runtime-find-agent "skeptic")))
-             (and sk (gptel-agent-runtime-agent-system-prompt sk))))
-      gptel-agent-runtime--skeptic-fallback-system-prompt))
-
-(defun gptel-agent-runtime--skeptic-build-prompt
-    (tool args risk required-caps agent)
-  "Format the user-facing skeptic prompt for one proposed tool call."
-  (format
-   (concat
-    "Proposed tool call:\n"
-    "  tool: %s\n"
-    "  agent: %s\n"
-    "  risk class: %s\n"
-    "  required capabilities: %s\n"
-    "  arguments: %S\n\n"
-    "Return the JSON verdict now.")
-   (or tool "?")
-   (or agent "?")
-   (or risk 'safe)
-   (or required-caps '())
-   (or args '())))
-
-(defun gptel-agent-runtime--skeptic-extract-json-object (text)
-  "Return the first balanced JSON object embedded in TEXT, or nil."
-  (when (stringp text)
-    (let ((start (string-match "{" text)))
-      (when start
-        (let ((depth 0) (in-string nil) (escape nil)
-              (i start) (end nil) (len (length text)))
-          (while (and (< i len) (not end))
-            (let ((c (aref text i)))
-              (cond
-               (escape (setq escape nil))
-               (in-string
-                (cond ((eq c ?\\) (setq escape t))
-                      ((eq c ?\") (setq in-string nil))))
-               ((eq c ?\")
-                (setq in-string t))
-               ((eq c ?{) (setq depth (1+ depth)))
-               ((eq c ?}) (setq depth (1- depth))
-                (when (zerop depth) (setq end (1+ i))))))
-            (setq i (1+ i)))
-          (when end (substring text start end)))))))
-
-(defun gptel-agent-runtime--skeptic-parse-verdict (text tool agent)
-  "Parse a JSON skeptic verdict from TEXT into the verdict plist shape.
-Returns nil when the text cannot be parsed into a valid verdict."
-  (condition-case nil
-      (let* ((json-fragment (gptel-agent-runtime--skeptic-extract-json-object
-                             text))
-             (parsed (and json-fragment
-                          (let ((json-object-type 'plist)
-                                (json-array-type 'list)
-                                (json-key-type 'keyword)
-                                (json-false :json-false))
-                            (with-temp-buffer
-                              (insert json-fragment)
-                              (goto-char (point-min))
-                              (json-read)))))
-             (risk-raw (and parsed
-                            (or (plist-get parsed :risk)
-                                (plist-get parsed :Risk))))
-             (risk-sym (cond ((null risk-raw) 'low)
-                             ((symbolp risk-raw) risk-raw)
-                             ((stringp risk-raw)
-                              (intern (downcase risk-raw)))
-                             (t 'low)))
-             (concerns (and parsed
-                            (or (plist-get parsed :concerns)
-                                (plist-get parsed :Concerns)
-                                '())))
-             (mitigations (and parsed
-                               (or (plist-get parsed :recommended_mitigations)
-                                   (plist-get parsed :recommended-mitigations)
-                                   (plist-get parsed :mitigations)
-                                   '()))))
-        (when parsed
-          (list :risk (if (memq risk-sym '(high medium low)) risk-sym 'low)
-                :concerns (mapcar (lambda (s) (format "%s" s)) concerns)
-                :recommended-mitigations
-                (mapcar (lambda (s) (format "%s" s)) mitigations)
-                :tool tool
-                :agent agent
-                :mode 'model-based)))
-    (error nil)))
-
-(defun gptel-agent-runtime--skeptic-model-based-verdict
-    (tool args risk required-caps agent)
-  "Synchronously ask a model for a skeptic verdict on this proposed tool call.
-Returns the verdict plist on success; falls back to the rule-based verdict
-on timeout, abort, error, or unparseable model output.
-
-Uses `gptel-request' with `:buffer' set to a hidden temp buffer so the
-request can be cancelled via `gptel-abort' on timeout. Waits via
-`accept-process-output' so Emacs stays responsive."
-  (unless (and (fboundp 'gptel-request) (boundp 'gptel-model))
-    (cl-return-from gptel-agent-runtime--skeptic-model-based-verdict
-      (gptel-agent-runtime--skeptic-rule-based-verdict
-       tool args risk required-caps agent)))
-  (let* ((fallback (gptel-agent-runtime--skeptic-rule-based-verdict
-                    tool args risk required-caps agent))
-         (budget-secs (max 0.5 (/ (or gptel-agent-runtime-skeptic-budget-ms
-                                      3000)
-                                  1000.0)))
-         (system (gptel-agent-runtime--skeptic-system-prompt))
-         (prompt (gptel-agent-runtime--skeptic-build-prompt
-                  tool args risk required-caps agent))
-         (req-buf (generate-new-buffer " *gar-skeptic-request*"))
-         (result nil) (done nil)
-         ;; Pin the skeptic to its own model if configured; otherwise use
-         ;; whichever model is currently active.
-         (gptel-model (or gptel-agent-runtime-skeptic-model
-                          (and (boundp 'gptel-model) gptel-model)))
-         ;; Force no-tools and no streaming so the callback fires once
-         ;; with the full text. Skeptic does not need tool calling.
-         (gptel-use-tools nil)
-         (gptel-stream nil))
-    (unwind-protect
-        (condition-case _err
-            (progn
-              (with-current-buffer req-buf
-                (gptel-request prompt
-                  :buffer req-buf
-                  :stream nil
-                  :system system
-                  :callback (lambda (response _info)
-                              (setq result response done t))))
-              (let ((deadline (+ (float-time) budget-secs)))
-                (while (and (not done) (< (float-time) deadline))
-                  (accept-process-output nil 0.05))
-                (unless done
-                  (ignore-errors (gptel-abort req-buf))
-                  (setq result :timeout))))
-          (error (setq result :error)))
-      (when (buffer-live-p req-buf)
-        (kill-buffer req-buf)))
-    (cond
-     ((eq result :timeout) fallback)
-     ((eq result :error) fallback)
-     ((eq result 'abort) fallback)
-     ((stringp result)
-      (or (gptel-agent-runtime--skeptic-parse-verdict result tool agent)
-          fallback))
-     (t fallback))))
-
-#+end_src
-
 * Dispatcher and policy-decision integration
 
 #+begin_src emacs-lisp
@@ -426,8 +256,14 @@ Returns nil when the skeptic is disabled or does not apply to STEP."
                   (gptel-agent-runtime--skeptic-rule-based-verdict
                    tool args risk required-caps agent))
                  ('model-based
-                  (gptel-agent-runtime--skeptic-model-based-verdict
-                   tool args risk required-caps agent))
+                  ;; gar-skeptic-model owns this function. fboundp lets a
+                  ;; rule-based-only deployment drop the model module and
+                  ;; still get a sensible (rule-based) verdict.
+                  (if (fboundp 'gptel-agent-runtime--skeptic-model-based-verdict)
+                      (gptel-agent-runtime--skeptic-model-based-verdict
+                       tool args risk required-caps agent)
+                    (gptel-agent-runtime--skeptic-rule-based-verdict
+                     tool args risk required-caps agent)))
                  (_ (gptel-agent-runtime--skeptic-rule-based-verdict
                      tool args risk required-caps agent)))))
           (push (cons (gptel-agent-runtime--timestamp) verdict)
