@@ -80,7 +80,7 @@ See also:
 (declare-function gptel-agent-runtime-policy-decision-confirmation-required-p
                   "gptel-agent-runtime" (decision))
 (declare-function gptel-agent-runtime-caps-for-tool
-                  "gar-safety" (tool &optional risk))
+                  "gar-policy" (tool &optional risk))
 (declare-function gptel-agent-runtime-find-agent "gar-agents" (name))
 (declare-function gptel-agent-runtime-agent-system-prompt
                   "gptel-agent-runtime" (agent))

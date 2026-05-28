@@ -1143,6 +1143,5 @@ Emacs and safe to evolve while the data model is still changing."
 <!-- gar:auto-backlinks:start -->
 * Required by
 
-This module is required by:
-- [[file:gar-safety.org][gar-safety]]
+  (no other modules require this one yet)
 <!-- gar:auto-backlinks:end -->

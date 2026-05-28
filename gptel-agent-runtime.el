@@ -36,8 +36,9 @@ normal init path.")
 (require 'gar-substrate)   ; tick, event pump, evidence, versioned state
 (require 'gar-quarantine)  ; per-source quarantine + promote + pre-flight conflict check
 (require 'gar-skeptic)     ; Advocatus Diaboli skeptic (rule-based + model-based)
-(require 'gar-safety)      ; policy broker, caps, mission-control
-(require 'gar-canaries)    ; prompt-injection canary suite (wraps gar-safety's untrusted-context)
+(require 'gar-policy)      ; policy broker, capability gate, presets, context wrappers
+(require 'gar-safety)      ; mission-control unified dashboard
+(require 'gar-canaries)    ; prompt-injection canary suite (wraps gar-policy's untrusted-context)
 (require 'gar-memory)      ; sessions, embedding cache, novelty, synthesis, hypothesis-test
 (require 'gar-tools)       ; tool registry, native gptel tools, tool-invention pipeline
 (require 'gar-backend)     ; Ollama runtime utilities + model-id normalization
