@@ -19,8 +19,10 @@ travels through this layered stack:
    event through the pump.
 2. =gar-agents= classifies the request (chat router score, model router
    profile, organization unit, agent role, matching skills/playbooks).
-3. =gar-safety= evaluates the resulting plan steps -- capability gate,
-   policy alist, quarantine pre-flight, Advocatus Diaboli skeptic.
+3. =gar-policy= evaluates the resulting plan steps -- capability gate,
+   policy alist, quarantine pre-flight (=gar-quarantine=), and the
+   Advocatus Diaboli skeptic (=gar-skeptic=) -- and emits a
+   =policy-decision= event observed by =gar-mission-control=.
 4. =gar-loop= dispatches each allowed step to a worker, observes the
    result, reflects, and either continues or finalizes.
 5. =gar-tools= runs the native gptel tools each step delegates to.
@@ -40,8 +42,8 @@ travels through this layered stack:
 
 The master =(require)='s modules in this order, which respects the
 dependency DAG: =gar-core= -> =gar-substrate= -> =gar-quarantine= ->
-=gar-skeptic= -> =gar-policy= -> =gar-safety= -> =gar-canaries= ->
-=gar-memory= -> =gar-tools= -> =gar-backend= -> =gar-directives= ->
+=gar-skeptic= -> =gar-policy= -> =gar-mission-control= -> =gar-canaries=
+-> =gar-memory= -> =gar-tools= -> =gar-backend= -> =gar-directives= ->
 =gar-context= -> =gar-executor= -> =gar-agents= -> =gar-loop=.
 
 Modules forward-declare cross-module callees with =declare-function= and
@@ -101,7 +103,7 @@ normal init path.")
 (require 'gar-quarantine)  ; per-source quarantine + promote + pre-flight conflict check
 (require 'gar-skeptic)     ; Advocatus Diaboli skeptic (rule-based + model-based)
 (require 'gar-policy)      ; policy broker, capability gate, presets, context wrappers
-(require 'gar-safety)      ; mission-control unified dashboard
+(require 'gar-mission-control) ; unified runtime dashboard
 (require 'gar-canaries)    ; prompt-injection canary suite (wraps gar-policy's untrusted-context)
 (require 'gar-memory)      ; sessions, embedding cache, novelty, synthesis, hypothesis-test
 (require 'gar-tools)       ; tool registry, native gptel tools, tool-invention pipeline

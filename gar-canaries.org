@@ -13,7 +13,7 @@ Split out of =gar-safety= on 2026-05-27.
 
 See also:
 - [[file:gptel-agent-runtime.org][gptel-agent-runtime]] (master entrypoint that requires this module)
-- [[file:gar-safety.org][gar-safety]] (provides =untrusted-context=, the wrapper under test)
+- [[file:gar-policy.org][gar-policy]] (provides =untrusted-context=, the wrapper under test)
 - [[file:gar-substrate.org][gar-substrate]] (provides =timestamp= and the evidence taxonomy)
 
 * File header
@@ -41,7 +41,7 @@ See also:
 
 (declare-function gptel-agent-runtime--timestamp "gptel-agent-runtime" ())
 (declare-function gptel-agent-runtime-untrusted-context
-                  "gar-safety" (label text-or-evidence &optional source))
+                  "gar-policy" (label text-or-evidence &optional source))
 
 #+end_src
 

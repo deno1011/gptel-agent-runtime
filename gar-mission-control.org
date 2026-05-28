@@ -1,69 +1,54 @@
-#+TITLE: gar-safety: mission-control unified dashboard
-#+PROPERTY: header-args:emacs-lisp :tangle gar-safety.el :lexical t
+#+TITLE: gar-mission-control: unified runtime dashboard
+#+PROPERTY: header-args:emacs-lisp :tangle gar-mission-control.el :lexical t
 
-Module of [[file:gptel-agent-runtime.org][gptel-agent-runtime]]. After the gar-safety sub-split landed
-across 2026-05-27/28, this file is reduced to a single concern:
+Module of [[file:gptel-agent-runtime.org][gptel-agent-runtime]]. The runtime's read-only observation
+surface: a single buffer that summarizes the live state of every
+submodule -- substrate (tick, event pump, subscribers, capability
+enforcement), policy (active preset, confirmation/wrap flags), recent
+events, recent evidence with taint, quarantine size + promoted IDs,
+canary pass/fail summary, skeptic verdicts, exploration & learning
+(novelty / synthesis / playbooks), and per-agent capability
+allowlists. Subscribes to =tick= on first render so subsequent ticks
+refresh the buffer in place.
 
-- /Mission-control unified dashboard/: =mission-control= buffer +
-  section helpers (=--mission-control-section=,
-  =--mission-control-recent-events=, =--mission-control-recent-evidence=,
-  =--mission-control-canary-summary=) that surfaces tick / event-pump /
-  policy preset / quarantine size / canary status / skeptic verdicts /
-  novelty + synthesis state / per-agent capability allowlists in one
-  read-only buffer auto-refreshing on every =tick=.
-
-The original responsibilities of gar-safety were factored out into:
-
-- /gar-canaries/ (PR 1 of 5): prompt-injection canary suite.
-- /gar-quarantine/ (PR 2 of 5): per-source quarantine + promotion +
-  deterministic pre-flight conflict check.
-- /gar-skeptic/ (PR 3 of 5): Advocatus Diaboli skeptic (rule-based +
-  model-based).
-- /gar-policy/ (PR 4 of 5): policy broker, capability gate, 5 named
-  policy presets, =policy-evaluate-step=, =safety-check-step=,
-  =confirmation-required-p=, untrusted/trusted context wrappers.
-
-This module loads AFTER all of those so the dashboard can read each
-submodule's defcustoms / defvars directly. PR 5 of the sub-split will
-extract mission-control to =gar-mission-control= and delete this file
-entirely.
+This is the final piece of the gar-safety sub-split (2026-05-27 through
+2026-05-28). After this PR, =gar-safety= is removed entirely; the
+original responsibilities now live across five focused modules:
+=gar-canaries=, =gar-quarantine=, =gar-skeptic=, =gar-policy=, and
+this one.
 
 See also:
 - [[file:gptel-agent-runtime.org][gptel-agent-runtime]] (master entrypoint that requires this module)
+- [[file:gar-substrate.org][gar-substrate]] (tick / event pump / evidence trace consulted here)
 - [[file:gar-policy.org][gar-policy]] (policy preset + capability enforcement defcustoms read here)
 - [[file:gar-quarantine.org][gar-quarantine]] (quarantine defcustoms + accessors read here)
 - [[file:gar-canaries.org][gar-canaries]] (=--last-canary-results= summarised here)
 - [[file:gar-skeptic.org][gar-skeptic]] (skeptic defcustoms + recent verdicts summarised here)
 - [[file:gar-memory.org][gar-memory]] (novelty / synthesis / playbook stats surfaced here)
+- [[file:gar-agents.org][gar-agents]] (per-agent capability allowlists rendered here)
 
 * File header
 
 #+begin_src emacs-lisp
-;;; gar-safety.el --- mission-control unified dashboard -*- lexical-binding: t; -*-
+;;; gar-mission-control.el --- unified runtime dashboard -*- lexical-binding: t; -*-
 
-;; Part of deno1011/gptel-agent-runtime. Now reduced to the mission-control
-;; buffer; will be removed in PR 5 of the gar-safety sub-split when
-;; mission-control moves to gar-mission-control.
+;; Part of deno1011/gptel-agent-runtime. Extracted from the final shape
+;; of gar-safety.org on 2026-05-28 as PR 5 of the gar-safety sub-split;
+;; gar-safety was removed in the same commit.
 
 ;;; Commentary:
 
-;; The mission-control buffer is a read-only dashboard summarizing the
-;; live state of every submodule in one place: substrate (tick, event
-;; pump, subscribers, capability enforcement), policy (active preset,
-;; confirmation/wrap flags), recent events, recent evidence with taint,
-;; quarantine size + promoted IDs, canary pass/fail summary, skeptic
-;; verdicts, exploration & learning (novelty / synthesis / playbooks),
-;; and per-agent capability allowlists. Subscribes to `tick' on first
-;; render so subsequent ticks refresh the buffer in place.
+;; A single read-only buffer summarising the live state of every
+;; submodule of the runtime in one place. Auto-refreshes on every
+;; `tick' once `M-x gptel-agent-runtime-mission-control' has rendered
+;; it once. Defun bodies resolve every cross-module symbol via late
+;; binding; the forward defvar / declare-function declarations below
+;; only keep byte-compile warning-free.
 
 ;;; Code:
 
 (require 'cl-lib)
 (require 'subr-x)
-
-;; Defvars and declare-functions for every cross-module symbol the
-;; dashboard reads. Late binding: defun bodies resolve the symbols at
-;; call time; these declarations keep byte-compile warning-free.
 
 ;; gar-core defcustoms / defvars.
 (defvar gptel-agent-runtime-policy-preset)
@@ -100,20 +85,20 @@ See also:
 (declare-function gptel-agent-runtime-agent-allowed-caps "gptel-agent-runtime"
                   (agent))
 
-;; gar-policy (loaded before gar-safety).
+;; gar-policy (loaded before gar-mission-control).
 (defvar gptel-agent-runtime-capability-enforcement-enabled)
 
-;; gar-quarantine (loaded before gar-safety).
+;; gar-quarantine (loaded before gar-mission-control).
 (defvar gptel-agent-runtime-quarantine-untrusted-output)
 (defvar gptel-agent-runtime-quarantine-pre-flight-enabled)
 (defvar gptel-agent-runtime--promoted-evidence-ids)
 (declare-function gptel-agent-runtime-quarantined-evidence
                   "gar-quarantine" ())
 
-;; gar-canaries (loaded after gar-safety; late-bound).
+;; gar-canaries (loaded after gar-mission-control; late-bound).
 (defvar gptel-agent-runtime--last-canary-results)
 
-;; gar-skeptic (loaded before gar-safety).
+;; gar-skeptic (loaded before gar-mission-control).
 (defvar gptel-agent-runtime-skeptic-enabled)
 (defvar gptel-agent-runtime-skeptic-mode)
 (defvar gptel-agent-runtime-skeptic-budget-ms)
@@ -121,7 +106,7 @@ See also:
 (defvar gptel-agent-runtime-skeptic-trigger-caps)
 (defvar gptel-agent-runtime--last-skeptic-verdicts)
 
-;; gar-memory (loaded after gar-safety; late-bound).
+;; gar-memory (loaded after gar-mission-control; late-bound).
 (defvar gptel-agent-runtime-novelty-threshold)
 (defvar gptel-agent-runtime-novelty-min-tokens)
 (defvar gptel-agent-runtime-strategy-synthesis-enabled)
@@ -142,8 +127,6 @@ See also:
 * Mission-control unified dashboard
 
 #+begin_src emacs-lisp
-;; ----- Mission control unified dashboard -----
-
 (defcustom gptel-agent-runtime-mission-control-buffer-name "*gptel-agent-mission-control*"
   "Buffer name used for the unified mission-control dashboard."
   :type 'string
@@ -327,9 +310,9 @@ status, and the registered agent capability allowlist."
 * File footer
 
 #+begin_src emacs-lisp
-(provide 'gar-safety)
+(provide 'gar-mission-control)
 
-;;; gar-safety.el ends here
+;;; gar-mission-control.el ends here
 #+end_src
 
 <!-- gar:auto-backlinks:start -->

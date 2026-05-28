@@ -20,7 +20,7 @@
 
 (declare-function gptel-agent-runtime--timestamp "gptel-agent-runtime" ())
 (declare-function gptel-agent-runtime-untrusted-context
-                  "gar-safety" (label text-or-evidence &optional source))
+                  "gar-policy" (label text-or-evidence &optional source))
 
 (defcustom gptel-agent-runtime-injection-canaries
   '(("end-block-injection"
