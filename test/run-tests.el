@@ -10,10 +10,19 @@
 
 ;;; Code:
 
-(let ((dir (file-name-directory
-            (or load-file-name buffer-file-name))))
-  (add-to-list 'load-path dir)
-  (dolist (file (directory-files dir t "\\`gar-.*-test\\.el\\'"))
+;; Defensive: in batch mode, always test against the freshly tangled .el
+;; sources. Delete any byte-compiled .elc files in the package root and
+;; test directory before loading. `test-helper' additionally sets
+;; `load-prefer-newer' to t, which guards against the inverse case (a
+;; .elc that's older than its .el on disk).
+(let* ((test-dir (file-name-directory
+                  (or load-file-name buffer-file-name)))
+       (root (file-name-directory (directory-file-name test-dir))))
+  (dolist (dir (list root test-dir))
+    (dolist (elc (directory-files dir t "\\.elc\\'"))
+      (delete-file elc)))
+  (add-to-list 'load-path test-dir)
+  (dolist (file (directory-files test-dir t "\\`gar-.*-test\\.el\\'"))
     (load file nil 'nomessage)))
 
 (ert-run-tests-batch-and-exit)

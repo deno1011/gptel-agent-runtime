@@ -1,4 +1,3 @@
-/.elc
 *.elc
-/.DS_Store
+.DS_Store
 /gptel-agent-runtime-autoloads.el
