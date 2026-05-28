@@ -173,6 +173,22 @@ and pulls the standard models on a fresh install.
 rewrites each `gar-NAME.org`'s `Required by:` section to reflect the current
 edges. Run it after any change that adds or removes a `(require 'gar-…)` form.
 
+## Tests
+
+ERT smoke tests live in `test/`. Each file pulls in `test/test-helper.el`
+which loads the full package (and `gptel` from `~/.emacs.d/elpa/gptel-*`
+when available) before running. Run the whole suite in batch:
+
+```sh
+emacs -Q --batch -l test/run-tests.el
+```
+
+Coverage today: the post-sub-split safety surfaces that earlier PRs
+validated by ad-hoc smoke tests — `gar-canaries`, `gar-quarantine`,
+`gar-skeptic`, `gar-policy`, and `gar-mission-control` (including the
+tool-policy editor). Other modules (substrate, memory, loop) can be
+covered in follow-ups.
+
 ## Dependency graph regenerator
 
 `scripts/refresh-dep-graph.el` scans the same hard `(require 'gar-...)` forms
