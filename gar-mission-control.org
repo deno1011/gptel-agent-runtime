@@ -307,6 +307,219 @@ status, and the registered agent capability allowlist."
 
 #+end_src
 
+* Tool policy editor (tabulated-list)
+
+#+begin_src emacs-lisp
+;; Inline editor for `gptel-agent-runtime-tool-policy'. The policy alist
+;; lives in gar-core; the active preset and the per-tool capability manifest
+;; live in gar-policy. This buffer renders one row per known tool with the
+;; effective :default / :confirm / :taint and which layer the value comes
+;; from (user override / preset / default / none).
+
+(defvar gptel-agent-runtime-tool-capabilities)
+(defvar gptel-agent-runtime-default-tool-policy)
+(defvar gptel-agent-runtime-tool-policy)
+
+(declare-function gptel-agent-runtime--policy-for-tool
+                  "gar-policy" (tool-name))
+
+(defcustom gptel-agent-runtime-tool-policy-editor-buffer-name
+  "*gptel-agent-tool-policy*"
+  "Buffer name for the tool policy editor."
+  :type 'string
+  :group 'gptel-agent-runtime)
+
+(defconst gptel-agent-runtime--tool-policy-confirm-cycle
+  '(nil write shell destructive always)
+  "Cycle order for the :confirm key in the tool policy editor.")
+
+(defconst gptel-agent-runtime--tool-policy-default-cycle
+  '(allow deny)
+  "Cycle order for the :default key in the tool policy editor.")
+
+(defconst gptel-agent-runtime--tool-policy-taint-cycle
+  '(nil trusted untrusted)
+  "Cycle order for the :taint key in the tool policy editor.
+A nil entry means \"do not override\" — fall back to the default-policy or
+preset entry.")
+
+(defun gptel-agent-runtime--tool-policy-known-tools ()
+  "Return the union of tool names from the capability manifest and policy alists."
+  (let* ((from-caps (mapcar #'car gptel-agent-runtime-tool-capabilities))
+         (from-default (mapcar (lambda (e)
+                                 (format "%s" (car e)))
+                               gptel-agent-runtime-default-tool-policy))
+         (from-user (mapcar (lambda (e)
+                              (format "%s" (car e)))
+                            gptel-agent-runtime-tool-policy)))
+    (sort (cl-remove-duplicates
+           (append from-caps from-default from-user)
+           :test #'equal)
+          #'string<)))
+
+(defun gptel-agent-runtime--tool-policy-source (tool)
+  "Return symbol describing which layer supplies TOOL's effective policy.
+One of `user', `preset', `default', or `none'."
+  (cond
+   ((assoc tool gptel-agent-runtime-tool-policy) 'user)
+   ((let* ((entry (gptel-agent-runtime--policy-for-tool tool)))
+      (and entry
+           (not (assoc tool gptel-agent-runtime-default-tool-policy))))
+    'preset)
+   ((assoc tool gptel-agent-runtime-default-tool-policy) 'default)
+   (t 'none)))
+
+(defun gptel-agent-runtime--tool-policy-row (tool)
+  "Return the tabulated-list row vector for TOOL."
+  (let* ((eff (gptel-agent-runtime--policy-for-tool tool))
+         (default (plist-get eff :default))
+         (confirm (plist-get eff :confirm))
+         (taint (plist-get eff :taint))
+         (caps (cdr (assoc tool gptel-agent-runtime-tool-capabilities)))
+         (source (gptel-agent-runtime--tool-policy-source tool)))
+    (list tool
+          (vector tool
+                  (format "%s" (or default 'allow))
+                  (format "%s" (or confirm "-"))
+                  (format "%s" (or taint "-"))
+                  (format "%d" (length caps))
+                  (symbol-name source)))))
+
+(defun gptel-agent-runtime--tool-policy-rows ()
+  "Return all rows for the editor, one per known tool."
+  (mapcar #'gptel-agent-runtime--tool-policy-row
+          (gptel-agent-runtime--tool-policy-known-tools)))
+
+(defun gptel-agent-runtime--tool-policy-current-tool ()
+  "Return the tool name on the current line, or nil."
+  (tabulated-list-get-id))
+
+(defun gptel-agent-runtime--tool-policy-current-entry (tool)
+  "Return the current USER policy plist for TOOL (copy), or nil."
+  (copy-sequence (cdr (assoc tool gptel-agent-runtime-tool-policy))))
+
+(defun gptel-agent-runtime--tool-policy-set-entry (tool plist)
+  "Replace TOOL's entry in `gptel-agent-runtime-tool-policy' with PLIST.
+When PLIST is nil, remove the entry instead. Mutates the user override only;
+the default-policy alist is untouched."
+  (setq gptel-agent-runtime-tool-policy
+        (cl-remove tool gptel-agent-runtime-tool-policy
+                   :key #'car :test #'equal))
+  (when plist
+    (push (cons tool plist) gptel-agent-runtime-tool-policy)))
+
+(defun gptel-agent-runtime--tool-policy-cycle-key (key cycle)
+  "Cycle TOOL's :KEY through CYCLE in the user policy alist.
+Called from a tabulated-list-mode buffer."
+  (let* ((tool (gptel-agent-runtime--tool-policy-current-tool)))
+    (unless tool (user-error "No tool on this line"))
+    (let* ((plist (gptel-agent-runtime--tool-policy-current-entry tool))
+           (current (plist-get plist key))
+           (idx (or (cl-position current cycle :test #'eq) -1))
+           (next (nth (mod (1+ idx) (length cycle)) cycle))
+           (new-plist (if next
+                          (plist-put plist key next)
+                        (gptel-agent-runtime--tool-policy-strip-key plist key))))
+      (gptel-agent-runtime--tool-policy-set-entry tool new-plist)
+      (tabulated-list-revert)
+      (message "tool-policy: %s :%s = %s" tool key (or next "removed")))))
+
+(defun gptel-agent-runtime--tool-policy-strip-key (plist key)
+  "Return PLIST with KEY removed; return nil if the resulting plist is empty."
+  (let (out)
+    (while plist
+      (unless (eq (car plist) key)
+        (setq out (append out (list (car plist) (cadr plist)))))
+      (setq plist (cddr plist)))
+    (and out out)))
+
+(defun gptel-agent-runtime-tool-policy-cycle-confirm ()
+  "Cycle the :confirm key for the tool on the current line."
+  (interactive)
+  (gptel-agent-runtime--tool-policy-cycle-key
+   :confirm gptel-agent-runtime--tool-policy-confirm-cycle))
+
+(defun gptel-agent-runtime-tool-policy-cycle-default ()
+  "Cycle the :default key for the tool on the current line."
+  (interactive)
+  (gptel-agent-runtime--tool-policy-cycle-key
+   :default gptel-agent-runtime--tool-policy-default-cycle))
+
+(defun gptel-agent-runtime-tool-policy-cycle-taint ()
+  "Cycle the :taint key for the tool on the current line."
+  (interactive)
+  (gptel-agent-runtime--tool-policy-cycle-key
+   :taint gptel-agent-runtime--tool-policy-taint-cycle))
+
+(defun gptel-agent-runtime-tool-policy-reset-line ()
+  "Remove the user override for the tool on the current line."
+  (interactive)
+  (let ((tool (gptel-agent-runtime--tool-policy-current-tool)))
+    (unless tool (user-error "No tool on this line"))
+    (gptel-agent-runtime--tool-policy-set-entry tool nil)
+    (tabulated-list-revert)
+    (message "tool-policy: %s reset (user override removed)" tool)))
+
+(defun gptel-agent-runtime-tool-policy-save ()
+  "Persist the current `gptel-agent-runtime-tool-policy' via Customize."
+  (interactive)
+  (customize-save-variable 'gptel-agent-runtime-tool-policy
+                           gptel-agent-runtime-tool-policy)
+  (message "tool-policy: saved %d user override(s)"
+           (length gptel-agent-runtime-tool-policy)))
+
+(defvar gptel-agent-runtime-tool-policy-editor-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "c") #'gptel-agent-runtime-tool-policy-cycle-confirm)
+    (define-key map (kbd "d") #'gptel-agent-runtime-tool-policy-cycle-default)
+    (define-key map (kbd "t") #'gptel-agent-runtime-tool-policy-cycle-taint)
+    (define-key map (kbd "r") #'gptel-agent-runtime-tool-policy-reset-line)
+    (define-key map (kbd "s") #'gptel-agent-runtime-tool-policy-save)
+    map)
+  "Keymap for `gptel-agent-runtime-tool-policy-editor-mode'.")
+
+(define-derived-mode gptel-agent-runtime-tool-policy-editor-mode
+  tabulated-list-mode "GAR-Tool-Policy"
+  "Major mode for editing `gptel-agent-runtime-tool-policy'.
+
+Key bindings (inherited from `tabulated-list-mode' plus this mode's):
+  c   Cycle :confirm (nil → write → shell → destructive → always → nil)
+  d   Cycle :default (allow ↔ deny)
+  t   Cycle :taint (nil → trusted → untrusted → nil)
+  r   Reset line (remove the user override entirely)
+  s   Save the policy via Customize
+  g   Refresh
+  q   Quit (from tabulated-list-mode)
+
+Edits mutate `gptel-agent-runtime-tool-policy' in memory; press `s' to
+persist via Customize. The Source column reports which layer supplies the
+effective policy: `user' (this editor's overrides), `preset' (active
+named policy preset), `default' (built-in default-tool-policy), or `none'."
+  (setq tabulated-list-format
+        [("Tool" 28 t)
+         ("Default" 8 t)
+         ("Confirm" 12 t)
+         ("Taint" 12 t)
+         ("Caps" 6 t)
+         ("Source" 10 t)])
+  (setq tabulated-list-padding 1)
+  (setq tabulated-list-entries
+        #'gptel-agent-runtime--tool-policy-rows)
+  (tabulated-list-init-header))
+
+;;;###autoload
+(defun gptel-agent-runtime-tool-policy-editor ()
+  "Open the tabulated-list editor for `gptel-agent-runtime-tool-policy'."
+  (interactive)
+  (let ((buf (get-buffer-create
+              gptel-agent-runtime-tool-policy-editor-buffer-name)))
+    (with-current-buffer buf
+      (gptel-agent-runtime-tool-policy-editor-mode)
+      (tabulated-list-print))
+    (pop-to-buffer buf)))
+
+#+end_src
+
 * File footer
 
 #+begin_src emacs-lisp
