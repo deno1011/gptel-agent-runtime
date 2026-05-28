@@ -7,7 +7,7 @@
 
 ;; Provides:
 ;;  - clipboard image capture and shrink (`my/insert-clipboard-image',
-;;    `my/gptel-attach-image-at-point', `my/--shrink-image')
+;;    `my/gptel-attach-image-at-point', `gar-context--shrink-image')
 ;;  - org-download screenshot integration
 ;;  - web fetch helpers (`my/web-fetch', `my/web-html', `my/web-text',
 ;;    `my/web-search-ddg', `my/web-fetch-image', `my/web-extract-images',
@@ -105,7 +105,7 @@ safely below the strictest 5 MB provider limit."
         org-download-method    'directory
         org-download-heading-lvl nil))
 
-(defun my/--shrink-image (path)
+(defun gar-context--shrink-image (path)
   "Shrink PATH if necessary.
 1. Limit edge length to `my/gptel-image-max-dim' (in-place).
 2. If the file still exceeds `my/gptel-image-max-bytes': convert
@@ -132,7 +132,7 @@ Returns the final path (may change to .jpg on JPEG conversion)."
           (setq path jpeg)))))
   path)
 
-(defun my/--clipboard-to-file (path)
+(defun gar-context--clipboard-to-file (path)
   "Save clipboard image to PATH using the available backend.
 macOS: pngpaste. Linux/XQuartz: xclip.
 Returns t on success, nil if no backend available or clipboard empty."
@@ -163,12 +163,12 @@ If NAME is nil or empty → timestamp filename."
                      name))
          (raw-path (expand-file-name (concat basename ".png")
                                      my/gptel-image-dir))
-         (ok       (my/--clipboard-to-file raw-path))
+         (ok       (gar-context--clipboard-to-file raw-path))
          (size     (and ok (file-exists-p raw-path)
                         (nth 7 (file-attributes raw-path)))))
     (cond
      ((and ok size (> size 0))
-      (let* ((final-path (my/--shrink-image raw-path))
+      (let* ((final-path (gar-context--shrink-image raw-path))
              (final-size (nth 7 (file-attributes final-path))))
         (insert (format "[[file:%s]]\n" final-path))
         (when (derived-mode-p 'org-mode)
@@ -196,7 +196,7 @@ next gptel request. Shrinks first if necessary."
         (let ((path (expand-file-name
                      (org-element-property :path ctx))))
           (if (file-exists-p path)
-              (let ((final-path (my/--shrink-image path)))
+              (let ((final-path (gar-context--shrink-image path)))
                 (gptel-context-add-file final-path)
                 (message "Attached to gptel: %s (%s)"
                          (file-name-nondirectory final-path)

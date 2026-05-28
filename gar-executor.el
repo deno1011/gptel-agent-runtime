@@ -286,7 +286,7 @@ Logs go to the buffer *Assistant Actions*."
                            code err))
            (display-buffer log-buf))))))))
 
-(defun my/gptel--tutorial-plot-response-p ()
+(defun gar-executor--tutorial-plot-response-p ()
   "Return non-nil when the narrowed response looks like plot instructions."
   (save-excursion
     (goto-char (point-min))
@@ -298,7 +298,7 @@ Logs go to the buffer *Assistant Actions*."
                (goto-char (point-min))
                (re-search-forward "#\\+begin_src gnuplot\\b" nil t))))))
 
-(defun my/gptel--gnuplot-block-has-file-p ()
+(defun gar-executor--gnuplot-block-has-file-p ()
   "Return non-nil when the narrowed response has a gnuplot block with :file."
   (save-excursion
     (goto-char (point-min))
@@ -310,8 +310,8 @@ This is intentionally narrow: it only repairs obvious gnuplot tutorial answers
 that lack a `:file' output block."
   (save-restriction
     (narrow-to-region beg end)
-    (when (and (my/gptel--tutorial-plot-response-p)
-               (not (my/gptel--gnuplot-block-has-file-p)))
+    (when (and (gar-executor--tutorial-plot-response-p)
+               (not (gar-executor--gnuplot-block-has-file-p)))
       (goto-char (point-max))
       (unless (bolp) (insert "\n"))
       (insert "\nCorrect inline Org output:\n\n")
