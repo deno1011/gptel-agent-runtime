@@ -520,7 +520,7 @@ provenance and is renamed with a `.approved' suffix."
   (gptel-make-tool
    :name "read_org_file"
    :description "Read the contents of an org file. Path relative to ~ is accepted."
-   :args '((:name "path" :type string :description "Org file path, e.g. ~/emacs-data/data/org/todo.org — use your actual data dir"))
+   :args '((:name "path" :type string :description "Org file path, e.g. ~/org/todo.org — use your actual data dir"))
    :function (lambda (path)
                (let ((p (expand-file-name path)))
                  (if (file-exists-p p)
