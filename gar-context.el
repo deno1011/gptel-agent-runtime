@@ -21,25 +21,56 @@
 (require 'shr)
 (require 'dom)
 
-(cond
-  ;; macOS: pngpaste via brew
-  ((and (eq system-type 'darwin)
-        (not (executable-find "pngpaste"))
-        (executable-find "brew")
-        (fboundp 'my/brew-install-and-log))
-   (my/brew-install-and-log "formula" "pngpaste" "install" "pngpaste")
-   (message "pngpaste not found — installing via brew in background. Restart Emacs when done."))
-  ;; Linux/Docker: xclip via apt — try sudo, fall back to plain apt-get
-  ((and (eq system-type 'gnu/linux)
-        (not (executable-find "xclip")))
-   (condition-case nil
-       (let ((cmd (if (executable-find "sudo") "sudo" "apt-get"))
-             (args (if (executable-find "sudo")
-                       '("apt-get" "install" "-y" "xclip")
-                     '("install" "-y" "xclip"))))
-         (apply #'start-process "install-xclip" "*install-xclip*" cmd args)
-         (message "xclip not found — installing via apt in background. Restart Emacs when done."))
-     (error (message "xclip not found — install manually: apt-get install xclip")))))
+(defcustom gptel-agent-runtime-image-helper-required nil
+  "When non-nil, image-capture entry points hard-error when the OS helper is missing.
+Default is nil: capture functions warn and return nil rather than aborting,
+so a missing helper does not break the rest of the session."
+  :type 'boolean
+  :group 'gptel-agent-runtime)
+
+(defun gptel-agent-runtime--image-helper-name ()
+  "Return the name of the OS clipboard-image helper for the current platform."
+  (pcase system-type
+    ('darwin "pngpaste")
+    ('gnu/linux "xclip")
+    (_ nil)))
+
+(defun gptel-agent-runtime--image-helper-available-p ()
+  "Return non-nil when the platform's clipboard-image helper is on PATH."
+  (when-let ((helper (gptel-agent-runtime--image-helper-name)))
+    (executable-find helper)))
+
+;;;###autoload
+(defun gptel-agent-runtime-install-image-helpers ()
+  "Install the OS-native clipboard-image helper interactively.
+On macOS uses Homebrew to install `pngpaste'; on Linux uses apt to
+install `xclip'. The package does not call this at load time -- run it
+manually once when you want clipboard image capture to work."
+  (interactive)
+  (pcase system-type
+    ('darwin
+     (cond
+      ((executable-find "pngpaste")
+       (message "pngpaste already installed at %s" (executable-find "pngpaste")))
+      ((not (executable-find "brew"))
+       (user-error "brew not found — install Homebrew first, then re-run M-x gptel-agent-runtime-install-image-helpers"))
+      (t
+       (start-process "install-pngpaste" "*install-pngpaste*"
+                      "brew" "install" "pngpaste")
+       (message "pngpaste installing via brew in background; check *install-pngpaste*."))))
+    ('gnu/linux
+     (cond
+      ((executable-find "xclip")
+       (message "xclip already installed at %s" (executable-find "xclip")))
+      (t
+       (let ((sudo-p (executable-find "sudo")))
+         (apply #'start-process "install-xclip" "*install-xclip*"
+                (if sudo-p
+                    (list "sudo" "apt-get" "install" "-y" "xclip")
+                  (list "apt-get" "install" "-y" "xclip")))
+         (message "xclip installing via apt in background; check *install-xclip*.")))))
+    (_
+     (user-error "Automatic install only supported on darwin / gnu/linux; install the clipboard-image helper manually."))))
 
 (defcustom my/gptel-image-dir
   (expand-file-name "gptel-images" user-emacs-directory)
