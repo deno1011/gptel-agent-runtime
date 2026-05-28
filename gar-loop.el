@@ -275,8 +275,8 @@ remember -> continue."
   (string-trim
    (concat
     (format "Current buffer: %s\n" (buffer-name))
-    (when (fboundp 'my/workspace-context-string)
-      (format "Workspace context:\n%s\n" (my/workspace-context-string)))
+    (when (fboundp 'gptel-agent-runtime-workspace-context-string)
+      (format "Workspace context:\n%s\n" (gptel-agent-runtime-workspace-context-string)))
     (when gptel-agent-runtime-last-route
       (format "Last route: %s\n" (plist-get gptel-agent-runtime-last-route :reason))))))
 
