@@ -343,7 +343,7 @@ Logs go to the buffer *Assistant Actions*."
     (goto-char (point-min))
     (re-search-forward "#\\+begin_src gnuplot\\b.*\\_<:file\\_>" nil t)))
 
-(defun my/gptel-repair-inline-plot-response (beg end)
+(defun gptel-agent-runtime-repair-inline-plot-response (beg end)
   "Append executable inline Org when a local model answers plot requests as a tutorial.
 This is intentionally narrow: it only repairs obvious gnuplot tutorial answers
 that lack a `:file' output block."
@@ -371,6 +371,10 @@ that lack a `:file' output block."
       (insert "#+end_src\n\n")
       (insert "#+RESULTS:\n")
       (insert "[[file:graph3d.png]]\n"))))
+
+;; Backwards-compat alias for the legacy `my/' name.
+(defalias 'my/gptel-repair-inline-plot-response
+  #'gptel-agent-runtime-repair-inline-plot-response)
 
 (defun gptel-agent-runtime--find-gptel-tool (name)
   "Return the registered gptel tool named NAME, or nil."
@@ -1287,7 +1291,7 @@ Registered in `gptel-post-response-functions'."
     (gptel-agent-runtime-repair-capability-response (point-min) (point-max))
     (when gar-response-executor-auto-execute
       ;; 1. Repair obvious tutorial-style plot answers from weaker local models.
-      (my/gptel-repair-inline-plot-response (point-min) (point-max))
+      (gptel-agent-runtime-repair-inline-plot-response (point-min) (point-max))
       ;; 2. Execute safe JSON tool calls that local models printed as text.
       (gptel-agent-runtime-execute-raw-tool-calls (point-min) (point-max))
       ;; 3. Babel blocks
