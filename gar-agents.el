@@ -37,7 +37,7 @@
 (defvar gptel-agent-runtime-model-router-profiles)
 (defvar gptel-agent-runtime-tick-counter)
 (defvar gptel-agent-runtime-state-schema-version)
-(defvar my/gptel-backends)
+(defvar gptel-agent-runtime-backends)
 (defvar gptel--system-message)
 (defvar gptel-tools)
 (defvar gptel-use-tools)
@@ -1040,7 +1040,7 @@ Be specific. Cite exact arguments, paths, patterns, or capability mismatches whe
   (format "%s %S" (car entry) (gptel-agent-runtime-model-id (cddr entry))))
 
 (defun gptel-agent-runtime-model-router-find-entry (profile)
-  "Return the best available `my/gptel-backends' entry for PROFILE."
+  "Return the best available `gptel-agent-runtime-backends' entry for PROFILE."
   (let* ((settings (alist-get profile
                               gptel-agent-runtime-model-router-profiles))
          (patterns (plist-get settings :patterns)))
@@ -1052,9 +1052,9 @@ Be specific. Cite exact arguments, paths, patterns, or capability mismatches whe
            (lambda (entry)
              (string-match-p pattern
                              (gptel-agent-runtime--model-entry-text entry)))
-           my/gptel-backends)))
+           gptel-agent-runtime-backends)))
       patterns)
-     (car-safe my/gptel-backends))))
+     (car-safe gptel-agent-runtime-backends))))
 
 (defun gptel-agent-runtime-model-router-classify (text)
   "Return a routing decision plist for TEXT."

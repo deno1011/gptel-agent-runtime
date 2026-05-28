@@ -5,7 +5,7 @@
 
 ;;; Commentary:
 
-;; Provider-neutral runtime layer. Forward-declares the `my/gptel-backends'
+;; Provider-neutral runtime layer. Forward-declares the `gptel-agent-runtime-backends'
 ;; alist (populated by the consuming setup file with API keys/endpoints).
 ;; Provides the Ollama runtime helpers (server probe, auto-start, active-
 ;; model detection, default-local-model selection) and the model-id
@@ -37,14 +37,26 @@
 (defvar gptel-agent-runtime-default-local-model)
 (defvar gptel-agent-runtime-default-local-model-label)
 
-(defvar my/gptel-backends nil
+(defvar gptel-agent-runtime-backends nil
   "Alist of (DISPLAY-NAME . (BACKEND . MODEL)) for all backends.
 Populated by the consuming setup file; the runtime package only forward-
 declares it.")
 
-(defvar my/gptel-ollama-backend nil
+(defvar gptel-agent-runtime-ollama-backend nil
   "The registered Ollama backend, when the setup file has installed one.
 Forward-declared by the package; populated by the setup file.")
+
+;; Backwards-compat aliases for the legacy `my/gptel-*' names. These are
+;; storage cells: user setup files commonly do `(setq my/gptel-backends
+;; ...)' AFTER `(require 'gptel-agent-runtime)' to register their
+;; provider backends. `defvaralias' makes both names refer to the same
+;; underlying cell, so user `setq's land where the new
+;; `gptel-agent-runtime-backends' reader looks. Installing the alias
+;; BEFORE the setup file's `setq' (which is true because we are inside
+;; the package, loaded by `(require ...)' first) is what makes this
+;; work.
+(defvaralias 'my/gptel-backends 'gptel-agent-runtime-backends)
+(defvaralias 'my/gptel-ollama-backend 'gptel-agent-runtime-ollama-backend)
 
 (defun gptel-agent-runtime--ollama-url (&optional path)
   "Return the local Ollama URL for PATH."
@@ -119,16 +131,16 @@ both plist and vector shapes returned by `json-read'."
   "Select the active or configured default local Ollama model when available."
   (interactive)
   (gptel-agent-runtime-start-ollama-if-needed)
-  (when my/gptel-ollama-backend
+  (when gptel-agent-runtime-ollama-backend
     (let ((model (or (and gptel-agent-runtime-prefer-active-ollama-model
                           (gptel-agent-runtime-active-ollama-model))
                      gptel-agent-runtime-default-local-model)))
-      (unless (member model (gptel-agent-runtime-backend-model-symbols my/gptel-ollama-backend))
+      (unless (member model (gptel-agent-runtime-backend-model-symbols gptel-agent-runtime-ollama-backend))
         (when (fboundp 'gptel-backend-models)
-          (setf (gptel-backend-models my/gptel-ollama-backend)
-                (append (gptel-backend-models my/gptel-ollama-backend)
+          (setf (gptel-backend-models gptel-agent-runtime-ollama-backend)
+                (append (gptel-backend-models gptel-agent-runtime-ollama-backend)
                         (list `(,model :capabilities (tool-use json)))))))
-      (setq gptel-backend my/gptel-ollama-backend
+      (setq gptel-backend gptel-agent-runtime-ollama-backend
             gptel-model model)
       (when (fboundp 'gptel-agent-runtime-sync-directive-for-current-runtime)
         (gptel-agent-runtime-sync-directive-for-current-runtime))
@@ -141,11 +153,11 @@ both plist and vector shapes returned by `json-read'."
                  " (active Ollama model)")))))
 
 (defun gptel-agent-runtime-register-model (name backend model)
-  "Register NAME with BACKEND+MODEL in `my/gptel-backends'.
+  "Register NAME with BACKEND+MODEL in `gptel-agent-runtime-backends'.
 Overwrites an existing entry with the same name."
-  (setq my/gptel-backends
+  (setq gptel-agent-runtime-backends
         (cons (cons name (cons backend model))
-              (cl-remove name my/gptel-backends
+              (cl-remove name gptel-agent-runtime-backends
                          :key #'car :test #'equal))))
 
 ;; Backwards-compat aliases for the legacy `my/gptel-*' names. Hosts may
