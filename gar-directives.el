@@ -22,7 +22,7 @@
 ;; `my/data-dir' must be defined before this module loads -- it can be
 ;; supplied by the host config or falls back to `user-emacs-directory'
 ;; (see `gptel-agent-runtime-data-directory' in gar-core for the
-;; package-canonical defcustom). `my/gptel-model-id' is also referenced
+;; package-canonical defcustom). `gptel-agent-runtime-model-id' is also referenced
 ;; and provided by the master file's runtime helpers section (will move
 ;; to `gar-backend' in a later PR).
 
@@ -31,7 +31,7 @@
 (require 'cl-lib)
 (require 'subr-x)
 
-(declare-function my/gptel-model-id "gptel-agent-runtime" (model))
+(declare-function gptel-agent-runtime-model-id "gptel-agent-runtime" (model))
 (defvar my/data-dir)
 
 (defvar gptel-agent-runtime-local-model-pattern
@@ -56,7 +56,7 @@
                               (format "%s" (gptel-backend-name gptel-backend))
                             (format "%S" gptel-backend))
                         (error (format "%S" gptel-backend))))
-        (model-name (format "%S" (my/gptel-model-id gptel-model))))
+        (model-name (format "%S" (gptel-agent-runtime-model-id gptel-model))))
     (string-match-p gptel-agent-runtime-local-runtime-pattern
                     (concat backend-name " " model-name))))
 
