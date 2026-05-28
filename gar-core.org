@@ -285,6 +285,16 @@ should add confirmation, path, agent, or deny rules in
   :type 'alist
   :group 'gptel-agent-runtime)
 
+(defcustom gptel-agent-runtime-data-directory
+  user-emacs-directory
+  "Root directory for runtime data the package may consult for context.
+Hosts that already define `my/data-dir' before requiring this package will
+have its value copied into this defcustom at the tail of the master load
+sequence. New setups should customise this defcustom directly. The package
+does not write here -- that is `gptel-agent-runtime-memory-directory'."
+  :type 'directory
+  :group 'gptel-agent-runtime)
+
 (defcustom gptel-agent-runtime-memory-directory
   (expand-file-name "gptel-agent-runtime/" user-emacs-directory)
   "Directory for future persistent agent memory and session state."

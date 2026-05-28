@@ -84,8 +84,13 @@ isolated byte-compilation stays warning-free.
 ;; order and runs the small tail-of-load wiring that needs to happen
 ;; only after every module has loaded.
 ;;
-;; Host configuration is expected to define personal paths such as
-;; `my/data-dir' before requiring this package.
+;; Host configuration MAY define `my/data-dir' before requiring this
+;; package to override the default data directory. When `my/data-dir'
+;; is bound at require time, this file forwards its value into the
+;; package's own `gptel-agent-runtime-data-directory' defcustom (see
+;; gar-core); when it is not bound, the defcustom's default
+;; (`user-emacs-directory') is used. The package itself no longer bakes
+;; in a personal path like `~/emacs/'.
 
 ;;; Code:
 
@@ -93,10 +98,23 @@ isolated byte-compilation stays warning-free.
 (require 'json)
 (require 'subr-x)
 
-(defvar my/data-dir (expand-file-name "~/emacs/")
-  "Personal data/config root supplied by the host Emacs configuration.
-This fallback keeps the package loadable when it is required outside Denis's
-normal init path.")
+;; Backwards-compat shim: some host configs define `my/data-dir' before
+;; requiring this package, and some modules (notably gar-directives) read
+;; the variable at LOAD TIME to bake the value into directive prompts. To
+;; keep both paths working: defvar with `user-emacs-directory' as the
+;; default so a fresh install sees a sensible non-nil value, but let any
+;; pre-bound host value win (defvar is a no-op when the variable is
+;; already bound). The package's canonical setting is
+;; `gptel-agent-runtime-data-directory' in gar-core; the tail-of-load
+;; wiring below forwards whatever value `my/data-dir' ended up with into
+;; that defcustom so the rest of the runtime sees a single source of
+;; truth.
+(defvar my/data-dir user-emacs-directory
+  "Personal data root, optionally pre-bound by the host config.
+When the host config sets this before requiring the package, that value
+is forwarded into `gptel-agent-runtime-data-directory' at the tail of
+the master load sequence. New setups should customise
+`gptel-agent-runtime-data-directory' directly.")
 
 ;; Module load order (respects the dependency DAG).
 (require 'gar-core)        ; defgroup + ~50 defcustoms + all cl-defstructs + base helpers
@@ -116,6 +134,17 @@ normal init path.")
 (require 'gar-executor)    ; Response Executor (formerly claude-executor-*; aliases kept)
 (require 'gar-agents)      ; agent/skill/org-unit/playbook registries + chat + model router
 (require 'gar-loop)        ; autonomous execution loop + worker dispatcher
+
+;; If the host config set `my/data-dir' before requiring us, forward
+;; that value into the package's own data-directory defcustom so the
+;; rest of the runtime sees a single source of truth. Setting only
+;; happens when the host explicitly opted in -- the defcustom's default
+;; (`user-emacs-directory') wins on a fresh install.
+(when (and (boundp 'my/data-dir)
+           (stringp my/data-dir)
+           (boundp 'gptel-agent-runtime-data-directory))
+  (setq gptel-agent-runtime-data-directory
+        (file-name-as-directory my/data-dir)))
 
 ;; Tail-of-load wiring. These steps need to run only AFTER every module
 ;; has finished loading because they consult cross-module helpers.
