@@ -297,6 +297,12 @@ Emits a `trajectory-recorded' event."
             nil))
   (gptel-agent-runtime--save-trajectory trajectory)
   (gptel-agent-runtime--prune-trajectory-files)
+  ;; Mirror into the SQLite index when gar-memory-sqlite is loaded. The
+  ;; flat-file write above remains canonical; the index is a query
+  ;; surface on top.
+  (when (fboundp 'gptel-agent-runtime-sqlite-insert-trajectory)
+    (ignore-errors
+      (gptel-agent-runtime-sqlite-insert-trajectory trajectory)))
   (gptel-agent-runtime-emit-event
    'trajectory-recorded
    :source "trajectory"

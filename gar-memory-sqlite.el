@@ -1,0 +1,401 @@
+;;; gar-memory-sqlite.el --- SQLite + FTS5 + vector trajectory retrieval -*- lexical-binding: t; -*-
+
+;; Part of deno1011/gptel-agent-runtime. Added on 2026-05-29 as PR 5 of
+;; the self-reflective / learning / memorising track.
+
+;;; Commentary:
+
+;; A SQLite index over the gar-trajectory ring + on-disk files. Three
+;; tables:
+;;
+;;   trajectories(id, goal, session_id, started_at, finalized_at,
+;;                outcome, reason, iteration_count, blob)
+;;     blob carries the prin1'd trajectory struct so round-trips
+;;     are lossless when callers ask for the full record.
+;;
+;;   trajectories_fts(rowid, goal, decisions)
+;;     FTS5 virtual table (when compiled in) over the searchable text.
+;;     A LIKE-based fallback handles plain SQLite builds.
+;;
+;;   embeddings(trajectory_id PRIMARY KEY, vec TEXT)
+;;     vec is a comma-separated string of floats. Linear scan + cosine
+;;     similarity for nearest-neighbor; fine up to a few thousand
+;;     entries.
+
+;;; Code:
+
+(require 'cl-lib)
+(require 'subr-x)
+
+(declare-function gptel-agent-runtime--timestamp "gar-substrate" ())
+(declare-function gptel-agent-runtime-emit-event "gptel-agent-runtime"
+                  (type &rest args))
+(declare-function gptel-agent-runtime--shorten "gar-substrate"
+                  (text &optional max))
+
+;; gar-trajectory struct accessors.
+(defvar gptel-agent-runtime--trajectories)
+(defvar gptel-agent-runtime-trajectories-directory)
+(declare-function gptel-agent-runtime-trajectory-p "gptel-agent-runtime" (obj))
+(declare-function gptel-agent-runtime-trajectory-id "gptel-agent-runtime" (t))
+(declare-function gptel-agent-runtime-trajectory-goal "gptel-agent-runtime"
+                  (t))
+(declare-function gptel-agent-runtime-trajectory-session-id
+                  "gptel-agent-runtime" (t))
+(declare-function gptel-agent-runtime-trajectory-started-at
+                  "gptel-agent-runtime" (t))
+(declare-function gptel-agent-runtime-trajectory-finalized-at
+                  "gptel-agent-runtime" (t))
+(declare-function gptel-agent-runtime-trajectory-outcome
+                  "gptel-agent-runtime" (t))
+(declare-function gptel-agent-runtime-trajectory-reason
+                  "gptel-agent-runtime" (t))
+(declare-function gptel-agent-runtime-trajectory-iteration-count
+                  "gptel-agent-runtime" (t))
+(declare-function gptel-agent-runtime-trajectory-decisions
+                  "gptel-agent-runtime" (t))
+
+;; gar-memory reuses.
+(declare-function gptel-agent-runtime--ollama-embedding "gar-memory" (text))
+(declare-function gptel-agent-runtime--cosine-similarity "gar-memory" (a b))
+(defvar gptel-agent-runtime-memory-directory)
+
+(defcustom gptel-agent-runtime-sqlite-enabled t
+  "When non-nil, mirror trajectory writes into the SQLite index.
+The flat-file format remains the canonical source of truth; the index
+provides fast keyword + vector search. Set to nil to disable the
+mirror without losing flat-file persistence."
+  :type 'boolean
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-sqlite-file
+  (expand-file-name "agent.sqlite"
+                    (or (and (boundp 'gptel-agent-runtime-memory-directory)
+                             gptel-agent-runtime-memory-directory)
+                        (expand-file-name "gptel-agent-runtime/"
+                                          user-emacs-directory)))
+  "Path to the SQLite database file."
+  :type 'file
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-sqlite-embed-trajectories t
+  "When non-nil, compute and store an embedding for each trajectory's goal
+at insert time. Embeddings are needed for similarity search; disable
+when Ollama is unavailable to avoid hitting it for every insert."
+  :type 'boolean
+  :group 'gptel-agent-runtime)
+
+(defvar gptel-agent-runtime--sqlite-db nil
+  "Live SQLite connection handle, or nil when closed / unavailable.")
+
+(defvar gptel-agent-runtime--sqlite-fts-available nil
+  "Cached result of `--sqlite-fts5-available-p' for the current connection.")
+
+(defun gptel-agent-runtime--sqlite-available-p ()
+  "Return non-nil when Emacs is built with SQLite support."
+  (and (fboundp 'sqlite-available-p)
+       (sqlite-available-p)))
+
+(defun gptel-agent-runtime--sqlite-fts5-available-p (db)
+  "Return non-nil when DB's SQLite build was compiled with FTS5."
+  (condition-case _err
+      (let ((opts (sqlite-select db "PRAGMA compile_options")))
+        (cl-some (lambda (row)
+                   (let ((opt (car row)))
+                     (and (stringp opt)
+                          (string-match-p "FTS5" opt))))
+                 opts))
+    (error nil)))
+
+(defun gptel-agent-runtime--sqlite-ensure-schema (db)
+  "Create the trajectories tables + FTS5 (when available) on DB."
+  (sqlite-execute db "CREATE TABLE IF NOT EXISTS trajectories (
+                         id TEXT PRIMARY KEY,
+                         goal TEXT,
+                         session_id TEXT,
+                         started_at TEXT,
+                         finalized_at TEXT,
+                         outcome TEXT,
+                         reason TEXT,
+                         iteration_count INTEGER,
+                         blob TEXT)")
+  (sqlite-execute db "CREATE INDEX IF NOT EXISTS trajectories_outcome
+                         ON trajectories(outcome)")
+  (sqlite-execute db "CREATE INDEX IF NOT EXISTS trajectories_finalized
+                         ON trajectories(finalized_at DESC)")
+  (sqlite-execute db "CREATE TABLE IF NOT EXISTS embeddings (
+                         trajectory_id TEXT PRIMARY KEY,
+                         vec TEXT)")
+  (setq gptel-agent-runtime--sqlite-fts-available
+        (gptel-agent-runtime--sqlite-fts5-available-p db))
+  (when gptel-agent-runtime--sqlite-fts-available
+    (condition-case _err
+        ;; Self-contained FTS5 (not external content): we own the
+        ;; lifecycle, so INSERT OR REPLACE on the trajectories table
+        ;; can't desync rowids. Tradeoff: goal+decisions text is stored
+        ;; twice; the cost is negligible for the volumes we expect.
+        (sqlite-execute db "CREATE VIRTUAL TABLE IF NOT EXISTS
+                            trajectories_fts USING fts5(id UNINDEXED,
+                                                        goal, decisions)")
+      (error (setq gptel-agent-runtime--sqlite-fts-available nil)))))
+
+(defun gptel-agent-runtime-sqlite-open ()
+  "Open the SQLite connection, ensuring the schema. Returns the handle, or nil."
+  (when (and gptel-agent-runtime-sqlite-enabled
+             (gptel-agent-runtime--sqlite-available-p))
+    (unless gptel-agent-runtime--sqlite-db
+      (let ((dir (file-name-directory gptel-agent-runtime-sqlite-file)))
+        (unless (file-directory-p dir) (make-directory dir t)))
+      (setq gptel-agent-runtime--sqlite-db
+            (sqlite-open gptel-agent-runtime-sqlite-file))
+      (when gptel-agent-runtime--sqlite-db
+        (gptel-agent-runtime--sqlite-ensure-schema
+         gptel-agent-runtime--sqlite-db)))
+    gptel-agent-runtime--sqlite-db))
+
+(defun gptel-agent-runtime-sqlite-close ()
+  "Close the live SQLite connection, if any."
+  (interactive)
+  (when gptel-agent-runtime--sqlite-db
+    (ignore-errors (sqlite-close gptel-agent-runtime--sqlite-db))
+    (setq gptel-agent-runtime--sqlite-db nil)))
+
+(defun gptel-agent-runtime--sqlite-vec-to-string (vec)
+  "Encode a vector VEC (list of floats) as a comma-separated string."
+  (mapconcat (lambda (x) (format "%g" x)) (or vec '()) ","))
+
+(defun gptel-agent-runtime--sqlite-vec-from-string (s)
+  "Decode a comma-separated string S into a list of floats."
+  (when (and (stringp s) (not (string-empty-p s)))
+    (mapcar #'string-to-number (split-string s ","))))
+
+(defun gptel-agent-runtime--sqlite-trajectory-blob (trajectory)
+  "Return the prin1'd TRAJECTORY for storage in the blob column."
+  (let ((print-level nil) (print-length nil))
+    (prin1-to-string trajectory)))
+
+(defun gptel-agent-runtime--sqlite-decisions-text (trajectory)
+  "Return the trajectory's decisions concatenated into one TEXT string."
+  (mapconcat (lambda (d) (format "%s" d))
+             (or (and (fboundp 'gptel-agent-runtime-trajectory-decisions)
+                      (gptel-agent-runtime-trajectory-decisions trajectory))
+                 '())
+             "\n"))
+
+(defun gptel-agent-runtime-sqlite-insert-trajectory (trajectory)
+  "Mirror TRAJECTORY into the SQLite index.
+Replaces any existing row with the same id. Updates the FTS5 index when
+available, and (when `embed-trajectories' is on) writes an embedding
+of the goal text. Returns the inserted id, or nil when SQLite is
+disabled or unavailable."
+  (when-let* ((db (gptel-agent-runtime-sqlite-open))
+              (id (gptel-agent-runtime-trajectory-id trajectory))
+              (goal (or (gptel-agent-runtime-trajectory-goal trajectory) "")))
+    (sqlite-execute
+     db "INSERT OR REPLACE INTO trajectories
+         (id, goal, session_id, started_at, finalized_at,
+          outcome, reason, iteration_count, blob)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+     (list id
+           goal
+           (or (gptel-agent-runtime-trajectory-session-id trajectory) "")
+           (or (gptel-agent-runtime-trajectory-started-at trajectory) "")
+           (or (gptel-agent-runtime-trajectory-finalized-at trajectory) "")
+           (format "%s" (or (gptel-agent-runtime-trajectory-outcome trajectory) ""))
+           (format "%s" (or (gptel-agent-runtime-trajectory-reason trajectory) ""))
+           (or (gptel-agent-runtime-trajectory-iteration-count trajectory) 0)
+           (gptel-agent-runtime--sqlite-trajectory-blob trajectory)))
+    ;; FTS5 mirror (self-contained; we own the lifecycle, so DELETE +
+    ;; INSERT keyed by id stays in lockstep with the trajectories table).
+    (when gptel-agent-runtime--sqlite-fts-available
+      (ignore-errors
+        (sqlite-execute db "DELETE FROM trajectories_fts WHERE id = ?"
+                        (list id))
+        (sqlite-execute
+         db "INSERT INTO trajectories_fts (id, goal, decisions)
+             VALUES (?, ?, ?)"
+         (list id goal
+               (gptel-agent-runtime--sqlite-decisions-text trajectory)))))
+    ;; Embedding (best-effort).
+    (when (and gptel-agent-runtime-sqlite-embed-trajectories
+               (fboundp 'gptel-agent-runtime--ollama-embedding))
+      (let ((vec (ignore-errors
+                   (gptel-agent-runtime--ollama-embedding goal))))
+        (when (and (listp vec) vec)
+          (sqlite-execute
+           db "INSERT OR REPLACE INTO embeddings (trajectory_id, vec)
+               VALUES (?, ?)"
+           (list id (gptel-agent-runtime--sqlite-vec-to-string vec))))))
+    id))
+
+(defun gptel-agent-runtime--sqlite-row-to-summary (row)
+  "Convert a SELECT row (id goal outcome finalized_at) into a plist summary."
+  (list :id (nth 0 row)
+        :goal (nth 1 row)
+        :outcome (nth 2 row)
+        :finalized-at (nth 3 row)))
+
+(defun gptel-agent-runtime-sqlite-search-by-text (pattern &optional limit)
+  "Return up to LIMIT trajectory summaries whose goal/decisions match PATTERN.
+Uses FTS5 when available; falls back to LIKE on the goal column."
+  (let* ((db (gptel-agent-runtime-sqlite-open))
+         (cap (or limit 20)))
+    (when db
+      (mapcar
+       #'gptel-agent-runtime--sqlite-row-to-summary
+       (cond
+        (gptel-agent-runtime--sqlite-fts-available
+         (condition-case _err
+             (sqlite-select db
+              "SELECT t.id, t.goal, t.outcome, t.finalized_at
+                 FROM trajectories_fts f
+                 JOIN trajectories t ON t.id = f.id
+                 WHERE trajectories_fts MATCH ?
+                 ORDER BY t.finalized_at DESC
+                 LIMIT ?"
+              (list pattern cap))
+           (error
+            ;; Bad FTS5 query string -> fall through to LIKE.
+            (sqlite-select db
+             "SELECT id, goal, outcome, finalized_at FROM trajectories
+                WHERE goal LIKE ? ORDER BY finalized_at DESC LIMIT ?"
+             (list (concat "%" pattern "%") cap)))))
+        (t
+         (sqlite-select db
+          "SELECT id, goal, outcome, finalized_at FROM trajectories
+             WHERE goal LIKE ? ORDER BY finalized_at DESC LIMIT ?"
+          (list (concat "%" pattern "%") cap))))))))
+
+(defun gptel-agent-runtime-sqlite-similar-trajectories (text &optional limit)
+  "Return up to LIMIT trajectory summaries most similar to TEXT.
+Embeds TEXT via the gar-memory Ollama embedding helper, then linear-
+scans the `embeddings' table to compute cosine similarity. Returns
+plists augmented with `:similarity'. nil when embeddings are
+unavailable."
+  (let* ((db (gptel-agent-runtime-sqlite-open))
+         (cap (or limit 10))
+         (query-vec (and (fboundp 'gptel-agent-runtime--ollama-embedding)
+                         (gptel-agent-runtime--ollama-embedding text))))
+    (when (and db query-vec)
+      (let* ((rows (sqlite-select
+                    db "SELECT t.id, t.goal, t.outcome, t.finalized_at, e.vec
+                          FROM trajectories t
+                          JOIN embeddings e ON e.trajectory_id = t.id"))
+             (scored nil))
+        (dolist (row rows)
+          (let* ((vec (gptel-agent-runtime--sqlite-vec-from-string
+                       (nth 4 row)))
+                 (sim (and vec
+                           (gptel-agent-runtime--cosine-similarity
+                            query-vec vec))))
+            (when sim
+              (push (list :id (nth 0 row)
+                          :goal (nth 1 row)
+                          :outcome (nth 2 row)
+                          :finalized-at (nth 3 row)
+                          :similarity sim)
+                    scored))))
+        (cl-subseq
+         (sort scored (lambda (a b)
+                        (> (plist-get a :similarity)
+                           (plist-get b :similarity))))
+         0 (min cap (length scored)))))))
+
+(defun gptel-agent-runtime-sqlite-get-trajectory (id)
+  "Return the deserialized trajectory struct with ID, or nil."
+  (when-let* ((db (gptel-agent-runtime-sqlite-open))
+              (rows (sqlite-select
+                     db "SELECT blob FROM trajectories WHERE id = ?"
+                     (list id)))
+              (blob (caar rows)))
+    (condition-case nil
+        (car (read-from-string blob))
+      (error nil))))
+
+;;;###autoload
+(defun gptel-agent-runtime-sqlite-migrate-flat-files ()
+  "Bulk-import every trajectory under `trajectories-directory' into SQLite.
+Idempotent: inserts use INSERT OR REPLACE so re-running is safe.
+Returns the number of trajectories indexed."
+  (interactive)
+  (let ((db (gptel-agent-runtime-sqlite-open))
+        (count 0))
+    (unless db
+      (user-error "SQLite not available; install Emacs 29.1+ with SQLite"))
+    ;; Make sure the in-memory ring is loaded; insert each.
+    (when (fboundp 'gptel-agent-runtime-load-trajectories)
+      (gptel-agent-runtime-load-trajectories))
+    (dolist (traj (or gptel-agent-runtime--trajectories '()))
+      (when (gptel-agent-runtime-sqlite-insert-trajectory traj)
+        (setq count (1+ count))))
+    (gptel-agent-runtime-emit-event
+     'sqlite-migration-finished
+     :source "sqlite"
+     :payload (list :indexed count)
+     :taint 'trusted)
+    (when (called-interactively-p 'interactive)
+      (message "Indexed %d trajectories into %s"
+               count gptel-agent-runtime-sqlite-file))
+    count))
+
+(defun gptel-agent-runtime-sqlite-stats ()
+  "Return a plist describing the SQLite index state."
+  (let ((db (gptel-agent-runtime-sqlite-open)))
+    (when db
+      (list :file gptel-agent-runtime-sqlite-file
+            :fts5-available gptel-agent-runtime--sqlite-fts-available
+            :trajectories
+            (or (caar (sqlite-select db "SELECT COUNT(*) FROM trajectories"))
+                0)
+            :embeddings
+            (or (caar (sqlite-select db "SELECT COUNT(*) FROM embeddings"))
+                0)))))
+
+;;;###autoload
+(defun gptel-agent-runtime-search-trajectories (pattern)
+  "Search past trajectories by goal/decisions text PATTERN.
+Uses FTS5 when available, LIKE fallback otherwise. Opens a buffer with
+the matching trajectory summaries."
+  (interactive "sSearch trajectories: ")
+  (let* ((hits (gptel-agent-runtime-sqlite-search-by-text pattern 30))
+         (buf (get-buffer-create "*gptel-agent-trajectory-search*")))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert (format "Search: %s\nMatches: %d\n\n" pattern (length hits)))
+        (dolist (hit hits)
+          (insert (format "  [%s] %s -- %s\n"
+                          (or (plist-get hit :outcome) "?")
+                          (or (plist-get hit :finalized-at) "?")
+                          (or (plist-get hit :goal) "")))))
+      (goto-char (point-min))
+      (special-mode))
+    (display-buffer buf)))
+
+;;;###autoload
+(defun gptel-agent-runtime-similar-trajectories (text)
+  "Find past trajectories whose goal is most similar to TEXT.
+Embeds TEXT via the Ollama embedding cache and ranks stored
+trajectories by cosine similarity. Opens a results buffer."
+  (interactive "sGoal text: ")
+  (let* ((hits (gptel-agent-runtime-sqlite-similar-trajectories text 10))
+         (buf (get-buffer-create "*gptel-agent-similar-trajectories*")))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert (format "Similar to: %s\nMatches: %d\n\n"
+                        text (length hits)))
+        (if (null hits)
+            (insert "  (no embeddings available -- run M-x gptel-agent-runtime-sqlite-migrate-flat-files first, or check Ollama)\n")
+          (dolist (hit hits)
+            (insert (format "  [%.3f] [%s] %s\n"
+                            (or (plist-get hit :similarity) 0.0)
+                            (or (plist-get hit :outcome) "?")
+                            (or (plist-get hit :goal) ""))))))
+      (goto-char (point-min))
+      (special-mode))
+    (display-buffer buf)))
+
+(provide 'gar-memory-sqlite)
+
+;;; gar-memory-sqlite.el ends here
