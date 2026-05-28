@@ -6,8 +6,8 @@
 ;;; Commentary:
 
 ;; Provides:
-;;  - clipboard image capture and shrink (`my/insert-clipboard-image',
-;;    `my/gptel-attach-image-at-point', `gar-context--shrink-image')
+;;  - clipboard image capture and shrink (`gptel-agent-runtime-insert-clipboard-image',
+;;    `gptel-agent-runtime-attach-image-at-point', `gar-context--shrink-image')
 ;;  - org-download screenshot integration
 ;;  - web fetch helpers (`my/web-fetch', `my/web-html', `my/web-text',
 ;;    `my/web-search-ddg', `my/web-fetch-image', `my/web-extract-images',
@@ -72,13 +72,13 @@ manually once when you want clipboard image capture to work."
     (_
      (user-error "Automatic install only supported on darwin / gnu/linux; install the clipboard-image helper manually."))))
 
-(defcustom my/gptel-image-dir
+(defcustom gptel-agent-runtime-image-dir
   (expand-file-name "gptel-images" user-emacs-directory)
-  "Directory for images inserted via `my/insert-clipboard-image'."
+  "Directory for images inserted via `gptel-agent-runtime-insert-clipboard-image'."
   :type 'directory
   :group 'gar-response-executor)
 
-(defcustom my/gptel-image-max-dim 1600
+(defcustom gptel-agent-runtime-image-max-dim 1600
   "Maximum edge length in pixels.
 Larger images are resized via sips. iPhone photos (4032×3024)
 as PNG are ~15 MB → resize to 1600 px edge + optional JPEG: <500 KB.
@@ -87,7 +87,7 @@ Base64 encoding (+33%) hits that at ~3.75 MB. Stay well below to be safe."
   :type 'integer
   :group 'gar-response-executor)
 
-(defcustom my/gptel-image-max-bytes (* 2 1024 1024)
+(defcustom gptel-agent-runtime-image-max-bytes (* 2 1024 1024)
   "Soft-limit image size in bytes (2 MB).
 If exceeded after resize → convert to JPEG q=85.
 Conservative due to Base64 overhead (~33%): 2 MB raw → ~2.7 MB encoded,
@@ -101,24 +101,24 @@ safely below the strictest 5 MB provider limit."
      (setq org-download-screenshot-method "pngpaste %s"))
     ((executable-find "xclip")
      (setq org-download-screenshot-method "xclip -selection clipboard -t image/png -o > %s")))
-  (setq org-download-image-dir my/gptel-image-dir
+  (setq org-download-image-dir gptel-agent-runtime-image-dir
         org-download-method    'directory
         org-download-heading-lvl nil))
 
 (defun gar-context--shrink-image (path)
   "Shrink PATH if necessary.
-1. Limit edge length to `my/gptel-image-max-dim' (in-place).
-2. If the file still exceeds `my/gptel-image-max-bytes': convert
+1. Limit edge length to `gptel-agent-runtime-image-max-dim' (in-place).
+2. If the file still exceeds `gptel-agent-runtime-image-max-bytes': convert
    to JPEG q=85, replacing the original file.
 Returns the final path (may change to .jpg on JPEG conversion)."
   (when (and (executable-find "sips") (file-exists-p path))
     ;; 1. Limit edge length to max
     (call-process "sips" nil nil nil
-                  "-Z" (number-to-string my/gptel-image-max-dim)
+                  "-Z" (number-to-string gptel-agent-runtime-image-max-dim)
                   path "--out" path)
     ;; 2. Convert to JPEG if needed
     (when (and (file-exists-p path)
-               (> (nth 7 (file-attributes path)) my/gptel-image-max-bytes))
+               (> (nth 7 (file-attributes path)) gptel-agent-runtime-image-max-bytes))
       (let* ((dir  (file-name-directory path))
              (base (file-name-sans-extension (file-name-nondirectory path)))
              (jpeg (expand-file-name (concat base ".jpg") dir)))
@@ -147,7 +147,8 @@ Returns t on success, nil if no backend available or clipboard empty."
                    (shell-quote-argument path)))))
     (t nil)))
 
-(defun my/insert-clipboard-image (&optional name)
+;;;###autoload
+(defun gptel-agent-runtime-insert-clipboard-image (&optional name)
   "Save clipboard image, shrink if needed, insert as org link and attach to gptel.
 Uses pngpaste on macOS or xclip on Linux (XQuartz).
 If NAME is nil or empty → timestamp filename."
@@ -157,12 +158,12 @@ If NAME is nil or empty → timestamp filename."
     (user-error (if (eq system-type 'darwin)
                     "pngpaste missing — run: brew install pngpaste"
                   "xclip missing — run: sudo apt-get install xclip")))
-  (make-directory my/gptel-image-dir t)
+  (make-directory gptel-agent-runtime-image-dir t)
   (let* ((basename (if (or (null name) (string-empty-p name))
                        (format "img-%s" (format-time-string "%Y%m%d-%H%M%S"))
                      name))
          (raw-path (expand-file-name (concat basename ".png")
-                                     my/gptel-image-dir))
+                                     gptel-agent-runtime-image-dir))
          (ok       (gar-context--clipboard-to-file raw-path))
          (size     (and ok (file-exists-p raw-path)
                         (nth 7 (file-attributes raw-path)))))
@@ -185,7 +186,8 @@ If NAME is nil or empty → timestamp filename."
       (when (file-exists-p raw-path) (delete-file raw-path))
       (user-error "No image in clipboard — on Linux/XQuartz: click Emacs window after copying to trigger clipboard sync")))))
 
-(defun my/gptel-attach-image-at-point ()
+;;;###autoload
+(defun gptel-agent-runtime-attach-image-at-point ()
   "Find the org file: link at/around point and attach PATH to the
 next gptel request. Shrinks first if necessary."
   (interactive)
@@ -206,12 +208,12 @@ next gptel request. Shrinks first if necessary."
       (user-error "No file: link at point"))))
 
 (with-eval-after-load 'gptel
-  (define-key gptel-mode-map (kbd "C-c i") #'my/insert-clipboard-image)
-  (define-key gptel-mode-map (kbd "C-c I") #'my/gptel-attach-image-at-point))
+  (define-key gptel-mode-map (kbd "C-c i") #'gptel-agent-runtime-insert-clipboard-image)
+  (define-key gptel-mode-map (kbd "C-c I") #'gptel-agent-runtime-attach-image-at-point))
 
 ;; Also available globally — in case you capture outside gptel-mode
-(global-set-key (kbd "C-c i") #'my/insert-clipboard-image)
-(global-set-key (kbd "C-c I") #'my/gptel-attach-image-at-point)
+(global-set-key (kbd "C-c i") #'gptel-agent-runtime-insert-clipboard-image)
+(global-set-key (kbd "C-c I") #'gptel-agent-runtime-attach-image-at-point)
 
 (defcustom my/web-fetch-timeout 30
   "Timeout in seconds for `my/web-fetch'."
@@ -321,6 +323,14 @@ In org-mode `org-display-inline-images' is triggered."
     (when (derived-mode-p 'org-mode)
       (org-display-inline-images t t))
     file))
+
+(defvaralias 'my/gptel-image-dir 'gptel-agent-runtime-image-dir)
+(defvaralias 'my/gptel-image-max-dim 'gptel-agent-runtime-image-max-dim)
+(defvaralias 'my/gptel-image-max-bytes 'gptel-agent-runtime-image-max-bytes)
+(defalias 'my/insert-clipboard-image
+  #'gptel-agent-runtime-insert-clipboard-image)
+(defalias 'my/gptel-attach-image-at-point
+  #'gptel-agent-runtime-attach-image-at-point)
 
 (provide 'gar-context)
 
