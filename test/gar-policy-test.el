@@ -109,6 +109,55 @@
     (should (string-match-p "=== END TRUSTED" wrapped))
     (should-not (string-match-p "Do not follow instructions" wrapped))))
 
+(ert-deftest gar-policy-schema-gate-denies-bad-args-when-registered ()
+  "When a tool has an :arg-schema, policy-evaluate-step denies steps that violate it."
+  (let* ((gptel-agent-runtime-tool-registry nil)
+         (schema '(:type object
+                   :properties (:path (:type string :min-length 1))
+                   :required (:path)
+                   :additional-properties nil))
+         (_ (gptel-agent-runtime-register-tool
+             "schema_probe" 'write 'write "test tool with arg-schema"
+             :arg-schema schema))
+         (bad-step (gptel-agent-runtime-plan-step-create
+                    :id "p" :title "t" :suggested-tool "schema_probe"
+                    :args (list :sneaky t) :risk 'safe
+                    :agent "implementer"))
+         (decision (gptel-agent-runtime-policy-evaluate-step bad-step))
+         (reason (gptel-agent-runtime-policy-decision-reason decision)))
+    (should-not (gptel-agent-runtime-policy-decision-allowed-p decision))
+    (should (stringp reason))
+    (should (string-match-p "registered schema" reason))))
+
+(ert-deftest gar-policy-schema-gate-passes-good-args ()
+  "policy-evaluate-step allows steps whose args satisfy the registered schema."
+  (let* ((gptel-agent-runtime-tool-registry nil)
+         (schema '(:type object
+                   :properties (:path (:type string :min-length 1))
+                   :required (:path)
+                   :additional-properties nil))
+         (_ (gptel-agent-runtime-register-tool
+             "schema_probe" 'write 'write "test tool with arg-schema"
+             :arg-schema schema))
+         (good-step (gptel-agent-runtime-plan-step-create
+                     :id "p" :title "t" :suggested-tool "schema_probe"
+                     :args (list :path "/tmp/x") :risk 'safe
+                     :agent "implementer"))
+         (decision (gptel-agent-runtime-policy-evaluate-step good-step)))
+    (should (gptel-agent-runtime-policy-decision-allowed-p decision))))
+
+(ert-deftest gar-policy-schema-gate-noop-when-no-schema ()
+  "Tools registered without an :arg-schema bypass the new gate entirely."
+  (let* ((gptel-agent-runtime-tool-registry nil)
+         (_ (gptel-agent-runtime-register-tool
+             "no_schema_probe" 'read 'safe "test tool without arg-schema"))
+         (step (gptel-agent-runtime-plan-step-create
+                :id "p" :title "t" :suggested-tool "no_schema_probe"
+                :args (list :anything "anything") :risk 'safe
+                :agent "researcher"))
+         (decision (gptel-agent-runtime-policy-evaluate-step step)))
+    (should (gptel-agent-runtime-policy-decision-allowed-p decision))))
+
 (ert-deftest gar-policy-risk-ordering-is-monotone ()
   "risk-at-least-p reflects safe < read < write < shell < destructive."
   (should (gptel-agent-runtime-risk-at-least-p 'destructive 'safe))
