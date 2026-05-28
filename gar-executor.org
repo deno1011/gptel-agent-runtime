@@ -379,8 +379,8 @@ that lack a `:file' output block."
                   (and (gptel-tool-p tool)
                        (equal (gptel-tool-name tool) name)))
                 (or (and (boundp 'gptel-tools) gptel-tools)
-                    (and (fboundp 'my/gptel-tools-all)
-                         (my/gptel-tools-all))))))
+                    (and (fboundp 'gptel-agent-runtime-tools-all)
+                         (gptel-agent-runtime-tools-all))))))
 
 (defun gptel-agent-runtime--read-raw-tool-call (text)
   "Parse TEXT as one raw model-emitted tool call.
@@ -654,7 +654,7 @@ Positions are zero-based offsets relative to TEXT."
 
 (defun gptel-agent-runtime-capability-summary ()
   "Return a deterministic summary of registered Emacs agent capabilities."
-  (let* ((tools (sort (mapcar #'gptel-tool-name (or (my/gptel-tools-all) nil))
+  (let* ((tools (sort (mapcar #'gptel-tool-name (or (gptel-agent-runtime-tools-all) nil))
                       #'string<))
          (agents (sort (mapcar #'gptel-agent-runtime-agent-name
                                 (gptel-agent-runtime-enabled-agents))

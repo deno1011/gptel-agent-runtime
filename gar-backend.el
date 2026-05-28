@@ -25,7 +25,7 @@
 ;; Cross-module callees provided by other modules; declared here so the
 ;; byte-compiler does not warn during isolated compilation.
 (declare-function gptel-agent-runtime-sync-directive-for-current-runtime "gar-directives" ())
-(declare-function my/gptel-sync-tools "gptel-agent-runtime" ())
+(declare-function gptel-agent-runtime-sync-tools "gptel-agent-runtime" ())
 
 ;; Defcustoms read by this module are defined in the master; declare them
 ;; as `defvar' here so the byte-compiler accepts the references.
@@ -132,8 +132,8 @@ both plist and vector shapes returned by `json-read'."
             gptel-model model)
       (when (fboundp 'gptel-agent-runtime-sync-directive-for-current-runtime)
         (gptel-agent-runtime-sync-directive-for-current-runtime))
-      (when (fboundp 'my/gptel-sync-tools)
-        (my/gptel-sync-tools))
+      (when (fboundp 'gptel-agent-runtime-sync-tools)
+        (gptel-agent-runtime-sync-tools))
       (message "gptel local model selected: %s%s"
                model
                (if (eq model gptel-agent-runtime-default-local-model)

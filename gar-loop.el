@@ -286,7 +286,7 @@ remember -> continue."
             (if (fboundp 'gptel-tool-name)
                 (gptel-tool-name tool)
               (plist-get tool :name)))
-          (or (my/gptel-tools-all) nil)))
+          (or (gptel-agent-runtime-tools-all) nil)))
 
 (defun gptel-agent-runtime--planner-system ()
   "Return the strict system prompt for planner JSON."
@@ -1642,7 +1642,7 @@ The preferred format is JSON with a top-level :steps list. A single
 
 (defun gptel-agent-runtime--find-native-tool (name)
   "Return gptel tool named NAME, or nil."
-  (cl-find name (my/gptel-tools-all)
+  (cl-find name (gptel-agent-runtime-tools-all)
            :key (lambda (tool)
                   (if (fboundp 'gptel-tool-name)
                       (gptel-tool-name tool)

@@ -875,13 +875,13 @@ provenance and is renamed with a `.approved' suffix."
 (with-eval-after-load 'gptel
   ;; Set globally -- all tools are registered by this point since this section
   ;; is the last with-eval-after-load 'gptel block in the module. Guarded with
-  ;; `fboundp' because `my/gptel-tools-all' is defined later in the master's
+  ;; `fboundp' because `gptel-agent-runtime-tools-all' is defined later in the master's
   ;; Model Switching section, which loads AFTER gar-tools is required. A
   ;; matching call in the master finishes the wiring once Model Switching
   ;; has installed the helper.
   (setq gptel-use-tools t)
-  (when (fboundp 'my/gptel-tools-all)
-    (setq gptel-tools (my/gptel-tools-all))))
+  (when (fboundp 'gptel-agent-runtime-tools-all)
+    (setq gptel-tools (gptel-agent-runtime-tools-all))))
 
 (defvar gptel-agent-runtime--current-session nil
   "The active agent session object.")

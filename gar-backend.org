@@ -68,7 +68,7 @@ See also:
 ;; Cross-module callees provided by other modules; declared here so the
 ;; byte-compiler does not warn during isolated compilation.
 (declare-function gptel-agent-runtime-sync-directive-for-current-runtime "gar-directives" ())
-(declare-function my/gptel-sync-tools "gptel-agent-runtime" ())
+(declare-function gptel-agent-runtime-sync-tools "gptel-agent-runtime" ())
 
 ;; Defcustoms read by this module are defined in the master; declare them
 ;; as `defvar' here so the byte-compiler accepts the references.
@@ -215,8 +215,8 @@ and by the model router when it routes to a local profile.
             gptel-model model)
       (when (fboundp 'gptel-agent-runtime-sync-directive-for-current-runtime)
         (gptel-agent-runtime-sync-directive-for-current-runtime))
-      (when (fboundp 'my/gptel-sync-tools)
-        (my/gptel-sync-tools))
+      (when (fboundp 'gptel-agent-runtime-sync-tools)
+        (gptel-agent-runtime-sync-tools))
       (message "gptel local model selected: %s%s"
                model
                (if (eq model gptel-agent-runtime-default-local-model)
@@ -227,7 +227,7 @@ and by the model router when it routes to a local profile.
 * Backend registry mutator
 
 The setup file populates =my/gptel-backends= directly with =setq=, but
-the model router and =my/gptel-select-model= use this helper to
+the model router and =gptel-agent-runtime-select-model= use this helper to
 register one entry at a time (replacing any existing entry with the same
 display name).
 
