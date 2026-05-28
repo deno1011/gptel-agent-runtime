@@ -96,6 +96,9 @@
 (defvar gptel-agent-runtime-refine-failure-threshold)
 (defvar gptel-agent-runtime--last-refinements)
 
+;; gar-memory-sqlite (loaded AFTER gar-mission-control; late-bound).
+(declare-function gptel-agent-runtime-sqlite-stats "gar-memory-sqlite" ())
+
 ;; gar-playbook-experiment (loaded AFTER gar-mission-control; late-bound).
 (defvar gptel-agent-runtime--experiments)
 (defvar gptel-agent-runtime--last-experiment-events)
@@ -348,6 +351,18 @@ status, and the registered agent capability allowlist."
                 (cl-subseq gptel-agent-runtime--last-refinements
                            0 (min 5 (length gptel-agent-runtime--last-refinements)))
                 "\n"))))
+    (gptel-agent-runtime--mission-control-section
+     "Memory index (SQLite)"
+     (let ((stats (and (fboundp 'gptel-agent-runtime-sqlite-stats)
+                       (gptel-agent-runtime-sqlite-stats))))
+       (if (null stats)
+           "  (SQLite index unavailable; flat-file trajectories only)"
+         (format "  Trajectories: %d   Embeddings: %d   FTS5: %s\n  File: %s"
+                 (or (plist-get stats :trajectories) 0)
+                 (or (plist-get stats :embeddings) 0)
+                 (if (plist-get stats :fts5-available) "ON" "off (LIKE fallback)")
+                 (gptel-agent-runtime--shorten
+                  (or (plist-get stats :file) "") 60)))))
     (gptel-agent-runtime--mission-control-section
      "Experiments (A/B)"
      (let* ((exps (and (boundp 'gptel-agent-runtime--experiments)
