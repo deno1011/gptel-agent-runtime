@@ -106,6 +106,13 @@ See also:
 (defvar gptel-agent-runtime-skeptic-trigger-caps)
 (defvar gptel-agent-runtime--last-skeptic-verdicts)
 
+;; gar-verifier (loaded before gar-mission-control).
+(defvar gptel-agent-runtime-verifier-mode)
+(defvar gptel-agent-runtime-verifier-budget-ms)
+(defvar gptel-agent-runtime-verifier-max-retries)
+(defvar gptel-agent-runtime-verifier-trigger-risks)
+(defvar gptel-agent-runtime--last-verifier-verdicts)
+
 ;; gar-memory (loaded after gar-mission-control; late-bound).
 (defvar gptel-agent-runtime-novelty-threshold)
 (defvar gptel-agent-runtime-novelty-min-tokens)
@@ -261,6 +268,30 @@ status, and the registered agent capability allowlist."
                             (length (plist-get v :concerns)))))
                 (cl-subseq gptel-agent-runtime--last-skeptic-verdicts
                            0 (min 5 (length gptel-agent-runtime--last-skeptic-verdicts)))
+                "\n"))))
+    (gptel-agent-runtime--mission-control-section
+     "Verifier"
+     (format "  Mode: %s   Budget: %dms   Max retries: %d\n  Trigger risks: %s\n  Recent verdicts: %d\n%s"
+             gptel-agent-runtime-verifier-mode
+             gptel-agent-runtime-verifier-budget-ms
+             gptel-agent-runtime-verifier-max-retries
+             gptel-agent-runtime-verifier-trigger-risks
+             (length gptel-agent-runtime--last-verifier-verdicts)
+             (if (null gptel-agent-runtime--last-verifier-verdicts)
+                 "  (no verdicts yet)"
+               (mapconcat
+                (lambda (entry)
+                  (let ((v (cdr entry)))
+                    (format "  %s  tool=%s  passed=%s  conf=%.2f  %s"
+                            (car entry)
+                            (plist-get v :tool)
+                            (plist-get v :passed)
+                            (or (plist-get v :confidence) 0.0)
+                            (gptel-agent-runtime--shorten
+                             (or (plist-get v :reason) "") 60))))
+                (cl-subseq gptel-agent-runtime--last-verifier-verdicts
+                           0 (min 5
+                                  (length gptel-agent-runtime--last-verifier-verdicts)))
                 "\n"))))
     (gptel-agent-runtime--mission-control-section
      "Exploration & learning"

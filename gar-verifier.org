@@ -1,0 +1,468 @@
+#+TITLE: gar-verifier: post-execution verifier + auto-retry signal
+#+PROPERTY: header-args:emacs-lisp :tangle gar-verifier.el :lexical t
+
+Module of [[file:gptel-agent-runtime.org][gptel-agent-runtime]]. Provides the post-execution verifier
+that runs AFTER an action completes and grades whether the result
+actually achieved the plan step's intent. The verdict drives auto-
+retry-with-correction in =gar-loop='s observe→reflect path.
+
+Why this is the unlock for the rest of the learning track: without a
+"did this work?" signal, every downstream learner (memory, skill
+evolution, playbook auto-refinement) is blind. The verifier is the
+sensor that the rest of the loop reads.
+
+Two operating modes (mirror of =gar-skeptic='s rule-based / model-based
+design):
+
+- /rule-based/ (default): deterministic checks on the
+  =action-result= shape -- non-=ok= status, empty output where output
+  was expected, output beginning with =error/failed/exception/
+  traceback= keywords. Narrow on purpose so it does not over-flag.
+- /model-based/: synchronously calls the model with goal + plan-step
+  + actual result and asks for a strict JSON verdict
+  =({passed, confidence, reason, suggested_correction})=. Uses the
+  same =gptel-request= + =accept-process-output= + =gptel-abort=
+  deadline pattern as =gar-skeptic-model=. Falls back to rule-based
+  on timeout / abort / error / unparseable output.
+
+The verdict drives =gar-loop=:
+
+- =:passed t=    -> proceed to =--reflect= as before
+- =:passed nil= and =attempts < max-retries+1= -> requeue the SAME
+  step with =:suggested-correction= appended to its =rationale=, so
+  the next =--act= incarnation has the verifier's diagnosis as
+  context. Skip =--reflect= for this iteration.
+- =:passed nil= and retries exhausted -> emit
+  =verifier-gave-up= event, fall through to =--reflect=
+  (which typically resolves the step as =failed=).
+
+See also:
+- [[file:gptel-agent-runtime.org][gptel-agent-runtime]] (master entrypoint that requires this module)
+- [[file:gar-skeptic.org][gar-skeptic]] / [[file:gar-skeptic-model.org][gar-skeptic-model]] (mirror design; skeptic is
+  pre-execution adversarial, verifier is post-execution graded)
+- [[file:gar-loop.org][gar-loop]] (=--observe-result= calls
+  =gptel-agent-runtime-verify-action-result= and routes by verdict)
+
+* File header
+
+#+begin_src emacs-lisp
+;;; gar-verifier.el --- post-execution verifier + auto-retry signal -*- lexical-binding: t; -*-
+
+;; Part of deno1011/gptel-agent-runtime. Added on 2026-05-28 as PR 1 of
+;; the self-reflective / learning / memorising track.
+
+;;; Commentary:
+
+;; Runs AFTER an action completes. Produces a verdict plist:
+;;
+;;   (:passed BOOL :confidence NUMBER :reason STRING
+;;    :suggested-correction STRING :mode SYMBOL :step STRING :tool STRING)
+;;
+;; The verdict is attached to a `verifier-verdict' event for
+;; observability and consumed by gar-loop's `--observe-result' to drive
+;; auto-retry of the failed step with the suggested correction
+;; appended to its rationale.
+
+;;; Code:
+
+(require 'cl-lib)
+(require 'subr-x)
+
+(declare-function gptel-agent-runtime-emit-event "gptel-agent-runtime"
+                  (type &rest args))
+(declare-function gptel-agent-runtime--timestamp "gptel-agent-runtime" ())
+(declare-function gptel-agent-runtime-plan-step-p "gptel-agent-runtime" (obj))
+(declare-function gptel-agent-runtime-plan-step-title
+                  "gptel-agent-runtime" (step))
+(declare-function gptel-agent-runtime-plan-step-rationale
+                  "gptel-agent-runtime" (step))
+(declare-function gptel-agent-runtime-plan-step-suggested-tool
+                  "gptel-agent-runtime" (step))
+(declare-function gptel-agent-runtime-plan-step-args
+                  "gptel-agent-runtime" (step))
+(declare-function gptel-agent-runtime-plan-step-risk
+                  "gptel-agent-runtime" (step))
+(declare-function gptel-agent-runtime-action-result-status
+                  "gptel-agent-runtime" (result))
+(declare-function gptel-agent-runtime-action-result-output
+                  "gptel-agent-runtime" (result))
+(declare-function gptel-agent-runtime-action-result-error
+                  "gptel-agent-runtime" (result))
+(declare-function gptel-agent-runtime-action-result-tool
+                  "gptel-agent-runtime" (result))
+(declare-function gptel-agent-runtime-task-goal "gptel-agent-runtime" (task))
+;; JSON parser + balanced-brace scanner are owned by gar-skeptic-model;
+;; reuse them here rather than duplicating the implementation.
+(declare-function gptel-agent-runtime--skeptic-extract-json-object
+                  "gar-skeptic-model" (text))
+(declare-function gptel-request "gptel" (&optional prompt &rest keys))
+(declare-function gptel-abort "gptel" (&optional buf))
+
+(defvar gptel-model)
+(defvar gptel-use-tools)
+(defvar gptel-stream)
+
+#+end_src
+
+* Defcustoms + state
+
+#+begin_src emacs-lisp
+(defcustom gptel-agent-runtime-verifier-mode 'rule-based
+  "How the post-execution verifier produces verdicts.
+`off' disables the verifier entirely; the loop runs as before.
+`rule-based' is deterministic: it fails only when the action result
+status is non-ok or the output begins with error/failed/exception/
+traceback keywords. Cheap and safe; default.
+`model-based' calls the model with goal + plan step + actual result
+via `gptel-request' with `gptel-agent-runtime-verifier-budget-ms' as
+deadline, then falls back to rule-based on timeout/abort/error/
+unparseable output."
+  :type '(choice (const :tag "Off" off)
+                 (const :tag "Rule-based (deterministic)" rule-based)
+                 (const :tag "Model-based" model-based))
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-verifier-budget-ms 3000
+  "Maximum milliseconds the model-based verifier may spend before falling back."
+  :type 'integer
+  :safe #'integerp
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-verifier-model nil
+  "Model symbol used for the model-based verifier, or nil to reuse `gptel-model'.
+Pin to a small fast model (e.g. a local 3B-class instruct model) to keep
+verifier latency below `gptel-agent-runtime-verifier-budget-ms'."
+  :type '(choice (const :tag "Use current gptel-model" nil)
+                 (symbol :tag "Model id symbol"))
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-verifier-max-retries 2
+  "Maximum auto-retry attempts after a verifier `passed=nil' verdict.
+The retry counter is the plan-step's `attempts' slot; each --act pass
+bumps it. When `attempts > max-retries + 1' (initial attempt + N
+retries), the verifier stops requeuing and falls through to --reflect."
+  :type 'integer
+  :safe #'integerp
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-verifier-trigger-risks
+  '(write shell destructive)
+  "Plan-step risks that trigger the verifier.
+Safe / read steps are not verified -- the cost outweighs the benefit
+for cheap, easily-redoable actions. Match this against `skeptic-trigger-
+risks' to keep the gate semantics consistent."
+  :type '(repeat symbol)
+  :group 'gptel-agent-runtime)
+
+(defvar gptel-agent-runtime--last-verifier-verdicts nil
+  "Recent verifier verdicts, newest first, for the mission-control dashboard.")
+
+#+end_src
+
+* Applies-p + rule-based verdict
+
+#+begin_src emacs-lisp
+(defun gptel-agent-runtime--verifier-applies-p (risk)
+  "Return non-nil when the verifier should fire for plan-step RISK."
+  (and (not (eq gptel-agent-runtime-verifier-mode 'off))
+       (memq risk gptel-agent-runtime-verifier-trigger-risks)))
+
+(defconst gptel-agent-runtime--verifier-error-output-pattern
+  "\\`\\(error\\|failed\\|exception\\|traceback\\)"
+  "Regexp matched against (downcase output) to detect failure-looking output.
+Conservative on purpose: only catches outputs that BEGIN with one of
+these keywords. Designed to avoid flagging normal text that happens to
+mention `error' or `failed' as substring.")
+
+(defun gptel-agent-runtime--verifier-rule-based-verdict (step result)
+  "Return a rule-based verdict plist for STEP and RESULT.
+The verdict fails (`:passed nil') only when STATUS is not `ok' OR the
+output begins with an error keyword. All other cases pass."
+  (let* ((status (gptel-agent-runtime-action-result-status result))
+         (output (or (gptel-agent-runtime-action-result-output result) ""))
+         (error (gptel-agent-runtime-action-result-error result))
+         (tool (or (gptel-agent-runtime-action-result-tool result) "<unknown>"))
+         (output-string (if (stringp output) output (format "%s" output)))
+         (looks-like-error
+          (string-match-p gptel-agent-runtime--verifier-error-output-pattern
+                          (downcase output-string)))
+         (passed (and (eq status 'ok) (not looks-like-error)))
+         (reason
+          (cond
+           ((not (eq status 'ok))
+            (format "Tool returned status=%s%s"
+                    status
+                    (if error (format ", error=%s" error) "")))
+           (looks-like-error
+            "Tool returned ok but output begins with an error keyword.")
+           (t
+            "Tool returned ok status; rule-based check has no concerns.")))
+         (correction
+          (cond
+           ((not passed)
+            (format
+             "Previous attempt of `%s' failed: %s. Re-issue with corrected arguments."
+             tool
+             (cond ((not (eq status 'ok)) (or error "unknown error"))
+                   (looks-like-error
+                    (substring output-string 0
+                               (min 200 (length output-string))))
+                   (t "unspecified")))))))
+    (list :passed passed
+          :confidence (if passed 0.9 1.0)
+          :reason reason
+          :suggested-correction correction
+          :mode 'rule-based
+          :step (gptel-agent-runtime-plan-step-title step)
+          :tool tool)))
+
+#+end_src
+
+* Model-based path
+
+#+begin_src emacs-lisp
+(defconst gptel-agent-runtime--verifier-system-prompt
+  "You are the runtime verifier. Be strict.
+
+Given a goal, a plan step that was just attempted, and the actual action
+result (status + output + error), evaluate whether the action achieved
+the step's intent. Return a single JSON object EXACTLY in this shape:
+
+{
+  \"passed\": true | false,
+  \"confidence\": 0.0-1.0,
+  \"reason\": \"...\",
+  \"suggested_correction\": \"...\"
+}
+
+Be strict:
+- If status is not `ok', passed=false.
+- If the output is empty when the goal required producing content, passed=false.
+- If the output contains an error/exception message even with status=ok, passed=false.
+- If the output is plausible but not clearly correct, passed=true with lower confidence.
+
+When passed=false, the suggested_correction MUST be a concrete next action
+the executor can take on the next attempt (different args, different tool,
+or a clarification of what is missing). Do not say `try again' without
+specifics.
+
+Return ONLY the JSON object. No prose before or after."
+  "System prompt used for the model-based verifier call.")
+
+(defun gptel-agent-runtime--verifier-build-prompt (step result task)
+  "Format the user prompt for the model-based verifier."
+  (format
+   (concat
+    "GOAL:\n%s\n\n"
+    "PLAN STEP:\n"
+    "  title: %s\n"
+    "  rationale: %s\n"
+    "  tool: %s\n"
+    "  args: %S\n\n"
+    "ACTION RESULT:\n"
+    "  status: %s\n"
+    "  tool: %s\n"
+    "  output: %s\n"
+    "  error: %s\n\n"
+    "Return the JSON verdict now.")
+   (or (and task (gptel-agent-runtime-task-goal task)) "")
+   (or (gptel-agent-runtime-plan-step-title step) "")
+   (or (gptel-agent-runtime-plan-step-rationale step) "")
+   (or (gptel-agent-runtime-plan-step-suggested-tool step) "")
+   (or (gptel-agent-runtime-plan-step-args step) '())
+   (gptel-agent-runtime-action-result-status result)
+   (or (gptel-agent-runtime-action-result-tool result) "<unknown>")
+   (or (gptel-agent-runtime-action-result-output result) "")
+   (or (gptel-agent-runtime-action-result-error result) "")))
+
+(defun gptel-agent-runtime--verifier-parse-verdict (text step result)
+  "Parse a JSON verifier verdict from TEXT into the verdict plist shape.
+Returns nil when the text cannot be parsed into a valid verdict; the
+caller falls back to the rule-based verdict."
+  (condition-case nil
+      (let* ((json-fragment
+              (gptel-agent-runtime--skeptic-extract-json-object text))
+             (parsed
+              (and json-fragment
+                   (let ((json-object-type 'plist)
+                         (json-array-type 'list)
+                         (json-key-type 'keyword)
+                         (json-false :json-false))
+                     (with-temp-buffer
+                       (insert json-fragment)
+                       (goto-char (point-min))
+                       (json-read)))))
+             (passed-raw (and parsed (plist-get parsed :passed)))
+             (passed (cond ((eq passed-raw t) t)
+                           ((eq passed-raw :json-false) nil)
+                           ((eq passed-raw nil) nil)
+                           ((stringp passed-raw)
+                            (member (downcase passed-raw) '("true" "yes" "ok")))
+                           (t nil)))
+             (confidence-raw (and parsed (plist-get parsed :confidence)))
+             (confidence (cond ((numberp confidence-raw) confidence-raw)
+                               ((stringp confidence-raw)
+                                (string-to-number confidence-raw))
+                               (t (if passed 0.8 0.8))))
+             (reason (and parsed
+                          (or (plist-get parsed :reason)
+                              (plist-get parsed :Reason)
+                              "")))
+             (correction (and parsed
+                              (or (plist-get parsed :suggested_correction)
+                                  (plist-get parsed :suggested-correction)
+                                  (plist-get parsed :correction)
+                                  ""))))
+        (when parsed
+          (list :passed passed
+                :confidence confidence
+                :reason (format "%s" reason)
+                :suggested-correction (format "%s" correction)
+                :mode 'model-based
+                :step (gptel-agent-runtime-plan-step-title step)
+                :tool (or (gptel-agent-runtime-action-result-tool result)
+                          "<unknown>"))))
+    (error nil)))
+
+(defun gptel-agent-runtime--verifier-model-based-verdict (step result task)
+  "Synchronously ask a model to verify STEP's RESULT in TASK's context.
+Returns the verdict plist on success; falls back to the rule-based
+verdict on timeout, abort, error, or unparseable model output."
+  (unless (and (fboundp 'gptel-request) (boundp 'gptel-model))
+    (cl-return-from gptel-agent-runtime--verifier-model-based-verdict
+      (gptel-agent-runtime--verifier-rule-based-verdict step result)))
+  (let* ((fallback (gptel-agent-runtime--verifier-rule-based-verdict
+                    step result))
+         (budget-secs (max 0.5
+                           (/ (or gptel-agent-runtime-verifier-budget-ms 3000)
+                              1000.0)))
+         (system gptel-agent-runtime--verifier-system-prompt)
+         (prompt (gptel-agent-runtime--verifier-build-prompt step result task))
+         (req-buf (generate-new-buffer " *gar-verifier-request*"))
+         (response nil) (done nil)
+         (gptel-model (or gptel-agent-runtime-verifier-model
+                          (and (boundp 'gptel-model) gptel-model)))
+         (gptel-use-tools nil)
+         (gptel-stream nil))
+    (unwind-protect
+        (condition-case _err
+            (progn
+              (with-current-buffer req-buf
+                (gptel-request prompt
+                  :buffer req-buf
+                  :stream nil
+                  :system system
+                  :callback (lambda (r _info) (setq response r done t))))
+              (let ((deadline (+ (float-time) budget-secs)))
+                (while (and (not done) (< (float-time) deadline))
+                  (accept-process-output nil 0.05))
+                (unless done
+                  (ignore-errors (gptel-abort req-buf))
+                  (setq response :timeout))))
+          (error (setq response :error)))
+      (when (buffer-live-p req-buf)
+        (kill-buffer req-buf)))
+    (cond
+     ((eq response :timeout) fallback)
+     ((eq response :error) fallback)
+     ((eq response 'abort) fallback)
+     ((stringp response)
+      (or (gptel-agent-runtime--verifier-parse-verdict response step result)
+          fallback))
+     (t fallback))))
+
+#+end_src
+
+* Dispatcher + retry orchestration helpers
+
+#+begin_src emacs-lisp
+(defun gptel-agent-runtime-verify-action-result (step result &optional task)
+  "Return a verifier verdict for STEP's RESULT, or nil when the verifier is off.
+TASK is the active runtime task (used for goal context in the model-based
+prompt). The dispatcher consults `gptel-agent-runtime-verifier-mode' and
+`--verifier-applies-p' to decide whether to fire; when it does, pushes
+the verdict onto `--last-verifier-verdicts' (ring of 50) and emits a
+`verifier-verdict' event for observability."
+  (when (and (gptel-agent-runtime-plan-step-p step)
+             (gptel-agent-runtime--verifier-applies-p
+              (or (gptel-agent-runtime-plan-step-risk step) 'safe)))
+    (let ((verdict
+           (pcase gptel-agent-runtime-verifier-mode
+             ('rule-based
+              (gptel-agent-runtime--verifier-rule-based-verdict step result))
+             ('model-based
+              (gptel-agent-runtime--verifier-model-based-verdict
+               step result task))
+             (_ nil))))
+      (when verdict
+        (push (cons (gptel-agent-runtime--timestamp) verdict)
+              gptel-agent-runtime--last-verifier-verdicts)
+        (when (> (length gptel-agent-runtime--last-verifier-verdicts) 50)
+          (setcdr (nthcdr 49 gptel-agent-runtime--last-verifier-verdicts) nil))
+        (gptel-agent-runtime-emit-event
+         'verifier-verdict
+         :source "verifier"
+         :payload verdict
+         :taint 'trusted)
+        verdict))))
+
+(defun gptel-agent-runtime--verifier-should-retry-p (step verdict)
+  "Return non-nil when STEP should be auto-retried given VERDICT.
+The step is eligible when:
+- VERDICT is non-nil and `:passed' is nil
+- the step's `attempts' counter is below `max-retries + 1' (1 initial + N)
+- a `:suggested-correction' is present (without one, retrying blindly
+  is no better than letting --reflect resolve the step)."
+  (when verdict
+    (let ((passed (plist-get verdict :passed))
+          (correction (plist-get verdict :suggested-correction))
+          (attempts (or (gptel-agent-runtime-plan-step-attempts step) 0))
+          (max-retries (or gptel-agent-runtime-verifier-max-retries 2)))
+      (and (not passed)
+           (stringp correction)
+           (not (string-empty-p (string-trim correction)))
+           (< attempts (1+ max-retries))))))
+
+(defun gptel-agent-runtime--verifier-prepare-retry (step verdict)
+  "Mutate STEP for the next --act pass, embedding VERDICT's suggested correction.
+Appends the correction to the step's `rationale' so the executor model
+sees the verifier's diagnosis, resets status to `pending', and bumps a
+small `(VERIFIER RETRY n)' suffix into the title for observability.
+
+Returns STEP."
+  (when (and step verdict)
+    (let* ((correction (or (plist-get verdict :suggested-correction) ""))
+           (reason (or (plist-get verdict :reason) ""))
+           (attempts (or (gptel-agent-runtime-plan-step-attempts step) 0))
+           (old-rationale (or (gptel-agent-runtime-plan-step-rationale step) ""))
+           (annotation
+            (format "\n\n[VERIFIER REJECTED ATTEMPT %d] %s\nCORRECTION: %s"
+                    attempts reason correction)))
+      (setf (gptel-agent-runtime-plan-step-rationale step)
+            (concat old-rationale annotation))
+      (setf (gptel-agent-runtime-plan-step-status step) 'pending)
+      (gptel-agent-runtime-emit-event
+       'verifier-retry-queued
+       :source "verifier"
+       :payload (list :step (gptel-agent-runtime-plan-step-title step)
+                      :attempts attempts
+                      :reason reason
+                      :suggested-correction correction)
+       :taint 'trusted)
+      step)))
+
+#+end_src
+
+* File footer
+
+#+begin_src emacs-lisp
+(provide 'gar-verifier)
+
+;;; gar-verifier.el ends here
+#+end_src
+
+<!-- gar:auto-backlinks:start -->
+* Required by
+
+  (no other modules require this one yet)
+<!-- gar:auto-backlinks:end -->
