@@ -1,0 +1,562 @@
+#+TITLE: gar-playbook-refine: auto-refine playbooks on consistent failure
+#+PROPERTY: header-args:emacs-lisp :tangle gar-playbook-refine.el :lexical t
+
+Module of [[file:gptel-agent-runtime.org][gptel-agent-runtime]]. Closes the learning loop: walks the
+trajectory ring for each playbook that matched at routing, detects
+consistent failure patterns from the verifier verdict history, and
+asks the model to rewrite the playbook body. The refined version is
+written as a candidate playbook (reusing the
+=gar-memory= candidate-playbook infrastructure) for human review via
+=M-x gptel-agent-runtime-review-playbook-candidates=.
+
+Why this is the third intelligence PR: PR 1 produced the signal
+(verifier verdicts), PR 2 captured them per goal (trajectories), and
+this PR consumes them to drive improvement. After this, learning is
+no longer "humans review and approve" -- it is "the system notices
+its own pattern of failure, proposes a fix, and asks a human to
+sanity-check before deploying it."
+
+Two operating modes:
+
+- /manual/ (default): only =M-x
+  gptel-agent-runtime-refine-playbook= triggers the refinement. The
+  user picks which playbook to refine and the module does the rest.
+- /auto/: a subscriber on the =trajectory-recorded= event checks every
+  matched playbook against the consistent-failure heuristic each
+  time a session finalizes. When the pattern triggers, refinement
+  runs automatically. Off by default because it spends model budget;
+  flip to =auto= once you trust the heuristic on your workload.
+
+See also:
+- [[file:gptel-agent-runtime.org][gptel-agent-runtime]] (master entrypoint that requires this module)
+- [[file:gar-trajectory.org][gar-trajectory]] (trajectory ring + struct accessors)
+- [[file:gar-memory.org][gar-memory]] (candidate-playbook directory and writer; playbook
+  registry accessors)
+- [[file:gar-skeptic-model.org][gar-skeptic-model]] (mirror pattern: synchronous
+  =gptel-request= with budget + JSON parse + fallback)
+- [[file:gar-verifier.org][gar-verifier]] (sibling: produces the signal; this module consumes it)
+
+* File header
+
+#+begin_src emacs-lisp
+;;; gar-playbook-refine.el --- auto-refine playbooks on consistent failure -*- lexical-binding: t; -*-
+
+;; Part of deno1011/gptel-agent-runtime. Added on 2026-05-28 as PR 3 of
+;; the self-reflective / learning / memorising track.
+
+;;; Commentary:
+
+;; Walks the trajectory ring to detect playbooks that are failing
+;; consistently (failure rate over a recent window >= threshold), asks
+;; the model to refine the playbook body given the failure pattern,
+;; and writes the result as a candidate playbook in the existing
+;; gar-memory candidates/ directory.
+;;
+;; The refined candidate is NOT automatically registered as the new
+;; playbook -- it is enqueued for human review like any other
+;; candidate. This keeps the human in the loop even when the heuristic
+;; runs in `auto' mode.
+
+;;; Code:
+
+(require 'cl-lib)
+(require 'json)
+(require 'subr-x)
+
+(declare-function gptel-agent-runtime--timestamp "gar-substrate" ())
+(declare-function gptel-agent-runtime--shorten "gar-substrate"
+                  (text &optional max))
+(declare-function gptel-agent-runtime-emit-event "gptel-agent-runtime"
+                  (type &rest args))
+(declare-function gptel-agent-runtime-event-payload "gptel-agent-runtime"
+                  (event))
+(declare-function gptel-agent-runtime-subscribe "gar-substrate"
+                  (event-type handler))
+
+;; gar-trajectory accessors.
+(defvar gptel-agent-runtime--trajectories)
+(declare-function gptel-agent-runtime-trajectory-p "gptel-agent-runtime" (obj))
+(declare-function gptel-agent-runtime-trajectory-outcome
+                  "gptel-agent-runtime" (traj))
+(declare-function gptel-agent-runtime-trajectory-playbook-ids
+                  "gptel-agent-runtime" (traj))
+(declare-function gptel-agent-runtime-trajectory-goal
+                  "gptel-agent-runtime" (traj))
+(declare-function gptel-agent-runtime-trajectory-finalized-at
+                  "gptel-agent-runtime" (traj))
+(declare-function gptel-agent-runtime-trajectory-steps
+                  "gptel-agent-runtime" (traj))
+(declare-function gptel-agent-runtime-trajectory-verifier-verdicts
+                  "gptel-agent-runtime" (traj))
+(declare-function gptel-agent-runtime-trajectory-step-title
+                  "gptel-agent-runtime" (s))
+(declare-function gptel-agent-runtime-trajectory-step-suggested-tool
+                  "gptel-agent-runtime" (s))
+
+;; gar-core playbook struct + registry.
+(defvar gptel-agent-runtime-playbook-registry)
+(declare-function gptel-agent-runtime-playbook-p "gptel-agent-runtime" (obj))
+(declare-function gptel-agent-runtime-playbook-id "gptel-agent-runtime" (pb))
+(declare-function gptel-agent-runtime-playbook-summary
+                  "gptel-agent-runtime" (pb))
+(declare-function gptel-agent-runtime-playbook-triggers
+                  "gptel-agent-runtime" (pb))
+(declare-function gptel-agent-runtime-playbook-steps "gptel-agent-runtime"
+                  (pb))
+
+;; gar-memory: candidates-directory + writer + json-extract helper from
+;; gar-skeptic-model (reused for parsing the refinement response).
+(declare-function gptel-agent-runtime--candidates-directory "gar-memory" ())
+(declare-function gptel-agent-runtime--write-candidate-playbook
+                  "gar-memory" (candidate))
+(declare-function gptel-agent-runtime--skeptic-extract-json-object
+                  "gar-skeptic-model" (text))
+
+;; gptel itself for the synchronous model call.
+(declare-function gptel-request "gptel" (&optional prompt &rest keys))
+(declare-function gptel-abort "gptel" (&optional buf))
+(defvar gptel-model)
+(defvar gptel-use-tools)
+(defvar gptel-stream)
+
+#+end_src
+
+* Defcustoms + state
+
+#+begin_src emacs-lisp
+(defcustom gptel-agent-runtime-refine-mode 'manual
+  "How playbook refinement is triggered.
+`manual' -- only `M-x gptel-agent-runtime-refine-playbook' fires it.
+`auto' -- a subscriber on `trajectory-recorded' checks the consistent-
+failure heuristic at every session-finalize and triggers refinement
+automatically when the pattern is found.
+Default is `manual' because model calls cost budget; flip to `auto'
+once the heuristic is tuned on your workload."
+  :type '(choice (const :tag "Manual only" manual)
+                 (const :tag "Auto on consistent failure" auto))
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-refine-window 5
+  "How many recent trajectories per playbook the heuristic considers."
+  :type 'integer
+  :safe #'integerp
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-refine-failure-threshold 0.6
+  "Failure-rate (0.0-1.0) at or above which auto-refine triggers.
+The rate is `failures / window-size'; a rate of 0.6 means at least 60%
+of the recent trajectories ended with outcome=failure."
+  :type 'float
+  :safe #'floatp
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-refine-min-runs 3
+  "Minimum number of trajectories required before auto-refine considers a playbook.
+Below this the heuristic abstains -- the sample is too small to draw
+a conclusion."
+  :type 'integer
+  :safe #'integerp
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-refine-budget-ms 15000
+  "Maximum milliseconds the refinement model call may spend.
+Refinement is heavier than the skeptic / verifier (longer prompt, more
+output), so the budget is correspondingly larger."
+  :type 'integer
+  :safe #'integerp
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-refine-model nil
+  "Model symbol used for the refinement call, or nil to reuse `gptel-model'.
+A capable model (e.g. a 14B+ instruct) tends to produce better rewrites
+than the fast small model typically pinned for the skeptic/verifier."
+  :type '(choice (const :tag "Use current gptel-model" nil)
+                 (symbol :tag "Model id symbol"))
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-refine-cooldown-trajectories 10
+  "Skip auto-refinement for a playbook if its previous refinement was within
+this many trajectories ago. Prevents rapid-fire re-refinement when one
+failure pattern hasn't been resolved yet."
+  :type 'integer
+  :safe #'integerp
+  :group 'gptel-agent-runtime)
+
+(defvar gptel-agent-runtime--refinement-history nil
+  "Alist of (PLAYBOOK-ID . PLIST) recording the most recent refinement per playbook.
+Plist keys: `:at' (timestamp), `:candidate-id', `:trajectory-count'.")
+
+(defvar gptel-agent-runtime--last-refinements nil
+  "Recent refinement events for the mission-control dashboard.")
+
+#+end_src
+
+* Heuristic: detecting consistent failure
+
+#+begin_src emacs-lisp
+(defun gptel-agent-runtime-trajectories-for-playbook (playbook-id &optional limit)
+  "Return the recent trajectories whose `playbook-ids' contains PLAYBOOK-ID.
+Newest first; capped at LIMIT (default 50)."
+  (let ((cap (or limit 50))
+        (out nil))
+    (when (boundp 'gptel-agent-runtime--trajectories)
+      (dolist (traj gptel-agent-runtime--trajectories)
+        (when (and (< (length out) cap)
+                   (member playbook-id
+                           (gptel-agent-runtime-trajectory-playbook-ids traj)))
+          (push traj out))))
+    ;; Push reverses; trajectories ring is already newest-first so the
+    ;; result here is OLDEST-first after the push. Reverse to restore
+    ;; newest-first ordering.
+    (nreverse out)))
+
+(defun gptel-agent-runtime--refine-collect-failure-evidence (trajectory)
+  "Extract (GOAL FAILED-STEP-TITLE FAILED-TOOL VERIFIER-REASON CORRECTION)
+from TRAJECTORY when it ended in failure with at least one failed verdict.
+Returns nil otherwise."
+  (when (eq (gptel-agent-runtime-trajectory-outcome trajectory) 'failure)
+    (let* ((verdicts (gptel-agent-runtime-trajectory-verifier-verdicts
+                      trajectory))
+           (failed (cl-find-if (lambda (v) (not (plist-get v :passed)))
+                               verdicts))
+           (steps (gptel-agent-runtime-trajectory-steps trajectory))
+           (last-step (car (last steps))))
+      (list :goal (gptel-agent-runtime-trajectory-goal trajectory)
+            :step-title (and last-step
+                             (gptel-agent-runtime-trajectory-step-title
+                              last-step))
+            :tool (and last-step
+                       (gptel-agent-runtime-trajectory-step-suggested-tool
+                        last-step))
+            :reason (and failed (plist-get failed :reason))
+            :correction (and failed (plist-get failed :suggested-correction))
+            :finalized-at (gptel-agent-runtime-trajectory-finalized-at
+                           trajectory)))))
+
+(defun gptel-agent-runtime--refine-failure-pattern (playbook-id)
+  "Inspect the recent trajectories of PLAYBOOK-ID for a consistent-failure pattern.
+Returns a plist when the heuristic triggers, nil otherwise:
+
+  (:window N :failures M :failure-rate F
+   :evidence ((:goal :step-title :tool :reason :correction :finalized-at) ...))
+
+The plist is suitable input for the refinement prompt builder."
+  (let* ((window gptel-agent-runtime-refine-window)
+         (min-runs gptel-agent-runtime-refine-min-runs)
+         (threshold gptel-agent-runtime-refine-failure-threshold)
+         (recent (gptel-agent-runtime-trajectories-for-playbook
+                  playbook-id window))
+         (n (length recent)))
+    (when (and (>= n min-runs)
+               (> threshold 0.0))
+      (let* ((failures
+              (cl-remove-if-not
+               (lambda (t)
+                 (eq (gptel-agent-runtime-trajectory-outcome t) 'failure))
+               recent))
+             (rate (/ (float (length failures)) n)))
+        (when (>= rate threshold)
+          (let ((evidence
+                 (delq nil
+                       (mapcar #'gptel-agent-runtime--refine-collect-failure-evidence
+                               failures))))
+            (when evidence
+              (list :window n
+                    :failures (length failures)
+                    :failure-rate rate
+                    :evidence evidence))))))))
+
+(defun gptel-agent-runtime--refine-cooled-down-p (playbook-id)
+  "Return non-nil when PLAYBOOK-ID was refined recently AND not enough new
+trajectories have accumulated since then to warrant another refinement."
+  (let* ((entry (cdr (assoc playbook-id
+                            gptel-agent-runtime--refinement-history)))
+         (last-count (and entry (plist-get entry :trajectory-count)))
+         (current-count (and (boundp 'gptel-agent-runtime--trajectories)
+                             (length gptel-agent-runtime--trajectories)))
+         (cooldown gptel-agent-runtime-refine-cooldown-trajectories))
+    (and last-count current-count
+         (< (- current-count last-count) cooldown))))
+
+#+end_src
+
+* Prompt + parse
+
+#+begin_src emacs-lisp
+(defconst gptel-agent-runtime--refine-system-prompt
+  "You are refining a PLAYBOOK that has been failing recently.
+
+A playbook is a reusable workflow the agent runtime applies when a
+matching task arrives. You will be given:
+
+1. The current playbook (id, summary, triggers, step list).
+2. Recent failure evidence (goals, the failing step, the verifier's
+   reason, and the verifier's suggested correction).
+
+Rewrite the playbook to address the failure pattern. Return a single
+JSON object EXACTLY in this shape:
+
+{
+  \"summary\": \"...new short summary, one sentence...\",
+  \"triggers\": [\"trigger-keyword\", ...],
+  \"steps\": [
+    {\"title\": \"...\",
+     \"rationale\": \"...\",
+     \"tool\": \"...\",
+     \"args\": { ... }},
+    ...
+  ],
+  \"rationale\": \"what specifically changed and why it should fix the
+                   failure pattern; one short paragraph\"
+}
+
+Rules:
+- Keep step titles short and concrete.
+- Prefer the existing native tools the agent already knows
+  (write_file, web_search, web_fetch_text, etc.).
+- DO NOT silently drop the goal-relevant work. If a step was failing
+  because of bad args, fix the args; do not remove the step.
+- Triggers should be a small list (3-7) of keywords that this playbook
+  matches against incoming tasks.
+
+Return ONLY the JSON object. No prose before or after."
+  "System prompt used for the playbook refinement model call.")
+
+(defun gptel-agent-runtime--refine-build-prompt (playbook pattern)
+  "Format the refinement prompt for PLAYBOOK given PATTERN evidence."
+  (concat
+   "CURRENT PLAYBOOK:\n"
+   (format "  id: %s\n  summary: %s\n  triggers: %S\n  steps:\n%s\n"
+           (or (gptel-agent-runtime-playbook-id playbook) "?")
+           (or (gptel-agent-runtime-playbook-summary playbook) "")
+           (or (gptel-agent-runtime-playbook-triggers playbook) '())
+           (mapconcat (lambda (s) (format "    - %S" s))
+                      (or (gptel-agent-runtime-playbook-steps playbook) '())
+                      "\n"))
+   (format "\nFAILURE PATTERN: %d of last %d trajectories failed (rate=%.2f)\n"
+           (plist-get pattern :failures)
+           (plist-get pattern :window)
+           (plist-get pattern :failure-rate))
+   "\nRECENT FAILURE EVIDENCE:\n"
+   (mapconcat
+    (lambda (e)
+      (format "  - GOAL: %s\n    FAILED STEP: %s (tool=%s)\n    VERIFIER REASON: %s\n    VERIFIER SUGGESTED: %s\n    AT: %s"
+              (or (plist-get e :goal) "?")
+              (or (plist-get e :step-title) "?")
+              (or (plist-get e :tool) "?")
+              (or (plist-get e :reason) "?")
+              (or (plist-get e :correction) "?")
+              (or (plist-get e :finalized-at) "?")))
+    (plist-get pattern :evidence)
+    "\n")
+   "\n\nRewrite the playbook now."))
+
+(defun gptel-agent-runtime--refine-parse-candidate (response playbook pattern)
+  "Parse model RESPONSE text into a candidate playbook plist.
+Returns nil when parsing fails. The returned plist matches the format
+`gar-memory--write-candidate-playbook' expects (`:id', `:status',
+`:summary', `:triggers', `:steps', `:source-playbooks', `:reason',
+`:created-at')."
+  (condition-case nil
+      (let* ((json-fragment
+              (gptel-agent-runtime--skeptic-extract-json-object response))
+             (parsed
+              (and json-fragment
+                   (let ((json-object-type 'plist)
+                         (json-array-type 'list)
+                         (json-key-type 'keyword)
+                         (json-false :json-false))
+                     (with-temp-buffer
+                       (insert json-fragment)
+                       (goto-char (point-min))
+                       (json-read)))))
+             (new-summary (and parsed (plist-get parsed :summary)))
+             (new-triggers (and parsed (plist-get parsed :triggers)))
+             (new-steps (and parsed (plist-get parsed :steps)))
+             (model-rationale (and parsed
+                                   (or (plist-get parsed :rationale)
+                                       (plist-get parsed :Rationale)))))
+        (when (and parsed new-summary (listp new-steps))
+          (list :id (format "candidate-refine-%s-%s"
+                            (or (gptel-agent-runtime-playbook-id playbook) "?")
+                            (format-time-string "%H%M%S"))
+                :status 'candidate
+                :summary (format "%s" new-summary)
+                :triggers (mapcar (lambda (s) (format "%s" s))
+                                  (or new-triggers '()))
+                :steps new-steps
+                :source-playbooks (list (gptel-agent-runtime-playbook-id playbook))
+                :reason (format "auto-refinement after %d failures / %d runs (rate=%.2f). Model rationale: %s"
+                                (plist-get pattern :failures)
+                                (plist-get pattern :window)
+                                (plist-get pattern :failure-rate)
+                                (or model-rationale "(no rationale provided)"))
+                :created-at (gptel-agent-runtime--timestamp))))
+    (error nil)))
+
+#+end_src
+
+* Synchronous model call
+
+#+begin_src emacs-lisp
+(defun gptel-agent-runtime--refine-call-model (playbook pattern)
+  "Synchronously call the refinement model for PLAYBOOK given PATTERN evidence.
+Returns the candidate plist on success, nil on timeout / abort / error /
+unparseable model output. Uses the same `gptel-request' +
+`accept-process-output' + `gptel-abort' pattern as `gar-skeptic-model'."
+  (unless (and (fboundp 'gptel-request) (boundp 'gptel-model))
+    (cl-return-from gptel-agent-runtime--refine-call-model nil))
+  (let* ((budget-secs (max 1.0 (/ (or gptel-agent-runtime-refine-budget-ms
+                                      15000)
+                                  1000.0)))
+         (system gptel-agent-runtime--refine-system-prompt)
+         (prompt (gptel-agent-runtime--refine-build-prompt playbook pattern))
+         (req-buf (generate-new-buffer " *gar-refine-request*"))
+         (response nil) (done nil)
+         (gptel-model (or gptel-agent-runtime-refine-model
+                          (and (boundp 'gptel-model) gptel-model)))
+         (gptel-use-tools nil)
+         (gptel-stream nil))
+    (unwind-protect
+        (condition-case _err
+            (progn
+              (with-current-buffer req-buf
+                (gptel-request prompt
+                  :buffer req-buf
+                  :stream nil
+                  :system system
+                  :callback (lambda (r _info) (setq response r done t))))
+              (let ((deadline (+ (float-time) budget-secs)))
+                (while (and (not done) (< (float-time) deadline))
+                  (accept-process-output nil 0.05))
+                (unless done
+                  (ignore-errors (gptel-abort req-buf))
+                  (setq response :timeout))))
+          (error (setq response :error)))
+      (when (buffer-live-p req-buf) (kill-buffer req-buf)))
+    (cond
+     ((stringp response)
+      (gptel-agent-runtime--refine-parse-candidate response playbook pattern))
+     (t nil))))
+
+#+end_src
+
+* Public API + auto subscriber
+
+#+begin_src emacs-lisp
+(defun gptel-agent-runtime--find-playbook-by-id (playbook-id)
+  "Return the playbook struct for PLAYBOOK-ID, or nil."
+  (cl-find playbook-id gptel-agent-runtime-playbook-registry
+           :key #'gptel-agent-runtime-playbook-id :test #'equal))
+
+;;;###autoload
+(defun gptel-agent-runtime-refine-playbook (playbook-id)
+  "Refine PLAYBOOK-ID. Builds the prompt, calls the model, writes a candidate.
+The candidate is saved to the gar-memory candidates directory and shows
+up in `M-x gptel-agent-runtime-review-playbook-candidates' for human
+review. Returns the candidate plist on success, nil when there is no
+consistent failure pattern or the model call fails."
+  (interactive
+   (list (completing-read
+          "Playbook id to refine: "
+          (mapcar #'gptel-agent-runtime-playbook-id
+                  gptel-agent-runtime-playbook-registry)
+          nil t)))
+  (let* ((playbook (gptel-agent-runtime--find-playbook-by-id playbook-id)))
+    (unless playbook
+      (user-error "Unknown playbook id: %s" playbook-id))
+    (let ((pattern (gptel-agent-runtime--refine-failure-pattern playbook-id)))
+      (cond
+       ((null pattern)
+        (message "No consistent-failure pattern found for playbook %s (need %d+ runs, %.0f%% failure threshold)."
+                 playbook-id
+                 gptel-agent-runtime-refine-min-runs
+                 (* 100 gptel-agent-runtime-refine-failure-threshold))
+        nil)
+       (t
+        (message "Refining playbook %s (rate=%.0f%% over %d runs)..."
+                 playbook-id
+                 (* 100 (plist-get pattern :failure-rate))
+                 (plist-get pattern :window))
+        (let ((candidate (gptel-agent-runtime--refine-call-model
+                          playbook pattern)))
+          (cond
+           ((null candidate)
+            (message "Refinement model call returned no usable candidate.")
+            nil)
+           (t
+            (let ((file (gptel-agent-runtime--write-candidate-playbook
+                         candidate)))
+              ;; Record in history + dashboard ring.
+              (setf (alist-get playbook-id
+                               gptel-agent-runtime--refinement-history
+                               nil nil #'equal)
+                    (list :at (gptel-agent-runtime--timestamp)
+                          :candidate-id (plist-get candidate :id)
+                          :trajectory-count
+                          (and (boundp 'gptel-agent-runtime--trajectories)
+                               (length gptel-agent-runtime--trajectories))))
+              (push (list :playbook playbook-id
+                          :candidate (plist-get candidate :id)
+                          :at (gptel-agent-runtime--timestamp)
+                          :failure-rate (plist-get pattern :failure-rate)
+                          :failures (plist-get pattern :failures))
+                    gptel-agent-runtime--last-refinements)
+              (when (> (length gptel-agent-runtime--last-refinements) 20)
+                (setcdr (nthcdr 19 gptel-agent-runtime--last-refinements)
+                        nil))
+              (gptel-agent-runtime-emit-event
+               'playbook-refinement-proposed
+               :source "refine"
+               :payload (list :playbook playbook-id
+                              :candidate (plist-get candidate :id)
+                              :file file
+                              :failure-rate (plist-get pattern :failure-rate))
+               :taint 'trusted)
+              (when (called-interactively-p 'interactive)
+                (message "Refinement candidate written: %s" file))
+              candidate)))))))))
+
+(defun gptel-agent-runtime--maybe-auto-refine-on-trajectory (event)
+  "Subscriber on `trajectory-recorded': in auto mode, check each matched
+playbook against the consistent-failure heuristic and trigger
+refinement when the pattern is found and cooldown allows."
+  (when (eq gptel-agent-runtime-refine-mode 'auto)
+    (let* ((payload (gptel-agent-runtime-event-payload event))
+           (latest-traj (car gptel-agent-runtime--trajectories))
+           (playbook-ids (and latest-traj
+                              (gptel-agent-runtime-trajectory-playbook-ids
+                               latest-traj))))
+      (dolist (pid (or playbook-ids '()))
+        (unless (gptel-agent-runtime--refine-cooled-down-p pid)
+          (let ((pattern (gptel-agent-runtime--refine-failure-pattern pid)))
+            (when pattern
+              ;; Fire the refinement asynchronously (it runs the model
+              ;; call inline but we wrap in a 0-sec timer so the event
+              ;; pump can continue draining without blocking).
+              (run-at-time
+               0 nil
+               (lambda ()
+                 (condition-case _err
+                     (gptel-agent-runtime-refine-playbook pid)
+                   (error nil)))))))))))
+
+(gptel-agent-runtime-subscribe
+ 'trajectory-recorded
+ #'gptel-agent-runtime--maybe-auto-refine-on-trajectory)
+
+#+end_src
+
+* File footer
+
+#+begin_src emacs-lisp
+(provide 'gar-playbook-refine)
+
+;;; gar-playbook-refine.el ends here
+#+end_src
+
+<!-- gar:auto-backlinks:start -->
+* Required by
+
+  (no other modules require this one yet)
+<!-- gar:auto-backlinks:end -->

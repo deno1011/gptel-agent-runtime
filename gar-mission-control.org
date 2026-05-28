@@ -122,6 +122,12 @@ See also:
 (declare-function gptel-agent-runtime-trajectory-goal
                   "gar-trajectory" (traj))
 
+;; gar-playbook-refine (loaded AFTER gar-mission-control; late-bound).
+(defvar gptel-agent-runtime-refine-mode)
+(defvar gptel-agent-runtime-refine-window)
+(defvar gptel-agent-runtime-refine-failure-threshold)
+(defvar gptel-agent-runtime--last-refinements)
+
 ;; gar-memory (loaded after gar-mission-control; late-bound).
 (defvar gptel-agent-runtime-novelty-threshold)
 (defvar gptel-agent-runtime-novelty-min-tokens)
@@ -344,6 +350,25 @@ status, and the registered agent capability allowlist."
                              (or (gptel-agent-runtime-trajectory-goal t) "") 60)))
                   (cl-subseq traj 0 (min n 5))
                   "\n")))))
+    (gptel-agent-runtime--mission-control-section
+     "Playbook refinement"
+     (format "  Mode: %s   Window: %d   Threshold: %.0f%%\n  Recent refinements: %d\n%s"
+             gptel-agent-runtime-refine-mode
+             gptel-agent-runtime-refine-window
+             (* 100 gptel-agent-runtime-refine-failure-threshold)
+             (length gptel-agent-runtime--last-refinements)
+             (if (null gptel-agent-runtime--last-refinements)
+                 "  (no refinements yet)"
+               (mapconcat
+                (lambda (r)
+                  (format "    %s  playbook=%s  candidate=%s  rate=%.0f%%"
+                          (or (plist-get r :at) "?")
+                          (or (plist-get r :playbook) "?")
+                          (or (plist-get r :candidate) "?")
+                          (* 100 (or (plist-get r :failure-rate) 0.0))))
+                (cl-subseq gptel-agent-runtime--last-refinements
+                           0 (min 5 (length gptel-agent-runtime--last-refinements)))
+                "\n"))))
     (gptel-agent-runtime--mission-control-section
      "Agents / capability allowlists"
      (if (null gptel-agent-runtime-agent-registry)
