@@ -897,7 +897,7 @@ fetch.
            (:name "limit" :type integer :description "Maximum number of results, default 5"))
    :function (lambda (query limit)
                (condition-case err
-                   (let ((results (my/web-search-ddg query (or limit 5))))
+                   (let ((results (gptel-agent-runtime-web-search-ddg query (or limit 5))))
                      (if results
                          (mapconcat
                           (lambda (r)
@@ -914,7 +914,7 @@ fetch.
            (:name "max_chars" :type integer :description "Maximum characters to return, default 6000"))
    :function (lambda (url max-chars)
                (condition-case err
-                   (my/web-text url (or max-chars 6000))
+                   (gptel-agent-runtime-web-text url (or max-chars 6000))
                  (error (format "Error: %s" err)))))
 
   ;; web_extract_images — list image URLs from a page
@@ -925,7 +925,7 @@ fetch.
            (:name "limit" :type integer :description "Maximum number of images, default 10"))
    :function (lambda (url limit)
                (condition-case err
-                   (let ((images (my/web-extract-images url (or limit 10))))
+                   (let ((images (gptel-agent-runtime-web-extract-images url (or limit 10))))
                      (if images
                          (mapconcat #'identity images "\n")
                        "No images found."))
@@ -939,7 +939,7 @@ fetch.
            (:name "directory" :type string :description "Optional target directory"))
    :function (lambda (url directory)
                (condition-case err
-                   (my/web-fetch-image
+                   (gptel-agent-runtime-web-fetch-image
                     url
                     (when (and directory (not (string-empty-p directory)))
                       (expand-file-name directory)))
