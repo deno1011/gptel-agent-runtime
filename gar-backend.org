@@ -10,8 +10,8 @@ responsibility.
 
 What this module owns:
 
-- forward =defvar= for =my/gptel-backends= (alist of registered backends
-  populated by the setup file) and =my/gptel-ollama-backend= (the live
+- forward =defvar= for =gptel-agent-runtime-backends= (alist of registered backends
+  populated by the setup file) and =gptel-agent-runtime-ollama-backend= (the live
   Ollama backend object, when present)
 - Ollama runtime utilities: =gptel-agent-runtime-ollama-running-p=,
   =gptel-agent-runtime-start-ollama-if-needed=,
@@ -23,7 +23,7 @@ What this module owns:
   and =gptel-agent-runtime-backend-model-symbols= (lists a backend's model ids
   uniformly as symbols)
 - =gptel-agent-runtime-register-model= -- adds (or replaces) one entry in the
-  =my/gptel-backends= alist; called by the user's backend setup and by
+  =gptel-agent-runtime-backends= alist; called by the user's backend setup and by
   the model-router
 
 This module is provider-neutral: it neither requires nor instantiates
@@ -48,7 +48,7 @@ See also:
 
 ;;; Commentary:
 
-;; Provider-neutral runtime layer. Forward-declares the `my/gptel-backends'
+;; Provider-neutral runtime layer. Forward-declares the `gptel-agent-runtime-backends'
 ;; alist (populated by the consuming setup file with API keys/endpoints).
 ;; Provides the Ollama runtime helpers (server probe, auto-start, active-
 ;; model detection, default-local-model selection) and the model-id
@@ -90,14 +90,26 @@ here means the runtime layer (model router, mission control,
 even when the setup file has not yet run.
 
 #+begin_src emacs-lisp
-(defvar my/gptel-backends nil
+(defvar gptel-agent-runtime-backends nil
   "Alist of (DISPLAY-NAME . (BACKEND . MODEL)) for all backends.
 Populated by the consuming setup file; the runtime package only forward-
 declares it.")
 
-(defvar my/gptel-ollama-backend nil
+(defvar gptel-agent-runtime-ollama-backend nil
   "The registered Ollama backend, when the setup file has installed one.
 Forward-declared by the package; populated by the setup file.")
+
+;; Backwards-compat aliases for the legacy `my/gptel-*' names. These are
+;; storage cells: user setup files commonly do `(setq my/gptel-backends
+;; ...)' AFTER `(require 'gptel-agent-runtime)' to register their
+;; provider backends. `defvaralias' makes both names refer to the same
+;; underlying cell, so user `setq's land where the new
+;; `gptel-agent-runtime-backends' reader looks. Installing the alias
+;; BEFORE the setup file's `setq' (which is true because we are inside
+;; the package, loaded by `(require ...)' first) is what makes this
+;; work.
+(defvaralias 'my/gptel-backends 'gptel-agent-runtime-backends)
+(defvaralias 'my/gptel-ollama-backend 'gptel-agent-runtime-ollama-backend)
 #+end_src
 
 * Ollama runtime utilities
@@ -202,16 +214,16 @@ and by the model router when it routes to a local profile.
   "Select the active or configured default local Ollama model when available."
   (interactive)
   (gptel-agent-runtime-start-ollama-if-needed)
-  (when my/gptel-ollama-backend
+  (when gptel-agent-runtime-ollama-backend
     (let ((model (or (and gptel-agent-runtime-prefer-active-ollama-model
                           (gptel-agent-runtime-active-ollama-model))
                      gptel-agent-runtime-default-local-model)))
-      (unless (member model (gptel-agent-runtime-backend-model-symbols my/gptel-ollama-backend))
+      (unless (member model (gptel-agent-runtime-backend-model-symbols gptel-agent-runtime-ollama-backend))
         (when (fboundp 'gptel-backend-models)
-          (setf (gptel-backend-models my/gptel-ollama-backend)
-                (append (gptel-backend-models my/gptel-ollama-backend)
+          (setf (gptel-backend-models gptel-agent-runtime-ollama-backend)
+                (append (gptel-backend-models gptel-agent-runtime-ollama-backend)
                         (list `(,model :capabilities (tool-use json)))))))
-      (setq gptel-backend my/gptel-ollama-backend
+      (setq gptel-backend gptel-agent-runtime-ollama-backend
             gptel-model model)
       (when (fboundp 'gptel-agent-runtime-sync-directive-for-current-runtime)
         (gptel-agent-runtime-sync-directive-for-current-runtime))
@@ -226,18 +238,18 @@ and by the model router when it routes to a local profile.
 
 * Backend registry mutator
 
-The setup file populates =my/gptel-backends= directly with =setq=, but
+The setup file populates =gptel-agent-runtime-backends= directly with =setq=, but
 the model router and =gptel-agent-runtime-select-model= use this helper to
 register one entry at a time (replacing any existing entry with the same
 display name).
 
 #+begin_src emacs-lisp
 (defun gptel-agent-runtime-register-model (name backend model)
-  "Register NAME with BACKEND+MODEL in `my/gptel-backends'.
+  "Register NAME with BACKEND+MODEL in `gptel-agent-runtime-backends'.
 Overwrites an existing entry with the same name."
-  (setq my/gptel-backends
+  (setq gptel-agent-runtime-backends
         (cons (cons name (cons backend model))
-              (cl-remove name my/gptel-backends
+              (cl-remove name gptel-agent-runtime-backends
                          :key #'car :test #'equal))))
 
 ;; Backwards-compat aliases for the legacy `my/gptel-*' names. Hosts may
@@ -260,10 +272,10 @@ consuming setup file is responsible for:
 2. Calling =gptel-make-anthropic= / =gptel-make-openai= /
    =gptel-make-ollama= with the user's preferred endpoints, API keys,
    and model lists.
-3. Populating =my/gptel-backends= with the resulting
+3. Populating =gptel-agent-runtime-backends= with the resulting
    =(DISPLAY-NAME . (BACKEND . MODEL))= entries (directly via =setq=
    or per-entry via =gptel-agent-runtime-register-model=).
-4. Optionally setting =my/gptel-ollama-backend= when an Ollama backend
+4. Optionally setting =gptel-agent-runtime-ollama-backend= when an Ollama backend
    is registered, so =gptel-agent-runtime-use-default-local-model= and
    the mission-control buffer can find it.
 5. Selecting an initial =gptel-backend= and =gptel-model=.

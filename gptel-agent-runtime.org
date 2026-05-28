@@ -158,8 +158,8 @@ the master load sequence. New setups should customise
 
 ;; Select the local model only after directives, tools, and
 ;; compatibility helpers have been defined.
-(when (and (boundp 'my/gptel-ollama-backend)
-           my/gptel-ollama-backend)
+(when (and (boundp 'gptel-agent-runtime-ollama-backend)
+           gptel-agent-runtime-ollama-backend)
   (gptel-agent-runtime-use-default-local-model))
 
 ;; Finish wiring gar-tools' global tool list now that gptel-agent-runtime-tools-all

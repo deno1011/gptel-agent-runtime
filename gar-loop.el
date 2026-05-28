@@ -41,7 +41,7 @@
 (defvar gptel-agent-runtime--origin-buffer)
 (defvar gptel-agent-runtime-agent-registry)
 (defvar gptel-agent-runtime-playbook-registry)
-(defvar my/gptel-backends)
+(defvar gptel-agent-runtime-backends)
 (defvar gptel--system-message)
 (defvar gptel-tools)
 (defvar gptel-backend)

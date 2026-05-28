@@ -609,7 +609,7 @@ Manual `C-c M' selection still works when this option is nil."
   "Model-router profile definitions.
 Each profile is (NAME . PLIST). PLIST currently supports :description,
 :patterns, and :local. Patterns are matched against display names and model ids
-from `my/gptel-backends'."
+from `gptel-agent-runtime-backends'."
   :type 'alist
   :group 'gptel-agent-runtime)
 
@@ -845,8 +845,8 @@ gptel--known-tools is a two-level alist: (category . ((name . struct) ...))."
   (interactive)
   (let* ((choice  (completing-read
                    (format "Model [current: %s]: " gptel-model)
-                   my/gptel-backends nil t))
-         (entry   (assoc choice my/gptel-backends))
+                   gptel-agent-runtime-backends nil t))
+         (entry   (assoc choice gptel-agent-runtime-backends))
          (backend (cadr entry))
          (model   (gptel-agent-runtime-model-id (cddr entry)))
          (directive (gptel-agent-runtime-directive-for-choice choice))
