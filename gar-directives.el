@@ -133,11 +133,11 @@ MOST IMPORTANT:
   web_search and then web_fetch_text. If native tool calling does not work, write
   this exact kind of Org block:
 #+begin_src elisp :results output
-(dolist (r (my/web-search-ddg \"QUERY HERE\" 5))
+(dolist (r (gptel-agent-runtime-web-search-ddg \"QUERY HERE\" 5))
   (princ (format \"- [[%s][%s]]\\n\" (cdr r) (car r))))
 #+end_src
 - After search results are visible, fetch official/primary URLs with
-  my/web-text or web_fetch_text and cite the URLs in the answer.
+  gptel-agent-runtime-web-text or web_fetch_text and cite the URLs in the answer.
 - Search result titles alone are not evidence. For weather forecasts,
   regulations, school rules, prices, dates, versions, or current factual
   details, use web_fetch_text on a result before giving concrete facts.
@@ -218,7 +218,7 @@ ORG EXECUTION RULES:
 - Graphs/images/diagrams: use a source block with :file.
 - Internet/current facts: use web_search first, then web_fetch_text on official
   or primary sources. If native tool calls are unavailable, emit an elisp
-  :results output block calling my/web-search-ddg and my/web-text.
+  :results output block calling gptel-agent-runtime-web-search-ddg and gptel-agent-runtime-web-text.
 - For every :file image block, include the Org result link form immediately after
   the block when the filename is known:
   #+RESULTS:
@@ -263,13 +263,13 @@ WEB SEARCH:
 - Prefer official sources, then cite the URLs used.
 - Search example when native tool calling is unavailable:
 #+begin_src elisp :results output
-(dolist (r (my/web-search-ddg \"Abitur private Gymnasium München Bayern aktuelle Regeln\" 5))
+(dolist (r (gptel-agent-runtime-web-search-ddg \"Abitur private Gymnasium München Bayern aktuelle Regeln\" 5))
   (princ (format \"- [[%s][%s]]\\n\" (cdr r) (car r))))
 #+end_src
 
 - Fetch example:
 #+begin_src elisp :results output
-(princ (my/web-text \"https://www.km.bayern.de/\" 6000))
+(princ (gptel-agent-runtime-web-text \"https://www.km.bayern.de/\" 6000))
 #+end_src
 
 ORG FILES:

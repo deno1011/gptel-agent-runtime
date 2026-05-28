@@ -9,9 +9,9 @@
 ;;  - clipboard image capture and shrink (`gptel-agent-runtime-insert-clipboard-image',
 ;;    `gptel-agent-runtime-attach-image-at-point', `gar-context--shrink-image')
 ;;  - org-download screenshot integration
-;;  - web fetch helpers (`my/web-fetch', `my/web-html', `my/web-text',
-;;    `my/web-search-ddg', `my/web-fetch-image', `my/web-extract-images',
-;;    `my/insert-image-inline')
+;;  - web fetch helpers (`gptel-agent-runtime-web-fetch', `gptel-agent-runtime-web-html', `gptel-agent-runtime-web-text',
+;;    `gptel-agent-runtime-web-search-ddg', `gptel-agent-runtime-web-fetch-image', `gptel-agent-runtime-web-extract-images',
+;;    `gptel-agent-runtime-insert-image-inline')
 
 ;;; Code:
 
@@ -215,22 +215,22 @@ next gptel request. Shrinks first if necessary."
 (global-set-key (kbd "C-c i") #'gptel-agent-runtime-insert-clipboard-image)
 (global-set-key (kbd "C-c I") #'gptel-agent-runtime-attach-image-at-point)
 
-(defcustom my/web-fetch-timeout 30
-  "Timeout in seconds for `my/web-fetch'."
+(defcustom gptel-agent-runtime-web-fetch-timeout 30
+  "Timeout in seconds for `gptel-agent-runtime-web-fetch'."
   :type 'integer
   :group 'gar-response-executor)
 
-(defcustom my/web-user-agent "Emacs-Gptel-Agent-Helper"
+(defcustom gptel-agent-runtime-web-user-agent "Emacs-Gptel-Agent-Helper"
   "User-Agent string for web requests."
   :type 'string
   :group 'gar-response-executor)
 
-(defun my/web-fetch (url)
+(defun gptel-agent-runtime-web-fetch (url)
   "Fetch URL synchronously, return body as string.
 Signals an error on HTTP >= 400 or timeout."
-  (let ((url-user-agent my/web-user-agent))
+  (let ((url-user-agent gptel-agent-runtime-web-user-agent))
     (with-current-buffer
-        (url-retrieve-synchronously url t t my/web-fetch-timeout)
+        (url-retrieve-synchronously url t t gptel-agent-runtime-web-fetch-timeout)
       (goto-char (point-min))
       (unless (re-search-forward "\r?\n\r?\n" nil t)
         (kill-buffer)
@@ -239,16 +239,16 @@ Signals an error on HTTP >= 400 or timeout."
         (kill-buffer)
         body))))
 
-(defun my/web-html (url)
+(defun gptel-agent-runtime-web-html (url)
   "Fetch URL and return a parsed DOM tree."
   (with-temp-buffer
-    (insert (my/web-fetch url))
+    (insert (gptel-agent-runtime-web-fetch url))
     (libxml-parse-html-region (point-min) (point-max))))
 
-(defun my/web-text (url &optional max-chars)
+(defun gptel-agent-runtime-web-text (url &optional max-chars)
   "Fetch URL, render as readable plain text via shr.
 If MAX-CHARS is set: truncate to MAX-CHARS characters."
-  (let ((dom              (my/web-html url))
+  (let ((dom              (gptel-agent-runtime-web-html url))
         (shr-width        80)
         (shr-use-fonts    nil)
         (shr-inhibit-images t))
@@ -259,12 +259,12 @@ If MAX-CHARS is set: truncate to MAX-CHARS characters."
             (concat (substring text 0 max-chars) "\n…[truncated]")
           text)))))
 
-(defun my/web-search-ddg (query &optional limit)
+(defun gptel-agent-runtime-web-search-ddg (query &optional limit)
   "DuckDuckGo HTML search. Returns list of (TITLE . URL).
 LIMIT defaults to 5."
   (let* ((url    (format "https://html.duckduckgo.com/html/?q=%s"
                          (url-hexify-string query)))
-         (dom    (my/web-html url))
+         (dom    (gptel-agent-runtime-web-html url))
          (limit  (or limit 5))
          (anchors (dom-by-tag dom 'a))
          (results '()))
@@ -285,7 +285,7 @@ LIMIT defaults to 5."
                         :test (lambda (a b) (equal (cdr a) (cdr b))))))))
     (seq-take (nreverse results) limit)))
 
-(defun my/web-fetch-image (url &optional dir)
+(defun gptel-agent-runtime-web-fetch-image (url &optional dir)
   "Download image from URL to DIR (default temporary-file-directory).
 Returns local path."
   (let* ((ext  (or (file-name-extension (url-filename
@@ -297,9 +297,9 @@ Returns local path."
     (url-copy-file url path t)
     path))
 
-(defun my/web-extract-images (url &optional limit)
+(defun gptel-agent-runtime-web-extract-images (url &optional limit)
   "Return absolute image URLs from a page, max LIMIT (default 10)."
-  (let* ((dom   (my/web-html url))
+  (let* ((dom   (gptel-agent-runtime-web-html url))
          (imgs  (dom-by-tag dom 'img))
          (limit (or limit 10))
          (urls  '()))
@@ -309,12 +309,12 @@ Returns local path."
           (push (url-expand-file-name src url) urls))))
     (seq-take (nreverse urls) limit)))
 
-(defun my/insert-image-inline (file-or-url)
+(defun gptel-agent-runtime-insert-image-inline (file-or-url)
   "Append FILE-OR-URL as an org image link to the current buffer end.
 If FILE-OR-URL is a URL it is downloaded to a temp location first.
 In org-mode `org-display-inline-images' is triggered."
   (let ((file (if (string-match-p "^https?://" file-or-url)
-                  (my/web-fetch-image file-or-url)
+                  (gptel-agent-runtime-web-fetch-image file-or-url)
                 file-or-url)))
     (save-excursion
       (goto-char (point-max))
@@ -331,6 +331,22 @@ In org-mode `org-display-inline-images' is triggered."
   #'gptel-agent-runtime-insert-clipboard-image)
 (defalias 'my/gptel-attach-image-at-point
   #'gptel-agent-runtime-attach-image-at-point)
+
+;; Web fetch helpers. The gar-directives prompt strings still reference
+;; the legacy `my/web-*' names (so the model continues to emit those
+;; symbol names in elisp source blocks); the aliases below keep both
+;; names resolving to the same function. Migrating the prompt text to
+;; the new names is a follow-on cleanup; not load-bearing.
+(defvaralias 'my/web-fetch-timeout 'gptel-agent-runtime-web-fetch-timeout)
+(defvaralias 'my/web-user-agent 'gptel-agent-runtime-web-user-agent)
+(defalias 'my/web-fetch          #'gptel-agent-runtime-web-fetch)
+(defalias 'my/web-html           #'gptel-agent-runtime-web-html)
+(defalias 'my/web-text           #'gptel-agent-runtime-web-text)
+(defalias 'my/web-search-ddg     #'gptel-agent-runtime-web-search-ddg)
+(defalias 'my/web-fetch-image    #'gptel-agent-runtime-web-fetch-image)
+(defalias 'my/web-extract-images #'gptel-agent-runtime-web-extract-images)
+(defalias 'my/insert-image-inline
+  #'gptel-agent-runtime-insert-image-inline)
 
 (provide 'gar-context)
 

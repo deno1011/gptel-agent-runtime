@@ -24,7 +24,7 @@ public API.
 
 See also:
 - [[file:gptel-agent-runtime.org][gptel-agent-runtime]] (master entrypoint that requires this module)
-- [[file:gar-context.org][gar-context]] (=my/web-text= and =my/web-search-ddg= used by the
+- [[file:gar-context.org][gar-context]] (=gptel-agent-runtime-web-text= and =gptel-agent-runtime-web-search-ddg= used by the
   inline-rendering repair when the model prints search-instructions
   instead of running a real search)
 
