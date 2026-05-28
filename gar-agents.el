@@ -61,7 +61,7 @@
                   (file))
 (declare-function gptel-agent-runtime-capability-summary "gptel-agent-runtime" ())
 (declare-function my/gptel-model-id "gar-backend" (model))
-(declare-function my/gptel-sync-directive-for-current-runtime
+(declare-function gptel-agent-runtime-sync-directive-for-current-runtime
                   "gar-directives" ())
 
 (defun gptel-agent-runtime-route-event (event)
@@ -685,7 +685,7 @@ Returns a plist with :agent, :skills, :all-agents, and :reason."
 (defun gptel-agent-runtime-agent-directive-symbol (agent)
   "Return directive symbol for AGENT."
   (or (and agent (gptel-agent-runtime-agent-directive agent))
-      (if (my/gptel-local-runtime-p)
+      (if (gptel-agent-runtime-local-runtime-p)
           'emacs-local-assistant
         'emacs-assistant)))
 
@@ -1083,7 +1083,7 @@ is non-nil. Return the routing decision plist."
               gptel-model model)
         (setq-local gptel-backend backend
                     gptel-model model)
-        (my/gptel-sync-directive-for-current-runtime)
+        (gptel-agent-runtime-sync-directive-for-current-runtime)
         (gptel-agent-runtime-emit-event
          'model-routed
          :source "model-router"
@@ -1629,13 +1629,13 @@ With prefix SAVE, persist the preference through Customize."
   (gptel-agent-runtime-cancel-current-job)
   (if (not my/gptel-context-enabled)
       (progn
-        (my/gptel-sync-directive-for-current-runtime)
+        (gptel-agent-runtime-sync-directive-for-current-runtime)
         (my/gptel-sync-tools)
         (apply orig-fn args))
     (if gptel-agent-runtime-enable-routing
         (gptel-agent-runtime-apply-route-to-current-buffer
          (gptel-agent-runtime-current-buffer-task-text))
-      (my/gptel-sync-directive-for-current-runtime))
+      (gptel-agent-runtime-sync-directive-for-current-runtime))
     (my/gptel-sync-tools)
     (let* ((task-text (gptel-agent-runtime-current-buffer-task-text))
            (_model-route

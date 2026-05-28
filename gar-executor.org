@@ -1152,7 +1152,7 @@ Return non-nil when the region was changed."
                    observations user-request))
           (system (or (and (boundp 'gptel--system-message)
                            gptel--system-message)
-                      (alist-get (my/gptel-directive-for-current-runtime)
+                      (alist-get (gptel-agent-runtime-directive-for-current-runtime)
                                  gptel-directives)
                       "You are an Emacs assistant.")))
       (message "gptel-agent-runtime: continuing after raw tool observation...")

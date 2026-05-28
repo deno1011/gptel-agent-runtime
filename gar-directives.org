@@ -8,10 +8,10 @@ Module of [[file:gptel-agent-runtime.org][gptel-agent-runtime]]. Provides:
   with the CRITICAL RULES + CRITICAL REASONING blocks), =emacs-planner=,
   =emacs-assistant=
 - the selection helpers that decide which directive applies to the
-  current model: =my/gptel-directive-for-choice=, =my/gptel-local-runtime-p=,
-  =my/gptel-directive-for-current-runtime=,
-  =my/gptel-sync-directive-for-current-runtime=,
-  =my/gptel-current-directive-name=
+  current model: =gptel-agent-runtime-directive-for-choice=, =gptel-agent-runtime-local-runtime-p=,
+  =gptel-agent-runtime-directive-for-current-runtime=,
+  =gptel-agent-runtime-sync-directive-for-current-runtime=,
+  =gptel-agent-runtime-current-directive-name=
 - the =gptel-mode-hook= that re-syncs the directive when a new session
   starts
 
@@ -43,10 +43,10 @@ See also:
 ;;    teach low-skilled local models to ask clarifying questions, use native
 ;;    tool calls instead of tutorial JSON, and reject the "tool not in raw
 ;;    allow list" excuse for refusing to act.
-;;  - the selection helpers (`my/gptel-directive-for-choice',
-;;    `my/gptel-local-runtime-p', `my/gptel-directive-for-current-runtime',
-;;    `my/gptel-sync-directive-for-current-runtime',
-;;    `my/gptel-current-directive-name').
+;;  - the selection helpers (`gptel-agent-runtime-directive-for-choice',
+;;    `gptel-agent-runtime-local-runtime-p', `gptel-agent-runtime-directive-for-current-runtime',
+;;    `gptel-agent-runtime-sync-directive-for-current-runtime',
+;;    `gptel-agent-runtime-current-directive-name').
 ;;  - the `gptel-mode-hook' that re-syncs the directive when a new gptel
 ;;    session starts.
 ;;
@@ -74,21 +74,21 @@ They are called from =my/gptel-select-model=, the autonomous loop, the
 model router, and the =gptel-mode-hook= installed below.
 
 #+begin_src emacs-lisp
-(defvar my/gptel-local-model-pattern
+(defvar gptel-agent-runtime-local-model-pattern
   "\\(Ollama\\|LM Studio\\|MLX\\)"
   "Regexp matching model display names that should use the local directive.")
 
-(defvar my/gptel-local-runtime-pattern
+(defvar gptel-agent-runtime-local-runtime-pattern
   "\\(Ollama\\|LM Studio\\|MLX\\|qwen2\\.5\\|qwen3\\|llama\\|mistral\\|deepseek-r1\\)"
   "Regexp matching active backend/model values that should use the local directive.")
 
-(defun my/gptel-directive-for-choice (choice)
+(defun gptel-agent-runtime-directive-for-choice (choice)
   "Return the directive symbol that should be used for model CHOICE."
-  (if (string-match-p my/gptel-local-model-pattern choice)
+  (if (string-match-p gptel-agent-runtime-local-model-pattern choice)
       'emacs-local-assistant
     'emacs-assistant))
 
-(defun my/gptel-local-runtime-p ()
+(defun gptel-agent-runtime-local-runtime-p ()
   "Return non-nil when the active gptel backend/model is local."
   (let ((backend-name (condition-case nil
                           (if (and (boundp 'gptel-backend)
@@ -97,29 +97,49 @@ model router, and the =gptel-mode-hook= installed below.
                             (format "%S" gptel-backend))
                         (error (format "%S" gptel-backend))))
         (model-name (format "%S" (my/gptel-model-id gptel-model))))
-    (string-match-p my/gptel-local-runtime-pattern
+    (string-match-p gptel-agent-runtime-local-runtime-pattern
                     (concat backend-name " " model-name))))
 
-(defun my/gptel-directive-for-current-runtime ()
+(defun gptel-agent-runtime-directive-for-current-runtime ()
   "Return the directive symbol for the active gptel backend/model."
-  (if (my/gptel-local-runtime-p)
+  (if (gptel-agent-runtime-local-runtime-p)
       'emacs-local-assistant
     'emacs-assistant))
 
-(defun my/gptel-sync-directive-for-current-runtime ()
+(defun gptel-agent-runtime-sync-directive-for-current-runtime ()
   "Set `gptel--system-message' according to the active backend/model."
-  (let* ((directive (my/gptel-directive-for-current-runtime))
+  (let* ((directive (gptel-agent-runtime-directive-for-current-runtime))
          (system-message (alist-get directive gptel-directives)))
     (when system-message
       (setq-local gptel--system-message system-message))
     directive))
 
-(defun my/gptel-current-directive-name ()
+(defun gptel-agent-runtime-current-directive-name ()
   "Return the directive symbol that matches the current system message."
   (let ((current (and (boundp 'gptel--system-message) gptel--system-message)))
     (car (seq-find (lambda (entry)
                      (equal (cdr entry) current))
                    gptel-directives))))
+
+;; Backwards-compat aliases for the legacy `my/gptel-*' names. The host's
+;; init may bind these from its own setup or from key bindings; the
+;; aliases keep both names working while we move toward MELPA-compliant
+;; prefixes. New code should use the `gptel-agent-runtime-*' names
+;; directly.
+(defvaralias 'my/gptel-local-model-pattern
+             'gptel-agent-runtime-local-model-pattern)
+(defvaralias 'my/gptel-local-runtime-pattern
+             'gptel-agent-runtime-local-runtime-pattern)
+(defalias 'my/gptel-directive-for-choice
+  #'gptel-agent-runtime-directive-for-choice)
+(defalias 'my/gptel-local-runtime-p
+  #'gptel-agent-runtime-local-runtime-p)
+(defalias 'my/gptel-directive-for-current-runtime
+  #'gptel-agent-runtime-directive-for-current-runtime)
+(defalias 'my/gptel-sync-directive-for-current-runtime
+  #'gptel-agent-runtime-sync-directive-for-current-runtime)
+(defalias 'my/gptel-current-directive-name
+  #'gptel-agent-runtime-current-directive-name)
 #+end_src
 
 * gptel directive strings
@@ -353,7 +373,7 @@ Never tell the user to run manual M-x commands when Emacs can execute the action
 ;; Also set emacs-assistant for each new gptel session
 (add-hook 'gptel-mode-hook
           (lambda ()
-            (my/gptel-sync-directive-for-current-runtime)))
+            (gptel-agent-runtime-sync-directive-for-current-runtime)))
 #+end_src
 
 * File footer
