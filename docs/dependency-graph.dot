@@ -10,6 +10,7 @@ digraph gptel_agent_runtime {
   "gar-substrate" [label="gar-substrate", fillcolor="#dde8f5"];
   "gar-quarantine" [label="gar-quarantine", fillcolor="#dde8f5"];
   "gar-skeptic" [label="gar-skeptic", fillcolor="#dde8f5"];
+  "gar-skeptic-model" [label="gar-skeptic-model", fillcolor="#ffffff"];
   "gar-validator" [label="gar-validator", fillcolor="#ffffff"];
   "gar-policy" [label="gar-policy", fillcolor="#dde8f5"];
   "gar-mission-control" [label="gar-mission-control", fillcolor="#f5f5f5"];
@@ -26,6 +27,7 @@ digraph gptel_agent_runtime {
   "gptel-agent-runtime" -> "gar-substrate";
   "gptel-agent-runtime" -> "gar-quarantine";
   "gptel-agent-runtime" -> "gar-skeptic";
+  "gptel-agent-runtime" -> "gar-skeptic-model";
   "gptel-agent-runtime" -> "gar-validator";
   "gptel-agent-runtime" -> "gar-policy";
   "gptel-agent-runtime" -> "gar-mission-control";

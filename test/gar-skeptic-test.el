@@ -51,25 +51,8 @@
   "Pure read at safe risk does not trigger the skeptic."
   (should-not (gptel-agent-runtime--skeptic-applies-p 'safe '(read-fs))))
 
-(ert-deftest gar-skeptic-parse-verdict-handles-embedded-json ()
-  "Parser extracts the JSON object from prose-wrapped model output."
-  (let* ((text "Some prose. {\"risk\":\"medium\",\"concerns\":[\"a\",\"b\"],\"recommended_mitigations\":[\"x\"]} trailing.")
-         (verdict (gptel-agent-runtime--skeptic-parse-verdict text "t" "a")))
-    (should (eq (plist-get verdict :risk) 'medium))
-    (should (equal (plist-get verdict :concerns) '("a" "b")))
-    (should (equal (plist-get verdict :recommended-mitigations) '("x")))
-    (should (eq (plist-get verdict :mode) 'model-based))))
-
-(ert-deftest gar-skeptic-parse-verdict-returns-nil-on-no-json ()
-  "Parser returns nil on input with no JSON object so the caller can fall back."
-  (should-not (gptel-agent-runtime--skeptic-parse-verdict
-               "no json here" "t" "a")))
-
-(ert-deftest gar-skeptic-extract-json-object-handles-nested-braces ()
-  "Balanced-brace scanner returns the full outer object across nested braces."
-  (let ((out (gptel-agent-runtime--skeptic-extract-json-object
-              "prose {{\"a\":1}, ignore}{ok} more")))
-    (should (equal out "{{\"a\":1}, ignore}"))))
+;; Note: model-based JSON parsing + extraction tests moved to
+;; test/gar-skeptic-model-test.el on 2026-05-28 after the module split.
 
 (ert-deftest gar-skeptic-apply-to-decision-escalates-high-verdicts ()
   "`--apply-skeptic-to-decision' flips confirmation-required-p when verdict is high."
