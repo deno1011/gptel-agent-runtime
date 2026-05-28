@@ -1116,7 +1116,7 @@ is non-nil. Return the routing decision plist."
   (message "gptel model router enabled=%s"
            gptel-agent-runtime-model-router-enabled))
 
-(defun my/collect-org-todos (&optional limit)
+(defun gptel-agent-runtime-collect-org-todos (&optional limit)
   "Return a list of TODO entries from all org agenda files.
 Each entry is a plist with :state :heading :file :deadline :tags."
   (let ((limit (or limit 120))
@@ -1137,9 +1137,9 @@ Each entry is a plist with :state :heading :file :deadline :tags."
            "/TODO|NEXT|IN-PROGRESS|WAIT|REVIEW" 'agenda))))
     (nreverse results)))
 
-(defun my/build-workspace-context ()
+(defun gptel-agent-runtime-build-workspace-context ()
   "Build a compact workspace context string for the gptel system prompt."
-  (let* ((todos (my/collect-org-todos 80))
+  (let* ((todos (gptel-agent-runtime-collect-org-todos 80))
          (by-state (seq-group-by (lambda (e) (plist-get e :state)) todos))
          (format-entries
           (lambda (state entries)
@@ -1179,15 +1179,15 @@ Each entry is a plist with :state :heading :file :deadline :tags."
 (defvar gar-agents--context-time 0)
 (defconst gar-agents--context-ttl 60)
 
-(defun my/workspace-context-string ()
+(defun gptel-agent-runtime-workspace-context-string ()
   "Return cached workspace context, refreshing if stale."
   (when (> (- (float-time) gar-agents--context-time)
            gar-agents--context-ttl)
-    (setq gar-agents--context-cache (my/build-workspace-context)
+    (setq gar-agents--context-cache (gptel-agent-runtime-build-workspace-context)
           gar-agents--context-time  (float-time)))
   gar-agents--context-cache)
 
-(defun my/gptel-context-invalidate ()
+(defun gptel-agent-runtime-context-invalidate ()
   "Force workspace context to be rebuilt on next gptel call."
   (interactive)
   (setq gar-agents--context-time 0)
@@ -1196,10 +1196,20 @@ Each entry is a plist with :state :heading :file :deadline :tags."
 (add-hook 'after-save-hook
           (lambda ()
             (when (derived-mode-p 'org-mode)
-              (my/gptel-context-invalidate))))
+              (gptel-agent-runtime-context-invalidate))))
 
-(defvar my/gptel-context-enabled t
+(defvar gptel-agent-runtime-context-enabled t
   "When non-nil, inject workspace context into every gptel-send call.")
+
+;; Backwards-compat aliases for the workspace-context helpers. Users
+;; may have bound `my/workspace-context-string' to a key or `setq''d
+;; `my/gptel-context-enabled' from their init; the aliases keep both
+;; names resolving.
+(defalias 'my/collect-org-todos       #'gptel-agent-runtime-collect-org-todos)
+(defalias 'my/build-workspace-context #'gptel-agent-runtime-build-workspace-context)
+(defalias 'my/workspace-context-string #'gptel-agent-runtime-workspace-context-string)
+(defalias 'my/gptel-context-invalidate #'gptel-agent-runtime-context-invalidate)
+(defvaralias 'my/gptel-context-enabled 'gptel-agent-runtime-context-enabled)
 
 (defun gptel-agent-runtime-current-buffer-task-text ()
   "Return recent buffer text used for lightweight agent/skill routing."
@@ -1627,7 +1637,7 @@ With prefix SAVE, persist the preference through Customize."
 (defun gar-agents--inject-context (orig-fn &rest args)
   "Around advice for `gptel-send': route, sync directive, and prepend context."
   (gptel-agent-runtime-cancel-current-job)
-  (if (not my/gptel-context-enabled)
+  (if (not gptel-agent-runtime-context-enabled)
       (progn
         (gptel-agent-runtime-sync-directive-for-current-runtime)
         (gptel-agent-runtime-sync-tools)
@@ -1641,7 +1651,7 @@ With prefix SAVE, persist the preference through Customize."
            (_model-route
             (when gptel-agent-runtime-model-router-enabled
               (gptel-agent-runtime-apply-model-route task-text)))
-           (ctx   (my/workspace-context-string))
+           (ctx   (gptel-agent-runtime-workspace-context-string))
            (capability-context
             (when (gptel-agent-runtime-capability-question-p task-text)
               (concat "=== LIVE AGENT CAPABILITY SUMMARY ===\n"

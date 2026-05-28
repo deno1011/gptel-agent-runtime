@@ -514,7 +514,7 @@ provenance and is renamed with a `.approved' suffix."
                           (let ((dl (plist-get e :deadline)))
                             (if (and dl (not (string-empty-p dl)))
                                 (format " (due %s)" dl) ""))))
-                (my/collect-org-todos 200) "\n")))
+                (gptel-agent-runtime-collect-org-todos 200) "\n")))
 
   ;; read_org_file — get raw text of an org file
   (gptel-make-tool
