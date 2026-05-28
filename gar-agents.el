@@ -1175,22 +1175,22 @@ Each entry is a plist with :state :heading :file :deadline :tags."
                 '("NEXT" "IN-PROGRESS" "TODO" "WAIT" "REVIEW") "")
      "\n=== END WORKSPACE CONTEXT ===\n")))
 
-(defvar my/gptel-context--cache nil)
-(defvar my/gptel-context--time 0)
-(defconst my/gptel-context--ttl 60)
+(defvar gar-agents--context-cache nil)
+(defvar gar-agents--context-time 0)
+(defconst gar-agents--context-ttl 60)
 
 (defun my/workspace-context-string ()
   "Return cached workspace context, refreshing if stale."
-  (when (> (- (float-time) my/gptel-context--time)
-           my/gptel-context--ttl)
-    (setq my/gptel-context--cache (my/build-workspace-context)
-          my/gptel-context--time  (float-time)))
-  my/gptel-context--cache)
+  (when (> (- (float-time) gar-agents--context-time)
+           gar-agents--context-ttl)
+    (setq gar-agents--context-cache (my/build-workspace-context)
+          gar-agents--context-time  (float-time)))
+  gar-agents--context-cache)
 
 (defun my/gptel-context-invalidate ()
   "Force workspace context to be rebuilt on next gptel call."
   (interactive)
-  (setq my/gptel-context--time 0)
+  (setq gar-agents--context-time 0)
   (message "gptel workspace context cache cleared."))
 
 (add-hook 'after-save-hook
@@ -1624,7 +1624,7 @@ With prefix SAVE, persist the preference through Customize."
                                    process)
         t))))
 
-(defun my/gptel--inject-context (orig-fn &rest args)
+(defun gar-agents--inject-context (orig-fn &rest args)
   "Around advice for `gptel-send': route, sync directive, and prepend context."
   (gptel-agent-runtime-cancel-current-job)
   (if (not my/gptel-context-enabled)
@@ -1659,7 +1659,7 @@ With prefix SAVE, persist the preference through Customize."
       (unless (gptel-agent-runtime--maybe-route-chat-to-swarm task-text)
         (apply orig-fn args)))))
 
-(advice-add 'gptel-send :around #'my/gptel--inject-context)
+(advice-add 'gptel-send :around #'gar-agents--inject-context)
 
 (provide 'gar-agents)
 
