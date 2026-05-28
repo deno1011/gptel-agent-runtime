@@ -676,6 +676,7 @@ Returns a plist with :agent, :skills, :all-agents, and :reason."
             (length playbooks)
             (plist-get route :reason))))
 
+;;;###autoload
 (defun gptel-agent-runtime-describe-route (text)
   "Display the agent/skill route for TEXT."
   (interactive "sRoute task: ")
@@ -745,6 +746,7 @@ consume the full route object."
                     base)))
     route))
 
+;;;###autoload
 (defun gptel-agent-runtime-register-default-agents-and-skills ()
   "Register built-in starter agents and skills.
 These defaults are intentionally small and transparent; users can override or
@@ -1092,6 +1094,7 @@ is non-nil. Return the routing decision plist."
          :taint 'trusted)))
     decision))
 
+;;;###autoload
 (defun gptel-agent-runtime-model-router-preview (&optional text)
   "Preview the model-router decision for TEXT or current buffer request."
   (interactive)
@@ -1104,6 +1107,7 @@ is non-nil. Return the routing decision plist."
              (plist-get decision :analysis))
     decision))
 
+;;;###autoload
 (defun gptel-agent-runtime-toggle-model-router ()
   "Toggle automatic model routing before normal gptel sends."
   (interactive)
@@ -1294,6 +1298,7 @@ Each entry is a plist with :state :heading :file :deadline :tags."
                               score
                               gptel-agent-runtime-chat-router-min-score))))))
 
+;;;###autoload
 (defun gptel-agent-runtime-chat-router-status ()
   "Show the current chat router decision for recent buffer text."
   (interactive)
@@ -1320,6 +1325,7 @@ Each entry is a plist with :state :heading :file :deadline :tags."
                gptel-agent-runtime-chat-router-enabled
                (not (eq gptel-agent-runtime-chat-router-mode 'off)))))
 
+;;;###autoload
 (defun gptel-agent-runtime-apply-chat-router-startup-mode ()
   "Apply `gptel-agent-runtime-chat-router-startup-mode' to live routing state."
   (interactive)
@@ -1340,6 +1346,7 @@ Each entry is a plist with :state :heading :file :deadline :tags."
              (gptel-agent-runtime-router-state)))
   gptel-agent-runtime-chat-router-startup-mode)
 
+;;;###autoload
 (defun gptel-agent-runtime-enable-swarm-routing ()
   "Enable autonomous swarm routing for suitable normal gptel prompts."
   (interactive)
@@ -1350,6 +1357,7 @@ Each entry is a plist with :state :heading :file :deadline :tags."
   (message "gptel swarm routing enabled: %s"
            (gptel-agent-runtime-router-state)))
 
+;;;###autoload
 (defun gptel-agent-runtime-disable-swarm-routing ()
   "Disable autonomous swarm routing from normal gptel prompts."
   (interactive)
@@ -1358,6 +1366,7 @@ Each entry is a plist with :state :heading :file :deadline :tags."
   (message "gptel swarm routing disabled: %s"
            (gptel-agent-runtime-router-state)))
 
+;;;###autoload
 (defun gptel-agent-runtime-toggle-swarm-routing (&optional ask-mode)
   "Toggle autonomous swarm routing from normal gptel prompts.
 With prefix ASK-MODE, enable routing in `ask' mode."
@@ -1373,6 +1382,7 @@ With prefix ASK-MODE, enable routing in `ask' mode."
     (message "gptel swarm routing enabled: %s"
              (gptel-agent-runtime-router-state))))
 
+;;;###autoload
 (defun gptel-agent-runtime-set-chat-router-mode (mode)
   "Set chat router MODE to `auto', `ask', or `off'."
   (interactive
@@ -1387,6 +1397,7 @@ With prefix ASK-MODE, enable routing in `ask' mode."
   (message "gptel chat router mode set: %s"
            (gptel-agent-runtime-router-state)))
 
+;;;###autoload
 (defun gptel-agent-runtime-set-chat-router-startup-mode (mode &optional save)
   "Set chat router startup MODE to `off', `ask', or `auto'.
 With prefix SAVE, persist the preference through Customize."
@@ -1409,6 +1420,7 @@ With prefix SAVE, persist the preference through Customize."
            (gptel-agent-runtime-router-state)
            (if save " (saved)" "")))
 
+;;;###autoload
 (defun gptel-agent-runtime-safe-swarm-self-test ()
   "Run a safe synthetic swarm trace test without web, files, or shell tools."
   (interactive)
@@ -1465,6 +1477,7 @@ With prefix SAVE, persist the preference through Customize."
     (message "Safe swarm self-test wrote trace to %s without executing tools."
              gptel-agent-runtime-swarm-buffer-name)))
 
+;;;###autoload
 (defun gptel-agent-runtime-worker-self-test (&optional count)
   "Create COUNT synthetic visible swarm workers without running tools."
   (interactive "p")
@@ -1548,6 +1561,7 @@ With prefix SAVE, persist the preference through Customize."
              gptel-agent-runtime-workers-buffer-name
              gptel-agent-runtime-swarm-buffer-name)))
 
+;;;###autoload
 (defun gptel-agent-runtime-command-center ()
   "Open a compact command menu for the Emacs agent runtime."
   (interactive)

@@ -566,6 +566,7 @@ Positions are zero-based offsets relative to TEXT."
   "Return the agent trace buffer, creating it when needed."
   (get-buffer-create gptel-agent-runtime-trace-buffer-name))
 
+;;;###autoload
 (defun gptel-agent-runtime-show-trace ()
   "Display the agent trace buffer."
   (interactive)
@@ -592,6 +593,7 @@ Positions are zero-based offsets relative to TEXT."
   "Return non-nil when JOB-ID has been cancelled in the current buffer."
   (member job-id gptel-agent-runtime--cancelled-raw-tool-job-ids))
 
+;;;###autoload
 (defun gptel-agent-runtime-cancel-current-job ()
   "Cancel the current raw tool continuation job in this buffer."
   (interactive)
@@ -765,6 +767,7 @@ Return non-nil when the region was changed."
       (insert (gptel-agent-runtime--deterministic-capability-answer))
       t)))
 
+;;;###autoload
 (defun gptel-agent-runtime-list-tools ()
   "Display all currently registered gptel tools and runtime policy metadata."
   (interactive)
@@ -918,6 +921,7 @@ Return non-nil when the region was changed."
     (insert "- M-x gptel-agent-runtime-list-organization\n")
     (buffer-string)))
 
+;;;###autoload
 (defun gptel-agent-runtime-show-guardrails ()
   "Display runtime policy, trust-boundary, and guardrail status."
   (interactive)
@@ -928,6 +932,7 @@ Return non-nil when the region was changed."
     (goto-char (point-min))
     (display-buffer (current-buffer))))
 
+;;;###autoload
 (defun gptel-agent-runtime-list-organization ()
   "Display the current agent organization and learned playbooks."
   (interactive)
@@ -1154,6 +1159,7 @@ Return non-nil when the region was changed."
                  (gptel-agent-runtime--trace
                   job-id "continuation returned no string response")))))))))))
 
+;;;###autoload
 (defun gptel-agent-runtime-execute-raw-tool-calls (beg end)
   "Execute safe raw JSON tool calls emitted as assistant text.
 This is a compatibility shim for local models that know tool-call syntax but do

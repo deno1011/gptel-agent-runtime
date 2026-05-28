@@ -82,6 +82,7 @@
                   (tool step session))
 (declare-function gptel-agent-runtime-capability-summary "gptel-agent-runtime" ())
 
+;;;###autoload
 (defun gptel-agent-runtime-start (goal &optional role process)
   "Start an autonomous agent session for GOAL with optional ROLE and PROCESS.
 The loop is: observe -> plan -> delegate -> act -> observe -> reflect ->
@@ -110,6 +111,7 @@ remember -> continue."
     (message "Agent session started: %s" (gptel-agent-runtime-session-id session))
     (gptel-agent-runtime--continue session)))
 
+;;;###autoload
 (defun gptel-agent-runtime-stop ()
   "Stop the current autonomous agent session."
   (interactive)
@@ -146,6 +148,7 @@ remember -> continue."
                 0)
               (length (gptel-agent-runtime-session-observations session))))))
 
+;;;###autoload
 (defun gptel-agent-runtime-describe-session ()
   "Display a summary of the current autonomous agent session."
   (interactive)
@@ -161,6 +164,7 @@ remember -> continue."
          (gptel-agent-runtime-session-root-task session))
         '(completed cancelled failed max-iterations)))
 
+;;;###autoload
 (defun gptel-agent-runtime-resume-session (file)
   "Resume an unfinished runtime session from FILE."
   (interactive
@@ -210,6 +214,7 @@ remember -> continue."
           (setf (gptel-agent-runtime-plan-step-status step) 'draft)))))
   session)
 
+;;;###autoload
 (defun gptel-agent-runtime-resume-last-session ()
   "Resume the newest unfinished runtime session."
   (interactive)
@@ -1490,6 +1495,7 @@ The preferred format is JSON with a top-level :steps list. A single
                  "Worker returned no response."
                   "parallel-direct-response"))))))))
 
+;;;###autoload
 (defun gptel-agent-runtime-cancel-worker (worker-id &optional session reason)
   "Cancel WORKER-ID in SESSION or the active session."
   (interactive
@@ -1532,6 +1538,7 @@ The preferred format is JSON with a top-level :steps list. A single
       (message "Worker cancelled: %s" worker-id))
     worker))
 
+;;;###autoload
 (defun gptel-agent-runtime-cancel-workers (&optional session reason)
   "Cancel queued/running workers for SESSION."
   (let ((session (or session gptel-agent-runtime--current-session)))
@@ -1544,6 +1551,7 @@ The preferred format is JSON with a top-level :steps list. A single
            session
            (or reason "Cancelled.")))))))
 
+;;;###autoload
 (defun gptel-agent-runtime-retry-worker (worker-id &optional session)
   "Requeue failed or cancelled WORKER-ID in SESSION or the active session."
   (interactive
@@ -1621,6 +1629,7 @@ The preferred format is JSON with a top-level :steps list. A single
           (insert "No workers have been created for this session yet.\n")))
       (buffer-string))))
 
+;;;###autoload
 (defun gptel-agent-runtime-list-workers ()
   "Display parallel worker lifecycle status."
   (interactive)

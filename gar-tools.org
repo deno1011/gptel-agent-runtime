@@ -456,6 +456,7 @@ Returns a plist with :file, :static-violations, :subprocess-exit-code,
       (cl-remove-if (lambda (f) (file-directory-p f))
                     (directory-files dir t "\\.el\\'")))))
 
+;;;###autoload
 (defun gptel-agent-runtime-approve-proposed-tool (file)
   "Approve and register the proposed tool from FILE.
 Static + subprocess validation must pass. The new tool is registered via
@@ -502,6 +503,7 @@ provenance and is renamed with a `.approved' suffix."
         (message "gptel-agent-runtime: approved %s" name))
       name)))
 
+;;;###autoload
 (defun gptel-agent-runtime-reject-proposed-tool (file &optional reason)
   "Move FILE to the rejected/ subdirectory. REASON is recorded in a sidecar."
   (interactive
@@ -520,6 +522,7 @@ provenance and is renamed with a `.approved' suffix."
       (message "gptel-agent-runtime: rejected %s" base))
     rejected-file))
 
+;;;###autoload
 (defun gptel-agent-runtime-review-proposed-tools ()
   "Open a buffer summarizing proposed tools and their validation status."
   (interactive)

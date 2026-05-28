@@ -198,6 +198,7 @@ automatically at package load (when an Ollama backend is registered),
 and by the model router when it routes to a local profile.
 
 #+begin_src emacs-lisp
+;;;###autoload
 (defun gptel-agent-runtime-use-default-local-model ()
   "Select the active or configured default local Ollama model when available."
   (interactive)

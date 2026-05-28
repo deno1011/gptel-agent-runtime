@@ -115,6 +115,7 @@ both plist and vector shapes returned by `json-read'."
     (mapcar #'my/gptel-model-id
             (append (gptel-backend-models backend) nil))))
 
+;;;###autoload
 (defun gptel-agent-runtime-use-default-local-model ()
   "Select the active or configured default local Ollama model when available."
   (interactive)
