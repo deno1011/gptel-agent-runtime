@@ -99,7 +99,7 @@ both plist and vector shapes returned by `json-read'."
             (kill-buffer buf))))
     (error nil)))
 
-(defun my/gptel-model-id (model)
+(defun gptel-agent-runtime-model-id (model)
   "Return the symbol model id from MODEL, tolerating gptel metadata forms."
   (cond
    ((symbolp model) model)
@@ -108,10 +108,10 @@ both plist and vector shapes returned by `json-read'."
     (aref model 0))
    (t model)))
 
-(defun my/gptel-backend-model-symbols (backend)
+(defun gptel-agent-runtime-backend-model-symbols (backend)
   "Return BACKEND model ids as symbols, tolerating list/vector metadata."
   (when (and backend (fboundp 'gptel-backend-models))
-    (mapcar #'my/gptel-model-id
+    (mapcar #'gptel-agent-runtime-model-id
             (append (gptel-backend-models backend) nil))))
 
 ;;;###autoload
@@ -123,7 +123,7 @@ both plist and vector shapes returned by `json-read'."
     (let ((model (or (and gptel-agent-runtime-prefer-active-ollama-model
                           (gptel-agent-runtime-active-ollama-model))
                      gptel-agent-runtime-default-local-model)))
-      (unless (member model (my/gptel-backend-model-symbols my/gptel-ollama-backend))
+      (unless (member model (gptel-agent-runtime-backend-model-symbols my/gptel-ollama-backend))
         (when (fboundp 'gptel-backend-models)
           (setf (gptel-backend-models my/gptel-ollama-backend)
                 (append (gptel-backend-models my/gptel-ollama-backend)
@@ -140,13 +140,21 @@ both plist and vector shapes returned by `json-read'."
                    (format " (%s)" gptel-agent-runtime-default-local-model-label)
                  " (active Ollama model)")))))
 
-(defun my/gptel-register-model (name backend model)
+(defun gptel-agent-runtime-register-model (name backend model)
   "Register NAME with BACKEND+MODEL in `my/gptel-backends'.
 Overwrites an existing entry with the same name."
   (setq my/gptel-backends
         (cons (cons name (cons backend model))
               (cl-remove name my/gptel-backends
                          :key #'car :test #'equal))))
+
+;; Backwards-compat aliases for the legacy `my/gptel-*' names. Hosts may
+;; bind these from setup scripts or from key bindings; the aliases keep
+;; both names working until callers move to the new API.
+(defalias 'my/gptel-model-id #'gptel-agent-runtime-model-id)
+(defalias 'my/gptel-backend-model-symbols
+  #'gptel-agent-runtime-backend-model-symbols)
+(defalias 'my/gptel-register-model #'gptel-agent-runtime-register-model)
 
 (provide 'gar-backend)
 

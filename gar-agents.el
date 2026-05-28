@@ -60,7 +60,7 @@
 (declare-function gptel-agent-runtime--read-versioned "gptel-agent-runtime"
                   (file))
 (declare-function gptel-agent-runtime-capability-summary "gptel-agent-runtime" ())
-(declare-function my/gptel-model-id "gar-backend" (model))
+(declare-function gptel-agent-runtime-model-id "gar-backend" (model))
 (declare-function gptel-agent-runtime-sync-directive-for-current-runtime
                   "gar-directives" ())
 
@@ -1037,7 +1037,7 @@ Be specific. Cite exact arguments, paths, patterns, or capability mismatches whe
 
 (defun gptel-agent-runtime--model-entry-text (entry)
   "Return searchable text for backend ENTRY."
-  (format "%s %S" (car entry) (my/gptel-model-id (cddr entry))))
+  (format "%s %S" (car entry) (gptel-agent-runtime-model-id (cddr entry))))
 
 (defun gptel-agent-runtime-model-router-find-entry (profile)
   "Return the best available `my/gptel-backends' entry for PROFILE."
@@ -1065,7 +1065,7 @@ Be specific. Cite exact arguments, paths, patterns, or capability mismatches whe
     (list :profile profile
           :analysis analysis
           :entry entry
-          :model (and entry (my/gptel-model-id (cddr entry)))
+          :model (and entry (gptel-agent-runtime-model-id (cddr entry)))
           :backend (and entry (cadr entry))
           :display-name (and entry (car entry)))))
 
@@ -1078,7 +1078,7 @@ is non-nil. Return the routing decision plist."
                (plist-get decision :entry))
       (let* ((entry (plist-get decision :entry))
              (backend (cadr entry))
-             (model (my/gptel-model-id (cddr entry))))
+             (model (gptel-agent-runtime-model-id (cddr entry))))
         (setq gptel-backend backend
               gptel-model model)
         (setq-local gptel-backend backend

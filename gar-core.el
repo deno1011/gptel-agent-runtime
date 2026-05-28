@@ -848,7 +848,7 @@ gptel--known-tools is a two-level alist: (category . ((name . struct) ...))."
                    my/gptel-backends nil t))
          (entry   (assoc choice my/gptel-backends))
          (backend (cadr entry))
-         (model   (my/gptel-model-id (cddr entry)))
+         (model   (gptel-agent-runtime-model-id (cddr entry)))
          (directive (gptel-agent-runtime-directive-for-choice choice))
          (system-message (alist-get directive gptel-directives)))
     ;; Set globally (applies to new gptel sessions)

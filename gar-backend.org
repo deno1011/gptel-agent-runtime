@@ -18,11 +18,11 @@ What this module owns:
   =gptel-agent-runtime-active-ollama-model=,
   =gptel-agent-runtime-use-default-local-model=, and the private URL
   helper =gptel-agent-runtime--ollama-url=
-- model-id normalization helpers: =my/gptel-model-id= (returns the
+- model-id normalization helpers: =gptel-agent-runtime-model-id= (returns the
   symbol id from gptel metadata in any shape -- symbol, cons, vector)
-  and =my/gptel-backend-model-symbols= (lists a backend's model ids
+  and =gptel-agent-runtime-backend-model-symbols= (lists a backend's model ids
   uniformly as symbols)
-- =my/gptel-register-model= -- adds (or replaces) one entry in the
+- =gptel-agent-runtime-register-model= -- adds (or replaces) one entry in the
   =my/gptel-backends= alist; called by the user's backend setup and by
   the model-router
 
@@ -166,13 +166,13 @@ both plist and vector shapes returned by `json-read'."
 * Model-id normalization
 
 gptel may return models as a bare symbol, a cons cell with metadata, or
-a vector. =my/gptel-model-id= picks the symbol id regardless of which
+a vector. =gptel-agent-runtime-model-id= picks the symbol id regardless of which
 shape gptel hands back, so downstream code can compare model ids with
-=eq=. =my/gptel-backend-model-symbols= lists a backend's known models
+=eq=. =gptel-agent-runtime-backend-model-symbols= lists a backend's known models
 through the same normalizer.
 
 #+begin_src emacs-lisp
-(defun my/gptel-model-id (model)
+(defun gptel-agent-runtime-model-id (model)
   "Return the symbol model id from MODEL, tolerating gptel metadata forms."
   (cond
    ((symbolp model) model)
@@ -181,10 +181,10 @@ through the same normalizer.
     (aref model 0))
    (t model)))
 
-(defun my/gptel-backend-model-symbols (backend)
+(defun gptel-agent-runtime-backend-model-symbols (backend)
   "Return BACKEND model ids as symbols, tolerating list/vector metadata."
   (when (and backend (fboundp 'gptel-backend-models))
-    (mapcar #'my/gptel-model-id
+    (mapcar #'gptel-agent-runtime-model-id
             (append (gptel-backend-models backend) nil))))
 #+end_src
 
@@ -206,7 +206,7 @@ and by the model router when it routes to a local profile.
     (let ((model (or (and gptel-agent-runtime-prefer-active-ollama-model
                           (gptel-agent-runtime-active-ollama-model))
                      gptel-agent-runtime-default-local-model)))
-      (unless (member model (my/gptel-backend-model-symbols my/gptel-ollama-backend))
+      (unless (member model (gptel-agent-runtime-backend-model-symbols my/gptel-ollama-backend))
         (when (fboundp 'gptel-backend-models)
           (setf (gptel-backend-models my/gptel-ollama-backend)
                 (append (gptel-backend-models my/gptel-ollama-backend)
@@ -232,13 +232,21 @@ register one entry at a time (replacing any existing entry with the same
 display name).
 
 #+begin_src emacs-lisp
-(defun my/gptel-register-model (name backend model)
+(defun gptel-agent-runtime-register-model (name backend model)
   "Register NAME with BACKEND+MODEL in `my/gptel-backends'.
 Overwrites an existing entry with the same name."
   (setq my/gptel-backends
         (cons (cons name (cons backend model))
               (cl-remove name my/gptel-backends
                          :key #'car :test #'equal))))
+
+;; Backwards-compat aliases for the legacy `my/gptel-*' names. Hosts may
+;; bind these from setup scripts or from key bindings; the aliases keep
+;; both names working until callers move to the new API.
+(defalias 'my/gptel-model-id #'gptel-agent-runtime-model-id)
+(defalias 'my/gptel-backend-model-symbols
+  #'gptel-agent-runtime-backend-model-symbols)
+(defalias 'my/gptel-register-model #'gptel-agent-runtime-register-model)
 #+end_src
 
 * Setup hand-off contract
@@ -254,7 +262,7 @@ consuming setup file is responsible for:
    and model lists.
 3. Populating =my/gptel-backends= with the resulting
    =(DISPLAY-NAME . (BACKEND . MODEL))= entries (directly via =setq=
-   or per-entry via =my/gptel-register-model=).
+   or per-entry via =gptel-agent-runtime-register-model=).
 4. Optionally setting =my/gptel-ollama-backend= when an Ollama backend
    is registered, so =gptel-agent-runtime-use-default-local-model= and
    the mission-control buffer can find it.
