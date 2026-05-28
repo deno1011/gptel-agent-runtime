@@ -1,0 +1,429 @@
+;;; gar-trajectory.el --- unified per-goal trajectory storage -*- lexical-binding: t; -*-
+
+;; Part of deno1011/gptel-agent-runtime. Added on 2026-05-28 as PR 2 of
+;; the self-reflective / learning / memorising track.
+
+;;; Commentary:
+
+;; Builds, persists, and retrieves `gptel-agent-runtime-trajectory'
+;; records. The struct itself lives in gar-core; this module owns the
+;; "how does one get filled in" logic, the on-disk format, the in-memory
+;; ring, the auto-capture subscriber on `session-finalized', and the
+;; M-x show-trajectory-history viewer.
+
+;;; Code:
+
+(require 'cl-lib)
+(require 'subr-x)
+
+;; gar-core defcustoms / defvars and struct accessors.
+(defvar gptel-agent-runtime-memory-directory)
+(declare-function gptel-agent-runtime--timestamp "gar-substrate" ())
+(declare-function gptel-agent-runtime--state-header "gar-substrate"
+                  (&optional written-by))
+(declare-function gptel-agent-runtime--read-versioned "gar-substrate" (file))
+(declare-function gptel-agent-runtime--shorten "gar-substrate"
+                  (text &optional max))
+(declare-function gptel-agent-runtime-emit-event "gptel-agent-runtime"
+                  (type &rest args))
+(declare-function gptel-agent-runtime-event-payload "gptel-agent-runtime"
+                  (event))
+(declare-function gptel-agent-runtime-event-session-id "gptel-agent-runtime"
+                  (event))
+(declare-function gptel-agent-runtime-subscribe "gar-substrate"
+                  (event-type handler))
+
+;; gar-core structs.
+(declare-function gptel-agent-runtime-trajectory-create
+                  "gptel-agent-runtime" (&rest plist))
+(declare-function gptel-agent-runtime-trajectory-p
+                  "gptel-agent-runtime" (obj))
+(declare-function gptel-agent-runtime-trajectory-id
+                  "gptel-agent-runtime" (traj))
+(declare-function gptel-agent-runtime-trajectory-goal
+                  "gptel-agent-runtime" (traj))
+(declare-function gptel-agent-runtime-trajectory-session-id
+                  "gptel-agent-runtime" (traj))
+(declare-function gptel-agent-runtime-trajectory-outcome
+                  "gptel-agent-runtime" (traj))
+(declare-function gptel-agent-runtime-trajectory-finalized-at
+                  "gptel-agent-runtime" (traj))
+(declare-function gptel-agent-runtime-trajectory-iteration-count
+                  "gptel-agent-runtime" (traj))
+(declare-function gptel-agent-runtime-trajectory-steps
+                  "gptel-agent-runtime" (traj))
+(declare-function gptel-agent-runtime-trajectory-verifier-verdicts
+                  "gptel-agent-runtime" (traj))
+(declare-function gptel-agent-runtime-trajectory-step-create
+                  "gptel-agent-runtime" (&rest plist))
+
+;; gar-core's session / plan-step accessors.
+(declare-function gptel-agent-runtime-session-id "gptel-agent-runtime" (s))
+(declare-function gptel-agent-runtime-session-iteration
+                  "gptel-agent-runtime" (s))
+(declare-function gptel-agent-runtime-session-decisions
+                  "gptel-agent-runtime" (s))
+(declare-function gptel-agent-runtime-session-started-at
+                  "gptel-agent-runtime" (s))
+(declare-function gptel-agent-runtime-session-current-task
+                  "gptel-agent-runtime" (s))
+(declare-function gptel-agent-runtime-task-goal "gptel-agent-runtime" (t))
+(declare-function gptel-agent-runtime-task-notes "gptel-agent-runtime" (t))
+(declare-function gptel-agent-runtime-plan-steps "gptel-agent-runtime"
+                  (plan))
+(declare-function gptel-agent-runtime-plan-step-id
+                  "gptel-agent-runtime" (step))
+(declare-function gptel-agent-runtime-plan-step-title
+                  "gptel-agent-runtime" (step))
+(declare-function gptel-agent-runtime-plan-step-rationale
+                  "gptel-agent-runtime" (step))
+(declare-function gptel-agent-runtime-plan-step-suggested-tool
+                  "gptel-agent-runtime" (step))
+(declare-function gptel-agent-runtime-plan-step-args
+                  "gptel-agent-runtime" (step))
+(declare-function gptel-agent-runtime-plan-step-risk
+                  "gptel-agent-runtime" (step))
+(declare-function gptel-agent-runtime-plan-step-attempts
+                  "gptel-agent-runtime" (step))
+(declare-function gptel-agent-runtime-plan-step-status
+                  "gptel-agent-runtime" (step))
+(declare-function gptel-agent-runtime-plan-step-result
+                  "gptel-agent-runtime" (step))
+(declare-function gptel-agent-runtime-plan-step-observations
+                  "gptel-agent-runtime" (step))
+(declare-function gptel-agent-runtime-plan-step-reflections
+                  "gptel-agent-runtime" (step))
+(declare-function gptel-agent-runtime-action-result-status
+                  "gptel-agent-runtime" (r))
+(declare-function gptel-agent-runtime-action-result-output
+                  "gptel-agent-runtime" (r))
+(declare-function gptel-agent-runtime-action-result-error
+                  "gptel-agent-runtime" (r))
+(declare-function gptel-agent-runtime-playbook-id "gptel-agent-runtime"
+                  (pb))
+(declare-function gptel-agent-runtime-match-playbooks "gar-agents" (text))
+
+;; gar-memory peer (for the reuse of session-finalize outcome mapping +
+;; current-session pointer at finalize time).
+(declare-function gptel-agent-runtime--session-finalized-outcome
+                  "gar-memory" (reason))
+(defvar gptel-agent-runtime--current-session)
+
+;; gar-verifier ring.
+(defvar gptel-agent-runtime--last-verifier-verdicts)
+
+(defcustom gptel-agent-runtime-trajectories-directory
+  (expand-file-name "trajectories/"
+                    (or (and (boundp 'gptel-agent-runtime-memory-directory)
+                             gptel-agent-runtime-memory-directory)
+                        (expand-file-name "gptel-agent-runtime/"
+                                          user-emacs-directory)))
+  "Directory where per-goal trajectories are persisted as elisp files."
+  :type 'directory
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-trajectories-max-memory 200
+  "Maximum trajectories kept in the in-memory ring `--trajectories'.
+Older entries are trimmed when the ring exceeds this size."
+  :type 'integer
+  :safe #'integerp
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-trajectories-max-on-disk 1000
+  "Maximum trajectory files kept on disk.
+When writing a new trajectory, files beyond this count (oldest first)
+are pruned. nil disables on-disk pruning."
+  :type '(choice (const :tag "Unbounded" nil) integer)
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-trajectories-output-max-chars 4000
+  "Maximum characters from an action-result `output' that the trajectory
+snapshots. Longer outputs are truncated with an ellipsis. Keeps on-disk
+files reasonable when a tool produces a large blob."
+  :type 'integer
+  :safe #'integerp
+  :group 'gptel-agent-runtime)
+
+(defvar gptel-agent-runtime--trajectories nil
+  "In-memory ring of `gptel-agent-runtime-trajectory' records, newest first.")
+
+(defun gptel-agent-runtime--trajectory-shorten-output (text)
+  "Return TEXT (a string or nil) clipped to the trajectory output max."
+  (let ((max gptel-agent-runtime-trajectories-output-max-chars))
+    (cond
+     ((not (stringp text)) nil)
+     ((<= (length text) max) text)
+     (t (concat (substring text 0 max)
+                "\n[...truncated by gar-trajectory...]")))))
+
+(defun gptel-agent-runtime--snapshot-plan-step (step)
+  "Return a `trajectory-step' snapshot of plan-step STEP."
+  (let* ((result (gptel-agent-runtime-plan-step-result step))
+         (status (and result (gptel-agent-runtime-action-result-status result)))
+         (output (and result (gptel-agent-runtime-action-result-output result)))
+         (error (and result (gptel-agent-runtime-action-result-error result))))
+    (gptel-agent-runtime-trajectory-step-create
+     :step-id (gptel-agent-runtime-plan-step-id step)
+     :title (gptel-agent-runtime-plan-step-title step)
+     :rationale (gptel-agent-runtime-plan-step-rationale step)
+     :suggested-tool (gptel-agent-runtime-plan-step-suggested-tool step)
+     :args (gptel-agent-runtime-plan-step-args step)
+     :risk (gptel-agent-runtime-plan-step-risk step)
+     :attempts (or (gptel-agent-runtime-plan-step-attempts step) 0)
+     :status (gptel-agent-runtime-plan-step-status step)
+     :result-status status
+     :result-output (gptel-agent-runtime--trajectory-shorten-output output)
+     :result-error error
+     :observations (gptel-agent-runtime-plan-step-observations step)
+     :reflections (gptel-agent-runtime-plan-step-reflections step))))
+
+(defun gptel-agent-runtime--verifier-verdicts-during (start-iso end-iso)
+  "Return verifier verdicts from `--last-verifier-verdicts' whose timestamp
+falls between START-ISO and END-ISO (string compare on ISO timestamps).
+Returns the verdicts oldest first."
+  (when (boundp 'gptel-agent-runtime--last-verifier-verdicts)
+    (let ((in-range nil))
+      (dolist (entry gptel-agent-runtime--last-verifier-verdicts)
+        (let ((ts (car entry)))
+          ;; Emacs lacks `string<=' as a primitive; express as `not string>'.
+          (when (and (stringp ts)
+                     (or (null start-iso) (not (string> start-iso ts)))
+                     (or (null end-iso) (not (string> ts end-iso))))
+            (push (cdr entry) in-range))))
+      ;; Ring is newest first; in-range is now oldest first after the reverse push.
+      in-range)))
+
+(defun gptel-agent-runtime-trajectory-from-session (session reason)
+  "Build a trajectory snapshot of SESSION at finalize time.
+REASON is the finalize reason symbol; the trajectory's outcome is derived
+via `gptel-agent-runtime--session-finalized-outcome'. Captures the
+session's plan steps, decisions, matched playbook ids, and the verifier
+verdicts whose timestamps fall within the session's start/end window."
+  (let* ((id (format "trajectory-%s-%s"
+                     (or (gptel-agent-runtime-session-id session) "?")
+                     (gptel-agent-runtime--timestamp)))
+         (task (gptel-agent-runtime-session-current-task session))
+         (goal (and task (gptel-agent-runtime-task-goal task)))
+         (plan (and task (gptel-agent-runtime-task-notes task)))
+         (steps (and plan
+                     (mapcar #'gptel-agent-runtime--snapshot-plan-step
+                             (gptel-agent-runtime-plan-steps plan))))
+         (started (gptel-agent-runtime-session-started-at session))
+         (finalized (gptel-agent-runtime--timestamp))
+         (outcome (if (fboundp 'gptel-agent-runtime--session-finalized-outcome)
+                      (gptel-agent-runtime--session-finalized-outcome reason)
+                    'abandoned))
+         (verdicts (gptel-agent-runtime--verifier-verdicts-during
+                    started finalized))
+         (matched-playbook-ids
+          (and goal
+               (fboundp 'gptel-agent-runtime-match-playbooks)
+               (mapcar #'gptel-agent-runtime-playbook-id
+                       (gptel-agent-runtime-match-playbooks goal))))
+         (reflections
+          (apply #'append
+                 (mapcar (lambda (s)
+                           (or (gptel-agent-runtime-plan-step-reflections s)
+                               '()))
+                         (or (and plan (gptel-agent-runtime-plan-steps plan))
+                             '())))))
+    (gptel-agent-runtime-trajectory-create
+     :id id
+     :goal goal
+     :session-id (gptel-agent-runtime-session-id session)
+     :started-at started
+     :finalized-at finalized
+     :outcome outcome
+     :reason reason
+     :iteration-count (or (gptel-agent-runtime-session-iteration session) 0)
+     :steps steps
+     :verifier-verdicts verdicts
+     :playbook-ids matched-playbook-ids
+     :reflections reflections
+     :decisions (gptel-agent-runtime-session-decisions session))))
+
+(defun gptel-agent-runtime--trajectories-ensure-dir ()
+  "Ensure the trajectories directory exists; return its absolute path."
+  (let ((dir gptel-agent-runtime-trajectories-directory))
+    (unless (file-directory-p dir)
+      (make-directory dir t))
+    dir))
+
+(defun gptel-agent-runtime--trajectory-file (trajectory)
+  "Return the on-disk file path for TRAJECTORY."
+  (expand-file-name
+   (concat (gptel-agent-runtime-trajectory-id trajectory) ".el")
+   (gptel-agent-runtime--trajectories-ensure-dir)))
+
+(defun gptel-agent-runtime--save-trajectory (trajectory)
+  "Persist TRAJECTORY to its on-disk file with the standard state header."
+  (let ((file (gptel-agent-runtime--trajectory-file trajectory)))
+    (with-temp-file file
+      (let ((print-level nil) (print-length nil))
+        (prin1 (gptel-agent-runtime--state-header "gar-trajectory")
+               (current-buffer))
+        (insert "\n")
+        (prin1 trajectory (current-buffer))
+        (insert "\n")))))
+
+(defun gptel-agent-runtime--prune-trajectory-files ()
+  "Trim the on-disk trajectories directory to the configured cap.
+Keeps the most-recently-modified files."
+  (when gptel-agent-runtime-trajectories-max-on-disk
+    (let* ((dir gptel-agent-runtime-trajectories-directory)
+           (files (and (file-directory-p dir)
+                       (directory-files dir t "\\`trajectory-.*\\.el\\'")))
+           (sorted (sort (cl-copy-list files)
+                         (lambda (a b)
+                           (string> (file-attribute-modification-time
+                                     (file-attributes a))
+                                    (file-attribute-modification-time
+                                     (file-attributes b))))))
+           (excess (when (> (length sorted)
+                            gptel-agent-runtime-trajectories-max-on-disk)
+                     (nthcdr gptel-agent-runtime-trajectories-max-on-disk
+                             sorted))))
+      (dolist (f (or excess '()))
+        (ignore-errors (delete-file f))))))
+
+(defun gptel-agent-runtime-record-trajectory (trajectory)
+  "Append TRAJECTORY to the in-memory ring and persist it to disk.
+Emits a `trajectory-recorded' event."
+  (push trajectory gptel-agent-runtime--trajectories)
+  (when (> (length gptel-agent-runtime--trajectories)
+           gptel-agent-runtime-trajectories-max-memory)
+    (setcdr (nthcdr (1- gptel-agent-runtime-trajectories-max-memory)
+                    gptel-agent-runtime--trajectories)
+            nil))
+  (gptel-agent-runtime--save-trajectory trajectory)
+  (gptel-agent-runtime--prune-trajectory-files)
+  (gptel-agent-runtime-emit-event
+   'trajectory-recorded
+   :source "trajectory"
+   :payload (list :id (gptel-agent-runtime-trajectory-id trajectory)
+                  :goal (gptel-agent-runtime-trajectory-goal trajectory)
+                  :outcome (gptel-agent-runtime-trajectory-outcome trajectory)
+                  :steps (length (or (gptel-agent-runtime-trajectory-steps
+                                      trajectory)
+                                     '()))
+                  :verdicts (length (or (gptel-agent-runtime-trajectory-verifier-verdicts
+                                         trajectory)
+                                        '())))
+   :taint 'trusted)
+  trajectory)
+
+(defun gptel-agent-runtime-load-trajectories ()
+  "Read the persisted trajectories from disk into the in-memory ring."
+  (let* ((dir gptel-agent-runtime-trajectories-directory)
+         (files (and (file-directory-p dir)
+                     (directory-files dir t "\\`trajectory-.*\\.el\\'")))
+         (loaded nil))
+    (dolist (f (or files '()))
+      (condition-case _err
+          (let* ((versioned (gptel-agent-runtime--read-versioned f))
+                 (rest-pos (cdr versioned)))
+            (when rest-pos
+              (with-temp-buffer
+                (insert-file-contents f)
+                (goto-char rest-pos)
+                (let ((obj (condition-case nil (read (current-buffer))
+                             (error nil))))
+                  (when obj (push obj loaded))))))
+        (error nil)))
+    ;; Sort newest first by finalized-at; cap to max-memory.
+    (setq gptel-agent-runtime--trajectories
+          (cl-subseq
+           (sort loaded
+                 (lambda (a b)
+                   (string> (or (gptel-agent-runtime-trajectory-finalized-at a)
+                                "")
+                            (or (gptel-agent-runtime-trajectory-finalized-at b)
+                                ""))))
+           0 (min (length loaded)
+                  gptel-agent-runtime-trajectories-max-memory)))
+    (length gptel-agent-runtime--trajectories)))
+
+(defun gptel-agent-runtime-trajectories-for-goal (goal-pattern &optional limit)
+  "Return trajectories whose goal contains GOAL-PATTERN as a substring (case-insensitive).
+Newest first; capped at LIMIT (default 20). The in-memory ring is consulted
+first; trajectories not currently in memory are not retrieved here -- call
+`gptel-agent-runtime-load-trajectories' to refresh from disk if needed."
+  (let* ((pat (and (stringp goal-pattern) (downcase goal-pattern)))
+         (cap (or limit 20))
+         (out nil))
+    (when pat
+      (dolist (traj gptel-agent-runtime--trajectories)
+        (when (< (length out) cap)
+          (let ((goal (or (gptel-agent-runtime-trajectory-goal traj) "")))
+            (when (string-match-p (regexp-quote pat) (downcase goal))
+              (push traj out))))))
+    (nreverse out)))
+
+(defun gptel-agent-runtime-trajectory-summary (trajectory)
+  "Return a short human-readable summary string of TRAJECTORY."
+  (let* ((outcome (gptel-agent-runtime-trajectory-outcome trajectory))
+         (steps (or (gptel-agent-runtime-trajectory-steps trajectory) '()))
+         (verdicts (or (gptel-agent-runtime-trajectory-verifier-verdicts
+                        trajectory)
+                       '()))
+         (passed (cl-count-if (lambda (v) (plist-get v :passed)) verdicts))
+         (failed (- (length verdicts) passed)))
+    (format "[%s] %s steps=%d attempts=%d verifier passed=%d failed=%d goal=%s"
+            (or outcome "?")
+            (or (gptel-agent-runtime-trajectory-finalized-at trajectory) "?")
+            (length steps)
+            (apply #'+ 0 (mapcar (lambda (s)
+                                   (or (gptel-agent-runtime-trajectory-step-attempts s)
+                                       0))
+                                 steps))
+            passed
+            failed
+            (gptel-agent-runtime--shorten
+             (or (gptel-agent-runtime-trajectory-goal trajectory) "") 80))))
+
+;;;###autoload
+(defun gptel-agent-runtime-show-trajectory-history (&optional limit)
+  "Open a buffer showing the most-recent trajectories.
+LIMIT defaults to 30; pass a prefix arg to override interactively."
+  (interactive "p")
+  (let ((cap (or (and (numberp limit) (> limit 1) limit) 30))
+        (buf (get-buffer-create "*gptel-agent-trajectories*")))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert (format "gptel-agent-runtime trajectories\nIn-memory: %d   Showing: %d\n\n"
+                        (length gptel-agent-runtime--trajectories)
+                        (min cap (length gptel-agent-runtime--trajectories))))
+        (let ((shown 0))
+          (dolist (traj gptel-agent-runtime--trajectories)
+            (when (< shown cap)
+              (insert "  ")
+              (insert (gptel-agent-runtime-trajectory-summary traj))
+              (insert "\n")
+              (setq shown (1+ shown))))))
+      (goto-char (point-min))
+      (special-mode))
+    (display-buffer buf)))
+
+(defun gptel-agent-runtime--record-trajectory-on-finalize (event)
+  "Subscriber on `session-finalized': snapshot the active session into a trajectory.
+Reads `gptel-agent-runtime--current-session' (the active session at the
+time of finalize); the event payload's `:reason' supplies the finalize
+reason."
+  (let* ((payload (gptel-agent-runtime-event-payload event))
+         (reason (plist-get payload :reason))
+         (session (and (boundp 'gptel-agent-runtime--current-session)
+                       gptel-agent-runtime--current-session)))
+    (when session
+      (let ((trajectory
+             (gptel-agent-runtime-trajectory-from-session session reason)))
+        (when trajectory
+          (gptel-agent-runtime-record-trajectory trajectory))))))
+
+(gptel-agent-runtime-subscribe
+ 'session-finalized
+ #'gptel-agent-runtime--record-trajectory-on-finalize)
+
+(provide 'gar-trajectory)
+
+;;; gar-trajectory.el ends here

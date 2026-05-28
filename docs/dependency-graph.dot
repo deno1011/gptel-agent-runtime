@@ -17,6 +17,7 @@ digraph gptel_agent_runtime {
   "gar-mission-control" [label="gar-mission-control", fillcolor="#f5f5f5"];
   "gar-canaries" [label="gar-canaries", fillcolor="#f5f5f5"];
   "gar-memory" [label="gar-memory", fillcolor="#f5f5f5"];
+  "gar-trajectory" [label="gar-trajectory", fillcolor="#ffffff"];
   "gar-tools" [label="gar-tools", fillcolor="#f5f5f5"];
   "gar-backend" [label="gar-backend", fillcolor="#f5f5f5"];
   "gar-directives" [label="gar-directives", fillcolor="#f5f5f5"];
@@ -35,6 +36,7 @@ digraph gptel_agent_runtime {
   "gptel-agent-runtime" -> "gar-mission-control";
   "gptel-agent-runtime" -> "gar-canaries";
   "gptel-agent-runtime" -> "gar-memory";
+  "gptel-agent-runtime" -> "gar-trajectory";
   "gptel-agent-runtime" -> "gar-tools";
   "gptel-agent-runtime" -> "gar-backend";
   "gptel-agent-runtime" -> "gar-directives";
