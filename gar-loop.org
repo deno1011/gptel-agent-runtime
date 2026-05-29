@@ -1786,6 +1786,18 @@ CONTEXT is passed to the policy broker."
       (error
        (gptel-agent-runtime--handle-execution-error step err session)))))
 
+(defun gptel-agent-runtime--needs-high-fidelity-p (goal)
+  "Return non-nil when GOAL matches any `high-fidelity-patterns'.
+Match is case-insensitive.  When `high-fidelity-enabled' is nil OR
+`high-fidelity-model' is nil, always returns nil so the regular
+backend handles the request."
+  (and gptel-agent-runtime-high-fidelity-enabled
+       gptel-agent-runtime-high-fidelity-model
+       (stringp goal)
+       (let ((case-fold-search t))
+         (cl-some (lambda (pat) (string-match-p pat goal))
+                  gptel-agent-runtime-high-fidelity-patterns))))
+
 (defun gptel-agent-runtime--direct-response (step session)
   "Ask the delegated agent to produce user-visible output for STEP."
   (let* ((task (gptel-agent-runtime-session-current-task session))
@@ -1818,13 +1830,28 @@ CONTEXT is passed to the policy broker."
                     :step (gptel-agent-runtime-plan-step-title step)
                     :tool "direct_response")
      :taint 'trusted)
-    (gptel-request
-     (format "GOAL:\n%s\n\nSTEP:\n%s\n\nRATIONALE:\n%s\n\nProduce the requested user-visible result now."
-             goal
-             (gptel-agent-runtime-plan-step-title step)
-             (gptel-agent-runtime-plan-step-rationale step))
-     :system system
-     :callback
+    (let* ((high-fidelity (gptel-agent-runtime--needs-high-fidelity-p goal))
+           (gptel-model (if high-fidelity
+                            gptel-agent-runtime-high-fidelity-model
+                          gptel-model)))
+      (when high-fidelity
+        (gptel-agent-runtime-emit-event
+         'high-fidelity-model-engaged
+         :source "router"
+         :session-id (gptel-agent-runtime-session-id session)
+         :payload (list :model gptel-model
+                        :goal goal
+                        :step-id (gptel-agent-runtime-plan-step-id step))
+         :taint 'trusted)
+        (message "Agent [%s] routing to high-fidelity model %s for list-style goal..."
+                 (gptel-agent-runtime-session-id session) gptel-model))
+      (gptel-request
+       (format "GOAL:\n%s\n\nSTEP:\n%s\n\nRATIONALE:\n%s\n\nProduce the requested user-visible result now."
+               goal
+               (gptel-agent-runtime-plan-step-title step)
+               (gptel-agent-runtime-plan-step-rationale step))
+       :system system
+       :callback
      (lambda (response _info)
        (if (not response)
            (progn
@@ -1864,7 +1891,7 @@ CONTEXT is passed to the policy broker."
           step session
           (gptel-agent-runtime-result-ok
            :tool "direct_response"
-           :output response)))))))
+           :output response))))))))
 
 (defun gptel-agent-runtime--call-native-tool (tool step session)
   "Execute native gptel TOOL for STEP in SESSION."
