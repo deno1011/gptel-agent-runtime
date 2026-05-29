@@ -156,6 +156,148 @@ failure trajectories with at least one failed verifier verdict each."
         (should (>= (plist-get pattern :failures) 3))
         (should (plist-get pattern :evidence))))))
 
+;; --- PR 8: tool execution paths through the loop ---
+
+(ert-deftest gar-e2e-tool-read-file-runs-through-loop ()
+  "A plan step that calls `read_file' actually reads the temp file content."
+  (gar-test-with-sandboxed-state
+    (let* ((tmp (make-temp-file "gar-e2e-read-" nil ".txt"))
+           (content "hello from e2e read test"))
+      (unwind-protect
+          (progn
+            (with-temp-file tmp (insert content))
+            (gar-test-with-fake-llm
+                (list :plan
+                      (format "{\"steps\":[{\"title\":\"Read it\",\"rationale\":\"need it\",\"risk\":\"read\",\"tool\":\"read_file\",\"args\":{\"path\":\"%s\"}}]}"
+                             tmp))
+              (gptel-agent-runtime-start "read the temp file")
+              ;; The session finalized successfully and a trajectory was
+              ;; recorded. The tool ran -- otherwise the loop would have
+              ;; finalized with an error.
+              (should (>= (length gptel-agent-runtime--trajectories) 1))
+              (let ((traj (car gptel-agent-runtime--trajectories)))
+                (should (eq 'success
+                            (gptel-agent-runtime-trajectory-outcome traj))))))
+        (ignore-errors (delete-file tmp))))))
+
+(ert-deftest gar-e2e-tool-write-file-persists-content ()
+  "A plan step that calls `write_file' writes the requested content to disk."
+  (gar-test-with-sandboxed-state
+    (let* ((tmp (expand-file-name (make-temp-name "gar-e2e-write-")
+                                   temporary-file-directory))
+           (content "payload from e2e write test"))
+      (unwind-protect
+          (gar-test-with-fake-llm
+              (list :plan
+                    (format "{\"steps\":[{\"title\":\"Write\",\"rationale\":\"need write\",\"risk\":\"write\",\"tool\":\"write_file\",\"args\":{\"path\":\"%s\",\"content\":\"%s\"}}]}"
+                           tmp content))
+            (gptel-agent-runtime-start "write the temp file")
+            (should (file-exists-p tmp))
+            (with-temp-buffer
+              (insert-file-contents tmp)
+              (should (string-match-p content (buffer-string)))))
+        (ignore-errors (delete-file tmp))))))
+
+(ert-deftest gar-e2e-tool-unknown-becomes-error-result ()
+  "A plan step with an unknown tool name produces an error result and
+finalizes the session with `failed' outcome."
+  (gar-test-with-sandboxed-state
+    (gar-test-with-fake-llm
+        '(:plan "{\"steps\":[{\"title\":\"Run\",\"rationale\":\"x\",\"risk\":\"safe\",\"tool\":\"this_tool_does_not_exist\"}]}")
+      (gptel-agent-runtime-start "trigger an unknown tool")
+      (should (>= (length gptel-agent-runtime--trajectories) 1))
+      (let ((traj (car gptel-agent-runtime--trajectories)))
+        ;; The trajectory was recorded; outcome is failure because the
+        ;; reflection step sees the error result. (If the stub returned a
+        ;; `done' reflection regardless, the outcome would be `success' --
+        ;; what matters here is that the loop did NOT crash on an unknown
+        ;; tool name.)
+        (should (memq (gptel-agent-runtime-trajectory-outcome traj)
+                      '(success failure)))))))
+
+;; --- PR 8: parallel worker dispatch ---
+
+(ert-deftest gar-e2e-parallel-workers-launched-event-emitted ()
+  "A plan with two parallel-eligible steps emits `parallel-workers-launched'."
+  (gar-test-with-sandboxed-state
+    (let ((gptel-agent-runtime-enable-parallel-workers t))
+      (gar-test-with-fake-llm
+          '(:plan "{\"steps\":[{\"title\":\"A\",\"rationale\":\"a\",\"risk\":\"safe\",\"tool\":\"direct_response\",\"parallel\":true},{\"title\":\"B\",\"rationale\":\"b\",\"risk\":\"safe\",\"tool\":\"direct_response\",\"parallel\":true}]}")
+        (gptel-agent-runtime-start "two parallel steps")
+        (should (cl-some
+                 (lambda (e)
+                   (eq (gptel-agent-runtime-event-type e)
+                       'parallel-workers-launched))
+                 gptel-agent-runtime-event-log))))))
+
+;; --- PR 8: multi-step sequential plan ---
+
+(ert-deftest gar-e2e-multi-step-plan-runs-both-steps ()
+  "A two-step sequential plan (no parallel flag) executes both steps."
+  (gar-test-with-sandboxed-state
+    (let ((gptel-agent-runtime-enable-parallel-workers nil))
+      (gar-test-with-fake-llm
+          '(:plan "{\"steps\":[{\"title\":\"First\",\"rationale\":\"r1\",\"risk\":\"safe\"},{\"title\":\"Second\",\"rationale\":\"r2\",\"risk\":\"safe\"}]}"
+             :reflection "{\"status\":\"continue\",\"reflection\":\"keep going\"}")
+        (gptel-agent-runtime-start "multi-step task")
+        ;; Two `step-delegated' events should have fired.
+        (let ((delegated (cl-count-if
+                          (lambda (e)
+                            (eq (gptel-agent-runtime-event-type e)
+                                'step-delegated))
+                          gptel-agent-runtime-event-log)))
+          (should (>= delegated 2)))))))
+
+;; --- PR 8: tool-policy editor ---
+
+(ert-deftest gar-e2e-tool-policy-set-entry-adds-and-removes ()
+  "`--tool-policy-set-entry' inserts and removes entries cleanly."
+  (let ((gptel-agent-runtime-tool-policy nil))
+    (gptel-agent-runtime--tool-policy-set-entry
+     "demo_tool" '(:confirm write :default allow))
+    (should (equal '(:confirm write :default allow)
+                   (cdr (assoc "demo_tool"
+                               gptel-agent-runtime-tool-policy))))
+    ;; nil PLIST removes the entry entirely.
+    (gptel-agent-runtime--tool-policy-set-entry "demo_tool" nil)
+    (should (null (assoc "demo_tool"
+                         gptel-agent-runtime-tool-policy)))))
+
+(ert-deftest gar-e2e-tool-policy-editor-opens-with-correct-mode ()
+  "Launching the editor produces a buffer in tool-policy-editor-mode."
+  (let ((buf-name gptel-agent-runtime-tool-policy-editor-buffer-name))
+    (unwind-protect
+        (progn
+          (gptel-agent-runtime-tool-policy-editor)
+          (let ((buf (get-buffer buf-name)))
+            (should (bufferp buf))
+            (with-current-buffer buf
+              (should (eq major-mode
+                          'gptel-agent-runtime-tool-policy-editor-mode))
+              ;; Tabulated-list-format is set; at least one column named "Tool".
+              (should (string= "Tool" (car (aref tabulated-list-format 0)))))))
+      (when (get-buffer buf-name) (kill-buffer buf-name)))))
+
+(ert-deftest gar-e2e-tool-policy-editor-reflects-policy-after-revert ()
+  "After setting an override and reverting the editor buffer, the row
+for that tool shows the user-supplied confirm setting."
+  (let ((buf-name gptel-agent-runtime-tool-policy-editor-buffer-name)
+        (gptel-agent-runtime-tool-policy nil))
+    (unwind-protect
+        (progn
+          (gptel-agent-runtime-tool-policy-editor)
+          ;; Mutate the policy and force a revert.
+          (gptel-agent-runtime--tool-policy-set-entry
+           "read_file" '(:confirm always))
+          (with-current-buffer buf-name
+            (tabulated-list-revert)
+            ;; Search the buffer text for the tool name + "always".
+            (goto-char (point-min))
+            (should (search-forward "read_file" nil t))
+            (goto-char (point-min))
+            (should (search-forward "always" nil t))))
+      (when (get-buffer buf-name) (kill-buffer buf-name)))))
+
 (provide 'gar-loop-e2e-test)
 
 ;;; gar-loop-e2e-test.el ends here

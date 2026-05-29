@@ -87,7 +87,8 @@ table seeded with whatever the package wired at load time."
           (gptel-agent-runtime--experiments nil)
           (gptel-agent-runtime--sqlite-db nil)
           (gptel-agent-runtime-enable-plan-review nil)
-          (gptel-agent-runtime-confirm-for-risky nil))
+          (gptel-agent-runtime-require-confirmation-for-risky-actions nil)
+          (gptel-agent-runtime-skeptic-enabled nil))
      (unwind-protect
          (progn ,@body)
        (when (file-directory-p tmp-root)

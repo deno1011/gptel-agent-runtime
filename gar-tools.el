@@ -493,6 +493,14 @@ provenance and is renamed with a `.approved' suffix."
       (special-mode))
     (display-buffer "*gptel-agent-proposed-tools*")))
 
+(defun gptel-agent-runtime--path-protected-p (path)
+  "Return non-nil when PATH is protected from agent writes.
+Delegates to the host-defined `my/gptel-protected-p' when bound (some
+user configs define one to fence off the literate-config files);
+returns nil otherwise so the package works standalone."
+  (and (fboundp 'my/gptel-protected-p)
+       (funcall (symbol-function 'my/gptel-protected-p) path)))
+
 (with-eval-after-load 'gptel
   ;; describe_capabilities — deterministic summary of current runtime tools
   (gptel-make-tool
@@ -537,7 +545,7 @@ provenance and is renamed with a `.approved' suffix."
            (:name "content" :type string :description "Full new file content"))
    :function (lambda (path content)
                (let ((p (file-truename (expand-file-name path))))
-                 (if (my/gptel-protected-p p)
+                 (if (gptel-agent-runtime--path-protected-p p)
                      (format "Error: %s is a protected config file — use read_file to inspect it, never write." p)
                    (make-directory (file-name-directory p) t)
                    (with-temp-file p (insert content))
@@ -684,13 +692,13 @@ provenance and is renamed with a `.approved' suffix."
                           (symbol-function 'set-visited-file-name)))
                      (cl-letf (((symbol-function 'write-file)
                                 (lambda (file &rest args)
-                                  (if (my/gptel-protected-p (expand-file-name file))
+                                  (if (gptel-agent-runtime--path-protected-p (expand-file-name file))
                                       (error "write-file blocked by run_elisp: %s is protected" file)
                                     (apply orig-write-file file args))))
                                ((symbol-function 'set-visited-file-name)
                                 (lambda (file &rest args)
                                   (if (and file (not (string-empty-p file))
-                                           (my/gptel-protected-p (expand-file-name file)))
+                                           (gptel-agent-runtime--path-protected-p (expand-file-name file)))
                                       (error "set-visited-file-name blocked by run_elisp: %s is protected" file)
                                     (apply orig-set-visited-file-name file args)))))
                        (let ((result (eval (car (read-from-string
@@ -720,7 +728,7 @@ provenance and is renamed with a `.approved' suffix."
            (:name "content" :type string :description "Content to write"))
    :function (lambda (path content)
                (let ((p (file-truename (expand-file-name path))))
-                 (if (my/gptel-protected-p p)
+                 (if (gptel-agent-runtime--path-protected-p p)
                      (format "Error: %s is a protected config file — use read_file to inspect it, never write." p)
                    (make-directory (file-name-directory p) t)
                    (with-temp-file p (insert content))
