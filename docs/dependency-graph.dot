@@ -21,6 +21,7 @@ digraph gptel_agent_runtime {
   "gar-playbook-refine" [label="gar-playbook-refine", fillcolor="#ffffff"];
   "gar-playbook-experiment" [label="gar-playbook-experiment", fillcolor="#ffffff"];
   "gar-memory-sqlite" [label="gar-memory-sqlite", fillcolor="#ffffff"];
+  "gar-skills-md" [label="gar-skills-md", fillcolor="#ffffff"];
   "gar-tools" [label="gar-tools", fillcolor="#f5f5f5"];
   "gar-backend" [label="gar-backend", fillcolor="#f5f5f5"];
   "gar-directives" [label="gar-directives", fillcolor="#f5f5f5"];
@@ -43,6 +44,7 @@ digraph gptel_agent_runtime {
   "gptel-agent-runtime" -> "gar-playbook-refine";
   "gptel-agent-runtime" -> "gar-playbook-experiment";
   "gptel-agent-runtime" -> "gar-memory-sqlite";
+  "gptel-agent-runtime" -> "gar-skills-md";
   "gptel-agent-runtime" -> "gar-tools";
   "gptel-agent-runtime" -> "gar-backend";
   "gptel-agent-runtime" -> "gar-directives";
