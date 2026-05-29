@@ -18,6 +18,27 @@
                   (re-search-forward (concat "=== " (regexp-quote s) " ===")
                                      nil t)))))))
 
+(ert-deftest gar-mission-control-renders-with-trajectories-present ()
+  "Regression: rendering with a non-empty trajectory ring does NOT error.
+The Trajectories section once used `t' as a loop variable, which fails
+on `(setting-constant t)' the moment any real trajectory lands in the
+ring.  Empty-ring tests never noticed because the loop body skipped."
+  (let ((gptel-agent-runtime--trajectories
+         (list (gptel-agent-runtime-trajectory-create
+                :id "regression-1"
+                :goal "test goal for trajectory rendering"
+                :outcome 'success
+                :finalized-at "2026-05-29T00:00:00"))))
+    (gptel-agent-runtime-mission-control)
+    (with-current-buffer gptel-agent-runtime-mission-control-buffer-name
+      (should (save-excursion
+                (goto-char (point-min))
+                (re-search-forward "In-memory: 1" nil t)))
+      (should (save-excursion
+                (goto-char (point-min))
+                (re-search-forward "test goal for trajectory rendering"
+                                   nil t))))))
+
 (ert-deftest gar-tool-policy-editor-opens-and-rows-match-manifest ()
   "Editor opens with one row per known tool (manifest union default + user)."
   (let ((gptel-agent-runtime-tool-policy nil))

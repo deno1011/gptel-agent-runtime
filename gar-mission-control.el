@@ -315,8 +315,8 @@ status, and the registered agent capability allowlist."
      (let* ((traj gptel-agent-runtime--trajectories)
             (n (length traj))
             (outcomes (let (acc)
-                        (dolist (t (cl-subseq traj 0 (min n 20)))
-                          (let ((o (gptel-agent-runtime-trajectory-outcome t)))
+                        (dolist (tr (cl-subseq traj 0 (min n 20)))
+                          (let ((o (gptel-agent-runtime-trajectory-outcome tr)))
                             (setf (alist-get o acc 0) (1+ (alist-get o acc 0)))))
                         acc)))
        (if (zerop n)
@@ -325,12 +325,12 @@ status, and the registered agent capability allowlist."
                  n
                  (or outcomes "—")
                  (mapconcat
-                  (lambda (t)
+                  (lambda (tr)
                     (format "    [%s] %s -- %s"
-                            (or (gptel-agent-runtime-trajectory-outcome t) "?")
-                            (or (gptel-agent-runtime-trajectory-finalized-at t) "?")
+                            (or (gptel-agent-runtime-trajectory-outcome tr) "?")
+                            (or (gptel-agent-runtime-trajectory-finalized-at tr) "?")
                             (gptel-agent-runtime--shorten
-                             (or (gptel-agent-runtime-trajectory-goal t) "") 60)))
+                             (or (gptel-agent-runtime-trajectory-goal tr) "") 60)))
                   (cl-subseq traj 0 (min n 5))
                   "\n")))))
     (gptel-agent-runtime--mission-control-section
