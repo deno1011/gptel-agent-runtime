@@ -167,9 +167,51 @@ regardless of the observed rates."
 (defcustom gptel-agent-runtime-experiment-default-margin 0.2
   "Minimum success-rate margin between arms for a decision.
 A candidate must beat (or be beaten by) the original by at least this
-margin on success rate before promotion / rollback fires."
+margin on success rate before promotion / rollback fires.
+Only consulted when `experiment-decision-rule' is `margin'."
   :type 'float
   :safe #'floatp
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-experiment-decision-rule 'bayesian
+  "Decision rule used to compare experiment arms.
+
+`bayesian' -- Beta-Bernoulli posterior with credible intervals (default).
+  Computes P(candidate > original | data) via Monte Carlo over the two
+  Beta posteriors and decides when that probability crosses
+  `experiment-bayesian-threshold'.  Honours small-sample uncertainty
+  rather than collapsing to a raw rate-margin.
+`margin'   -- the original simple-margin rule, kept for backwards
+  compatibility: both arms need at least `experiment-default-threshold'
+  samples and one must beat the other by `experiment-default-margin' in
+  raw success rate."
+  :type '(choice (const :tag "Bayesian (Beta-Bernoulli)" bayesian)
+                 (const :tag "Simple margin rule" margin))
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-experiment-bayesian-threshold 0.95
+  "Posterior-probability threshold for the Bayesian decision rule.
+Promote candidate when P(cand > orig | data) > THRESHOLD; rollback when
+that probability drops below (1 - THRESHOLD); otherwise keep collecting."
+  :type 'float
+  :safe #'floatp
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-experiment-bayesian-min-runs 3
+  "Minimum samples PER ARM before the Bayesian rule will return a verdict.
+The posterior already encodes small-sample uncertainty; this floor just
+prevents embarrassing decisions on essentially no data."
+  :type 'integer
+  :safe #'integerp
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-experiment-bayesian-samples 4000
+  "Monte Carlo sample count for the Bayesian decision rule.
+4000 gives accuracy around +/- 0.008 on probability estimates and runs in
+a few hundred ms in batch elisp.  Raise for more precision, lower for
+faster decisions on slow machines."
+  :type 'integer
+  :safe #'integerp
   :group 'gptel-agent-runtime)
 
 (defvar gptel-agent-runtime--experiments nil
@@ -263,6 +305,117 @@ the right experiment counter."
 
 #+end_src
 
+* Bayesian decision rule (Beta-Bernoulli)
+
+The Bayesian rule treats each arm as Beta(successes+1, failures+1) -- a
+flat Beta(1,1) prior plus Bernoulli observations -- and estimates the
+posterior probability that the candidate dominates the original via
+Monte Carlo. Promotion fires when that probability crosses
+=experiment-bayesian-threshold=; rollback fires when it drops below
+=(1 - threshold)=; otherwise the experiment keeps collecting samples.
+Credible intervals for each arm's success rate are returned alongside
+the verdict so the dashboard can show uncertainty rather than just a
+point estimate.
+
+#+begin_src emacs-lisp
+(defun gptel-agent-runtime--exp-uniform-positive ()
+  "Return U ~ Uniform(0, 1] (never zero) using `random'.
+Bounded away from zero so callers can take `log' safely."
+  (let ((denom 1073741824))                 ; 2^30
+    (/ (1+ (random denom)) (float denom))))
+
+(defun gptel-agent-runtime--exp-gamma-sample-integer (k)
+  "Draw Gamma(K, 1) for positive integer K via Erlang sum of exponentials.
+Sums K independent -log(U) draws; exact, no rejection sampling."
+  (let ((acc 0.0))
+    (dotimes (_ k)
+      (setq acc (- acc (log (gptel-agent-runtime--exp-uniform-positive)))))
+    acc))
+
+(defun gptel-agent-runtime--exp-beta-sample (alpha beta)
+  "Draw Beta(ALPHA, BETA) where both are positive integers.
+Uses Beta(a,b) = X/(X+Y) with X ~ Gamma(a,1), Y ~ Gamma(b,1)."
+  (let* ((x (gptel-agent-runtime--exp-gamma-sample-integer alpha))
+         (y (gptel-agent-runtime--exp-gamma-sample-integer beta)))
+    (/ x (+ x y))))
+
+(defun gptel-agent-runtime--exp-prob-greater
+    (a-alpha a-beta b-alpha b-beta &optional samples)
+  "Estimate P(A > B) where A~Beta(A-ALPHA,A-BETA), B~Beta(B-ALPHA,B-BETA).
+Monte Carlo with SAMPLES draws (defaults to
+`experiment-bayesian-samples')."
+  (let ((n (or samples gptel-agent-runtime-experiment-bayesian-samples))
+        (hits 0))
+    (dotimes (_ n)
+      (let ((a (gptel-agent-runtime--exp-beta-sample a-alpha a-beta))
+            (b (gptel-agent-runtime--exp-beta-sample b-alpha b-beta)))
+        (when (> a b)
+          (setq hits (1+ hits)))))
+    (/ (float hits) n)))
+
+(defun gptel-agent-runtime--exp-credible-interval
+    (alpha beta &optional conf samples)
+  "Return (LO HI) credible interval for Beta(ALPHA, BETA) at level CONF.
+Sample-quantile estimator over SAMPLES Monte Carlo draws. CONF defaults
+to 0.95; SAMPLES defaults to `experiment-bayesian-samples'."
+  (let* ((conf (or conf 0.95))
+         (n (or samples gptel-agent-runtime-experiment-bayesian-samples))
+         (draws (sort (cl-loop repeat n collect
+                               (gptel-agent-runtime--exp-beta-sample
+                                alpha beta))
+                      #'<))
+         (lo-q (/ (- 1.0 conf) 2.0))
+         (hi-q (- 1.0 lo-q))
+         (lo-idx (max 0 (floor (* lo-q n))))
+         (hi-idx (min (1- n) (floor (* hi-q n)))))
+    (list (nth lo-idx draws) (nth hi-idx draws))))
+
+(defun gptel-agent-runtime--exp-bayesian-decision (experiment)
+  "Beta-Bernoulli decision rule for EXPERIMENT.
+Returns nil when either arm is below
+`experiment-bayesian-min-runs', else a verdict plist with `:rule'
+`bayesian', the posterior `:prob-candidate-wins', per-arm credible
+intervals (`:ci-original' / `:ci-candidate'), and `:decision' one of
+`promote' / `rollback' / `inconclusive'."
+  (let* ((threshold gptel-agent-runtime-experiment-bayesian-threshold)
+         (min-runs gptel-agent-runtime-experiment-bayesian-min-runs)
+         (orig-s (or (gptel-agent-runtime-experiment-original-successes
+                      experiment) 0))
+         (orig-f (or (gptel-agent-runtime-experiment-original-failures
+                      experiment) 0))
+         (cand-s (or (gptel-agent-runtime-experiment-candidate-successes
+                      experiment) 0))
+         (cand-f (or (gptel-agent-runtime-experiment-candidate-failures
+                      experiment) 0))
+         (orig-n (+ orig-s orig-f))
+         (cand-n (+ cand-s cand-f)))
+    (when (and (>= orig-n min-runs) (>= cand-n min-runs))
+      (let* ((oa (1+ orig-s)) (ob (1+ orig-f))       ; Beta(1,1) prior
+             (ca (1+ cand-s)) (cb (1+ cand-f))
+             (p-cand-wins (gptel-agent-runtime--exp-prob-greater
+                           ca cb oa ob))
+             (ci-orig (gptel-agent-runtime--exp-credible-interval oa ob))
+             (ci-cand (gptel-agent-runtime--exp-credible-interval ca cb))
+             (orig-rate (gptel-agent-runtime--experiment-success-rate
+                         orig-s orig-f))
+             (cand-rate (gptel-agent-runtime--experiment-success-rate
+                         cand-s cand-f))
+             (base (list :rule 'bayesian
+                         :original-rate orig-rate
+                         :candidate-rate cand-rate
+                         :prob-candidate-wins p-cand-wins
+                         :ci-original ci-orig
+                         :ci-candidate ci-cand)))
+        (cond
+         ((> p-cand-wins threshold)
+          (cons :decision (cons 'promote base)))
+         ((< p-cand-wins (- 1.0 threshold))
+          (cons :decision (cons 'rollback base)))
+         (t
+          (cons :decision (cons 'inconclusive base))))))))
+
+#+end_src
+
 * Outcome recording + decision rule
 
 #+begin_src emacs-lisp
@@ -292,13 +445,10 @@ Returns EXPERIMENT for convenience."
                  (1+ (or (gptel-agent-runtime-experiment-candidate-failures experiment) 0))))))))
   experiment)
 
-(defun gptel-agent-runtime--experiment-decision (experiment)
-  "Inspect EXPERIMENT's counters and return a decision plist or nil.
-Returns one of:
-- nil                                 -- insufficient data; keep running
-- (:decision promote   :rates ...)    -- candidate > original by margin
-- (:decision rollback  :rates ...)    -- original  > candidate by margin
-- (:decision inconclusive :rates ...) -- enough samples, no winner"
+(defun gptel-agent-runtime--exp-margin-decision (experiment)
+  "Legacy simple-margin decision rule for EXPERIMENT.
+Returns nil (keep running), or a verdict plist with `:decision' one of
+`promote' / `rollback' / `inconclusive' and `:rule' set to `margin'."
   (let* ((threshold (or (gptel-agent-runtime-experiment-decision-threshold
                          experiment)
                         gptel-agent-runtime-experiment-default-threshold))
@@ -320,19 +470,37 @@ Returns one of:
       (cond
        ((>= (- cand-rate orig-rate) margin)
         (list :decision 'promote
+              :rule 'margin
               :original-rate orig-rate
               :candidate-rate cand-rate
               :margin-observed (- cand-rate orig-rate)))
        ((>= (- orig-rate cand-rate) margin)
         (list :decision 'rollback
+              :rule 'margin
               :original-rate orig-rate
               :candidate-rate cand-rate
               :margin-observed (- orig-rate cand-rate)))
        (t
         (list :decision 'inconclusive
+              :rule 'margin
               :original-rate orig-rate
               :candidate-rate cand-rate
               :margin-observed (abs (- cand-rate orig-rate))))))))
+
+(defun gptel-agent-runtime--experiment-decision (experiment)
+  "Inspect EXPERIMENT's counters and return a decision plist or nil.
+Dispatches on `experiment-decision-rule':
+- `bayesian' (default) -> Beta-Bernoulli with credible intervals.
+- `margin'             -> legacy simple-margin rule.
+Returns one of:
+- nil                                       -- insufficient data
+- (:decision promote      :rule R :rates...)
+- (:decision rollback     :rule R :rates...)
+- (:decision inconclusive :rule R :rates...)"
+  (pcase gptel-agent-runtime-experiment-decision-rule
+    ('margin   (gptel-agent-runtime--exp-margin-decision experiment))
+    ('bayesian (gptel-agent-runtime--exp-bayesian-decision experiment))
+    (_         (gptel-agent-runtime--exp-bayesian-decision experiment))))
 
 (defun gptel-agent-runtime--experiment-record-outcome
     (playbook-id session-id outcome)

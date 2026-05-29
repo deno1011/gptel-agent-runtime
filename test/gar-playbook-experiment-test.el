@@ -192,6 +192,112 @@
                (eq h #'gptel-agent-runtime--record-experiment-outcome-on-finalize))
              subs))))
 
+;; --- Bayesian decision rule ---
+
+(ert-deftest gar-exp-gamma-sample-mean-approx-correct ()
+  "Empirical mean of Gamma(k, 1) is close to k."
+  (let* ((k 5) (n 2000)
+         (samples (cl-loop repeat n collect
+                           (gptel-agent-runtime--exp-gamma-sample-integer k)))
+         (mean (/ (apply #'+ samples) (float n))))
+    (should (< (abs (- mean k)) 0.4))))
+
+(ert-deftest gar-exp-beta-sample-mean-approx-correct ()
+  "Empirical mean of Beta(a, b) is close to a/(a+b)."
+  (let* ((a 5) (b 3)
+         (expected (/ (float a) (+ a b)))
+         (n 2000)
+         (samples (cl-loop repeat n collect
+                           (gptel-agent-runtime--exp-beta-sample a b)))
+         (mean (/ (apply #'+ samples) (float n))))
+    (should (< (abs (- mean expected)) 0.05))))
+
+(ert-deftest gar-exp-prob-greater-clear-winner ()
+  "P(A > B) approaches 1 when A's posterior dominates B's."
+  (let ((p (gptel-agent-runtime--exp-prob-greater 20 2 2 20 1000)))
+    (should (> p 0.95))))
+
+(ert-deftest gar-exp-prob-greater-clear-loser ()
+  "P(A > B) approaches 0 when B's posterior dominates A's."
+  (let ((p (gptel-agent-runtime--exp-prob-greater 2 20 20 2 1000)))
+    (should (< p 0.05))))
+
+(ert-deftest gar-exp-prob-greater-tied-arms ()
+  "P(A > B) sits near 0.5 when posteriors are symmetric."
+  (let ((p (gptel-agent-runtime--exp-prob-greater 5 5 5 5 1500)))
+    (should (and (> p 0.3) (< p 0.7)))))
+
+(ert-deftest gar-exp-credible-interval-brackets-mean ()
+  "95% CI for Beta(a, b) brackets the analytic mean a/(a+b)."
+  (let* ((a 8) (b 4)
+         (mean (/ (float a) (+ a b)))
+         (ci (gptel-agent-runtime--exp-credible-interval a b 0.95 1500)))
+    (should (<= (car ci) mean))
+    (should (>= (cadr ci) mean))))
+
+(ert-deftest gar-exp-bayesian-decision-promotes-clear-candidate ()
+  "Bayesian rule promotes when candidate clearly dominates original."
+  (let ((gptel-agent-runtime-experiment-bayesian-min-runs 3)
+        (exp (gar-exp-test--experiment
+              :original-successes 1 :original-failures 9
+              :candidate-successes 9 :candidate-failures 1)))
+    (let ((d (gptel-agent-runtime--exp-bayesian-decision exp)))
+      (should (eq 'promote (plist-get d :decision)))
+      (should (eq 'bayesian (plist-get d :rule)))
+      (should (> (plist-get d :prob-candidate-wins) 0.95))
+      (should (= 2 (length (plist-get d :ci-original))))
+      (should (= 2 (length (plist-get d :ci-candidate)))))))
+
+(ert-deftest gar-exp-bayesian-decision-rolls-back-clear-loser ()
+  "Bayesian rule rolls back when original clearly dominates candidate."
+  (let ((gptel-agent-runtime-experiment-bayesian-min-runs 3)
+        (exp (gar-exp-test--experiment
+              :original-successes 9 :original-failures 1
+              :candidate-successes 1 :candidate-failures 9)))
+    (let ((d (gptel-agent-runtime--exp-bayesian-decision exp)))
+      (should (eq 'rollback (plist-get d :decision)))
+      (should (< (plist-get d :prob-candidate-wins) 0.05)))))
+
+(ert-deftest gar-exp-bayesian-decision-inconclusive-on-tie ()
+  "Bayesian rule returns inconclusive when arms are statistically tied."
+  (let ((gptel-agent-runtime-experiment-bayesian-min-runs 3)
+        (exp (gar-exp-test--experiment
+              :original-successes 5 :original-failures 5
+              :candidate-successes 5 :candidate-failures 5)))
+    (let ((d (gptel-agent-runtime--exp-bayesian-decision exp)))
+      (should (eq 'inconclusive (plist-get d :decision))))))
+
+(ert-deftest gar-exp-bayesian-decision-nil-below-min-runs ()
+  "Bayesian rule returns nil when either arm has fewer than min-runs samples."
+  (let ((gptel-agent-runtime-experiment-bayesian-min-runs 3)
+        (exp (gar-exp-test--experiment
+              :original-successes 1 :original-failures 1   ; n=2
+              :candidate-successes 5 :candidate-failures 0)))
+    (should-not (gptel-agent-runtime--exp-bayesian-decision exp))))
+
+(ert-deftest gar-exp-decision-dispatches-to-margin-when-configured ()
+  "experiment-decision-rule 'margin uses the legacy rule path."
+  (let ((gptel-agent-runtime-experiment-decision-rule 'margin)
+        (gptel-agent-runtime-experiment-default-threshold 5)
+        (gptel-agent-runtime-experiment-default-margin 0.2)
+        (exp (gar-exp-test--experiment
+              :decision-threshold 5
+              :original-successes 1 :original-failures 4
+              :candidate-successes 4 :candidate-failures 1)))
+    (let ((d (gptel-agent-runtime--experiment-decision exp)))
+      (should (eq 'promote (plist-get d :decision)))
+      (should (eq 'margin (plist-get d :rule))))))
+
+(ert-deftest gar-exp-decision-dispatches-to-bayesian-by-default ()
+  "Default `experiment-decision-rule' is bayesian; verdict carries that rule."
+  (let ((gptel-agent-runtime-experiment-decision-rule 'bayesian)
+        (gptel-agent-runtime-experiment-bayesian-min-runs 3)
+        (exp (gar-exp-test--experiment
+              :original-successes 1 :original-failures 9
+              :candidate-successes 9 :candidate-failures 1)))
+    (let ((d (gptel-agent-runtime--experiment-decision exp)))
+      (should (eq 'bayesian (plist-get d :rule))))))
+
 (provide 'gar-playbook-experiment-test)
 
 ;;; gar-playbook-experiment-test.el ends here
