@@ -100,7 +100,10 @@ remember -> continue."
     (when process
       (setf (gptel-agent-runtime-session-process session) process))
     (setq gptel-agent-runtime--current-session session)
-    (setq gptel-agent-runtime--origin-buffer (current-buffer))
+    (setq gptel-agent-runtime--origin-buffer
+          (if buffer-read-only
+              (get-buffer-create "*gptel-agent-output*")
+            (current-buffer)))
     (setf (gptel-agent-runtime-task-status task) 'running)
     (gptel-agent-runtime--start-swarm-session-buffer session goal)
     (gptel-agent-runtime-emit-event
@@ -182,7 +185,10 @@ remember -> continue."
       (error "Not a gptel-agent-runtime session: %s" file))
     (gptel-agent-runtime--requeue-running-work session)
     (setq gptel-agent-runtime--current-session session)
-    (setq gptel-agent-runtime--origin-buffer (current-buffer))
+    (setq gptel-agent-runtime--origin-buffer
+          (if buffer-read-only
+              (get-buffer-create "*gptel-agent-output*")
+            (current-buffer)))
     (gptel-agent-runtime--start-swarm-session-buffer
      session
      (gptel-agent-runtime-task-goal

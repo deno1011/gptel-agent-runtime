@@ -200,6 +200,7 @@ status, and the registered agent capability allowlist."
   (interactive)
   (with-current-buffer (get-buffer-create
                         gptel-agent-runtime-mission-control-buffer-name)
+    (let ((inhibit-read-only t))
     (erase-buffer)
     (insert (format "gptel-agent-runtime mission control\nRendered at: %s\n\n"
                     (gptel-agent-runtime--timestamp)))
@@ -407,7 +408,7 @@ status, and the registered agent capability allowlist."
         gptel-agent-runtime-agent-registry
         "\n")))
     (goto-char (point-min))
-    (special-mode))
+    (special-mode)))
   (unless gptel-agent-runtime--mission-control-subscribed
     (gptel-agent-runtime-subscribe
      'tick
