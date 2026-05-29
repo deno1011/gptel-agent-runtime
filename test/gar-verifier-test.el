@@ -184,6 +184,157 @@ This is the over-flag-avoidance contract: the regex is anchored on \\`."
     (should-not (gptel-agent-runtime--verifier-parse-verdict
                  "no json here" step result))))
 
+;; ============================================================================
+;; PR 10: completeness check
+;; ============================================================================
+
+;; --- item count extraction ---
+
+(ert-deftest gar-verifier-item-count-empty-text-is-zero ()
+  (should (= 0 (gptel-agent-runtime--verifier-extract-item-count nil)))
+  (should (= 0 (gptel-agent-runtime--verifier-extract-item-count ""))))
+
+(ert-deftest gar-verifier-item-count-detects-todo-state-brackets ()
+  "Counts entries shaped like `[TODO] ...' (the get_todos tool format)."
+  (let ((text "[TODO] First task\n[NEXT] Second task\n[WAIT] Third\n[REVIEW] Fourth"))
+    (should (= 4 (gptel-agent-runtime--verifier-extract-item-count text)))))
+
+(ert-deftest gar-verifier-item-count-detects-markdown-numbered ()
+  (let ((text "1. one\n2. two\n3. three\n4. four\n5. five"))
+    (should (= 5 (gptel-agent-runtime--verifier-extract-item-count text)))))
+
+(ert-deftest gar-verifier-item-count-detects-bullets ()
+  (let ((text "- a\n- b\n- c\n* d\n+ e"))
+    (should (= 5 (gptel-agent-runtime--verifier-extract-item-count text)))))
+
+(ert-deftest gar-verifier-item-count-detects-org-todos ()
+  (let ((text "* TODO First\n** NEXT Sub\n* WAIT Other\n** REVIEW Y"))
+    (should (= 4 (gptel-agent-runtime--verifier-extract-item-count text)))))
+
+(ert-deftest gar-verifier-item-count-prose-returns-zero ()
+  "Free-form prose without list shape returns 0."
+  (should (= 0 (gptel-agent-runtime--verifier-extract-item-count
+                "Just some sentences. No list here."))))
+
+;; --- heuristic completeness verdict ---
+
+(defun gar-verifier-test--make-result (output &optional tool)
+  (gptel-agent-runtime-action-result-create
+   :status 'ok :output output :tool (or tool "direct_response")))
+
+(ert-deftest gar-verifier-completeness-heuristic-passes-when-all-items-present ()
+  (let* ((prior (gar-verifier-test--make-result
+                 "[TODO] a\n[TODO] b\n[TODO] c\n[TODO] d"))
+         (resp (gar-verifier-test--make-result
+                "1. a\n2. b\n3. c\n4. d"))
+         (step (gar-verifier-test--step :id "s2" :risk 'safe
+                                        :title "Render response"))
+         (v (gptel-agent-runtime--verifier-completeness-heuristic-verdict
+             step resp prior)))
+    (should (plist-get v :passed))
+    (should (eq 'completeness-heuristic (plist-get v :mode)))))
+
+(ert-deftest gar-verifier-completeness-heuristic-fails-when-summarised ()
+  (let* ((prior (gar-verifier-test--make-result
+                 "[TODO] a\n[TODO] b\n[TODO] c\n[TODO] d\n[TODO] e\n[TODO] f\n[TODO] g\n[TODO] h\n[TODO] i\n[TODO] j"))
+         (resp (gar-verifier-test--make-result
+                "1. a\n2. b\n3. c"))
+         (step (gar-verifier-test--step :id "s2" :risk 'safe
+                                        :title "Render response"))
+         (v (gptel-agent-runtime--verifier-completeness-heuristic-verdict
+             step resp prior)))
+    (should (not (plist-get v :passed)))
+    (should (stringp (plist-get v :suggested-correction)))
+    (should (string-match-p "EVERY item" (plist-get v :suggested-correction)))))
+
+;; --- applies-p ---
+
+(ert-deftest gar-verifier-completeness-applies-when-prior-has-enough-items ()
+  (let* ((prior (gar-verifier-test--make-result
+                 "[TODO] 1\n[TODO] 2\n[TODO] 3\n[TODO] 4"))
+         (step (gar-verifier-test--step :suggested-tool "direct_response"))
+         (gptel-agent-runtime-verifier-completeness-mode 'heuristic)
+         (gptel-agent-runtime-verifier-completeness-min-items 3))
+    (should (gptel-agent-runtime--verifier-completeness-applies-p step prior))))
+
+(ert-deftest gar-verifier-completeness-not-applies-when-mode-off ()
+  (let* ((prior (gar-verifier-test--make-result
+                 "[TODO] 1\n[TODO] 2\n[TODO] 3\n[TODO] 4"))
+         (step (gar-verifier-test--step :suggested-tool "direct_response"))
+         (gptel-agent-runtime-verifier-completeness-mode 'off))
+    (should-not (gptel-agent-runtime--verifier-completeness-applies-p
+                 step prior))))
+
+(ert-deftest gar-verifier-completeness-not-applies-below-min-items ()
+  (let* ((prior (gar-verifier-test--make-result "[TODO] only one"))
+         (step (gar-verifier-test--step :suggested-tool "direct_response"))
+         (gptel-agent-runtime-verifier-completeness-mode 'heuristic)
+         (gptel-agent-runtime-verifier-completeness-min-items 3))
+    (should-not (gptel-agent-runtime--verifier-completeness-applies-p
+                 step prior))))
+
+(ert-deftest gar-verifier-completeness-not-applies-for-non-trigger-tool ()
+  (let* ((prior (gar-verifier-test--make-result
+                 "[TODO] 1\n[TODO] 2\n[TODO] 3\n[TODO] 4"))
+         (step (gar-verifier-test--step :suggested-tool "write_file"))
+         (gptel-agent-runtime-verifier-completeness-mode 'heuristic))
+    (should-not (gptel-agent-runtime--verifier-completeness-applies-p
+                 step prior))))
+
+;; --- find prior tool result ---
+
+(ert-deftest gar-verifier-find-prior-tool-result-skips-current-and-pending ()
+  "Returns the most recent prior `done' step's result, skipping the
+current step and any non-done steps that came after."
+  (let* ((s1 (gptel-agent-runtime-plan-step-create
+              :id "a" :title "Read"
+              :status 'done
+              :result (gar-verifier-test--make-result
+                       "[TODO] x\n[TODO] y\n[TODO] z")))
+         (s2 (gptel-agent-runtime-plan-step-create
+              :id "b" :title "Render"
+              :status 'running))
+         (plan (gptel-agent-runtime-plan-create
+                :id "p" :status 'active :steps (list s1 s2)))
+         (task (gptel-agent-runtime-task-create
+                :id "t" :goal "g" :notes plan)))
+    (let ((prior (gptel-agent-runtime--verifier-find-prior-tool-result
+                  s2 task)))
+      (should prior)
+      (should (gptel-agent-runtime-action-result-p prior))
+      (should (string-match-p "x"
+                              (gptel-agent-runtime-action-result-output
+                               prior))))))
+
+;; --- end-to-end dispatcher ---
+
+(ert-deftest gar-verifier-verify-action-result-returns-failing-completeness ()
+  "When completeness fails for a direct_response step, dispatcher
+returns the failing completeness verdict even though the primary
+verifier sees no problem."
+  (let* ((gptel-agent-runtime-verifier-mode 'rule-based)
+         (gptel-agent-runtime-verifier-completeness-mode 'heuristic)
+         (gptel-agent-runtime-verifier-completeness-min-items 3)
+         (gptel-agent-runtime-verifier-completeness-min-ratio 0.5)
+         (s1 (gptel-agent-runtime-plan-step-create
+              :id "a" :title "Read"
+              :status 'done
+              :result (gar-verifier-test--make-result
+                       "[TODO] one\n[TODO] two\n[TODO] three\n[TODO] four\n[TODO] five\n[TODO] six\n[TODO] seven\n[TODO] eight")))
+         (s2 (gptel-agent-runtime-plan-step-create
+              :id "b" :title "Render" :status 'running
+              :suggested-tool "direct_response" :risk 'safe))
+         (plan (gptel-agent-runtime-plan-create
+                :id "p" :status 'active :steps (list s1 s2)))
+         (task (gptel-agent-runtime-task-create
+                :id "t" :goal "g" :notes plan))
+         (resp (gar-verifier-test--make-result "1. one\n2. two")))
+    (let ((verdict (gptel-agent-runtime-verify-action-result s2 resp task)))
+      (should verdict)
+      (should (not (plist-get verdict :passed)))
+      (should (eq 'completeness-heuristic (plist-get verdict :mode)))
+      (should (stringp (plist-get verdict :suggested-correction))))))
+
 (provide 'gar-verifier-test)
 
 ;;; gar-verifier-test.el ends here
