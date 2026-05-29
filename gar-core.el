@@ -305,6 +305,50 @@ step is allowed to run."
   :type '(repeat string)
   :group 'gptel-agent-runtime)
 
+(defcustom gptel-agent-runtime-high-fidelity-model nil
+  "Model symbol to route high-fidelity requests through, or nil to disable.
+
+When a goal matches one of `high-fidelity-patterns' and this is non-nil,
+the direct-response gptel-request for that goal binds `gptel-model' to
+this symbol just for that call.  After the response returns, the
+binding falls back to the global `gptel-model'.
+
+Typical values:
+  - `claude-haiku-4-5-20251001' when an Anthropic backend is registered.
+  - `gpt-4o-mini' when an OpenAI backend is registered.
+  - `qwen2.5:14b-instruct' for an entirely local stronger model.
+
+The matching backend must already be registered (e.g.  via
+`gptel-make-anthropic' / `gptel-make-openai' / `gptel-make-ollama' in
+your setup file); this defcustom only flips the model symbol."
+  :type '(choice (const :tag "Disabled" nil)
+                 (symbol :tag "Model id symbol"))
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-high-fidelity-patterns
+  '("\\blist\\(?:[[:space:]]+\\(?:all\\|every\\|my\\)\\)\\b"
+    "\\bshow\\(?:[[:space:]]+me\\)?[[:space:]]+\\(?:all\\|every\\)\\b"
+    "\\bevery\\(?:[[:space:]]+single\\)?[[:space:]]+\\(?:item\\|todo\\|file\\|task\\|entry\\)\\b"
+    "\\bverbatim\\b"
+    "\\bcomplete[[:space:]]+list\\b"
+    "\\ball[[:space:]]+of[[:space:]]+my\\b"
+    "\\balle[[:space:]]+meine\\b"
+    "\\bvollst\\(?:ä\\|ae\\|a\\)ndige?\\b")
+  "Regexp list applied to the goal text (case-insensitive).
+When any pattern matches AND `high-fidelity-model' is non-nil, the
+direct-response gptel-request binds `gptel-model' to that model just
+for the matching turn.  Used to route list-completeness-sensitive
+queries to a model that follows instructions more faithfully than the
+local default 7B."
+  :type '(repeat regexp)
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-high-fidelity-enabled t
+  "When nil, the high-fidelity router is bypassed even if a model and
+patterns are configured.  Useful for A/B testing or offline operation."
+  :type 'boolean
+  :group 'gptel-agent-runtime)
+
 (defcustom gptel-agent-runtime-memory-retrieval-method 'lexical
   "Memory retrieval method.
 `lexical' uses local keyword scoring. `ollama-embeddings' asks Ollama for

@@ -298,6 +298,118 @@ for that tool shows the user-supplied confirm setting."
             (should (search-forward "always" nil t))))
       (when (get-buffer buf-name) (kill-buffer buf-name)))))
 
+;; ============================================================================
+;; PR 11: high-fidelity model routing
+;; ============================================================================
+
+;; --- detection helper ---
+
+(ert-deftest gar-e2e-needs-high-fidelity-detects-list-phrases ()
+  "Goals containing list-style phrases trigger high-fidelity routing
+when the model and enable flag are set."
+  (let ((gptel-agent-runtime-high-fidelity-enabled t)
+        (gptel-agent-runtime-high-fidelity-model 'fake-haiku))
+    (dolist (g '("list my todos"
+                 "list all open files"
+                 "show me every entry"
+                 "show all my buffers"
+                 "every single item"
+                 "give me the complete list"
+                 "alle meine TODOs"
+                 "vollstaendige Liste anzeigen"
+                 "produce the answer verbatim"))
+      (should (gptel-agent-runtime--needs-high-fidelity-p g)))))
+
+(ert-deftest gar-e2e-needs-high-fidelity-skips-non-list-phrases ()
+  "Routine non-list goals do NOT trigger high-fidelity routing."
+  (let ((gptel-agent-runtime-high-fidelity-enabled t)
+        (gptel-agent-runtime-high-fidelity-model 'fake-haiku))
+    (dolist (g '("rename this variable"
+                 "what is 2+2"
+                 "summarise the file briefly"
+                 "fix the typo in line 12"
+                 "create a TODO"))
+      (should-not (gptel-agent-runtime--needs-high-fidelity-p g)))))
+
+(ert-deftest gar-e2e-needs-high-fidelity-disabled-by-flag ()
+  "Disabled flag suppresses routing even on matching goals."
+  (let ((gptel-agent-runtime-high-fidelity-enabled nil)
+        (gptel-agent-runtime-high-fidelity-model 'fake-haiku))
+    (should-not (gptel-agent-runtime--needs-high-fidelity-p
+                 "list all my todos"))))
+
+(ert-deftest gar-e2e-needs-high-fidelity-no-model-set ()
+  "Routing is a no-op when no high-fidelity model is configured."
+  (let ((gptel-agent-runtime-high-fidelity-enabled t)
+        (gptel-agent-runtime-high-fidelity-model nil))
+    (should-not (gptel-agent-runtime--needs-high-fidelity-p
+                 "list all my todos"))))
+
+;; --- end-to-end: routing binds gptel-model for the direct-response call ---
+
+(defvar gar-e2e--captured-model-at-request nil
+  "Captures the value of `gptel-model' inside the fake LLM stub so e2e
+tests can assert that high-fidelity routing actually swapped the
+binding for the direct-response gptel-request.")
+
+(defun gar-e2e--capturing-fake-gptel-request (prompt &rest args)
+  "Variant of the fake LLM that records `gptel-model' at call time."
+  (push (cons (gar-test--classify-prompt prompt (plist-get args :system))
+              (and (boundp 'gptel-model) gptel-model))
+        gar-e2e--captured-model-at-request)
+  (apply #'gar-test--fake-gptel-request prompt args))
+
+(ert-deftest gar-e2e-direct-response-binds-high-fidelity-model ()
+  "When the goal is list-style and a high-fidelity model is set, the
+direct-response gptel-request runs under that model symbol while
+the planner/reflection calls run under the original."
+  (gar-test-with-sandboxed-state
+    (let ((gptel-agent-runtime-high-fidelity-enabled t)
+          (gptel-agent-runtime-high-fidelity-model 'fake-haiku)
+          (gptel-model 'fake-local-7b)
+          (gar-e2e--captured-model-at-request nil)
+          (gar-test--fake-llm-responses nil))
+      (cl-letf (((symbol-function 'gptel-request)
+                 #'gar-e2e--capturing-fake-gptel-request))
+        (gptel-agent-runtime-start "list all my todos here")
+        (let* ((calls (nreverse gar-e2e--captured-model-at-request))
+               (direct-call (assoc :direct calls))
+               (plan-call (assoc :plan calls)))
+          (should direct-call)
+          (should (eq 'fake-haiku (cdr direct-call)))
+          (when plan-call
+            (should (eq 'fake-local-7b (cdr plan-call)))))))))
+
+(ert-deftest gar-e2e-direct-response-keeps-default-model-for-non-list ()
+  "Goals that don't match the routing patterns keep the default model."
+  (gar-test-with-sandboxed-state
+    (let ((gptel-agent-runtime-high-fidelity-enabled t)
+          (gptel-agent-runtime-high-fidelity-model 'fake-haiku)
+          (gptel-model 'fake-local-7b)
+          (gar-e2e--captured-model-at-request nil)
+          (gar-test--fake-llm-responses nil))
+      (cl-letf (((symbol-function 'gptel-request)
+                 #'gar-e2e--capturing-fake-gptel-request))
+        (gptel-agent-runtime-start "say hello")
+        (let* ((calls (nreverse gar-e2e--captured-model-at-request))
+               (direct-call (assoc :direct calls)))
+          (should direct-call)
+          (should (eq 'fake-local-7b (cdr direct-call))))))))
+
+(ert-deftest gar-e2e-high-fidelity-engaged-event-emitted ()
+  "When routing engages, a `high-fidelity-model-engaged' event lands
+in the event log so mission control can surface it."
+  (gar-test-with-sandboxed-state
+    (let ((gptel-agent-runtime-high-fidelity-enabled t)
+          (gptel-agent-runtime-high-fidelity-model 'fake-haiku))
+      (gar-test-with-fake-llm nil
+        (gptel-agent-runtime-start "list all my todos here")
+        (should (cl-some
+                 (lambda (e)
+                   (eq (gptel-agent-runtime-event-type e)
+                       'high-fidelity-model-engaged))
+                 gptel-agent-runtime-event-log))))))
+
 (provide 'gar-loop-e2e-test)
 
 ;;; gar-loop-e2e-test.el ends here
