@@ -43,6 +43,16 @@
 (declare-function gptel-agent-runtime-action-result-tool
                   "gptel-agent-runtime" (result))
 (declare-function gptel-agent-runtime-task-goal "gptel-agent-runtime" (task))
+(declare-function gptel-agent-runtime-task-notes "gptel-agent-runtime" (task))
+(declare-function gptel-agent-runtime-plan-steps "gptel-agent-runtime" (plan))
+(declare-function gptel-agent-runtime-plan-step-id
+                  "gptel-agent-runtime" (step))
+(declare-function gptel-agent-runtime-plan-step-status
+                  "gptel-agent-runtime" (step))
+(declare-function gptel-agent-runtime-plan-step-result
+                  "gptel-agent-runtime" (step))
+(declare-function gptel-agent-runtime-action-result-p
+                  "gptel-agent-runtime" (obj))
 ;; JSON parser + balanced-brace scanner are owned by gar-skeptic-model;
 ;; reuse them here rather than duplicating the implementation.
 (declare-function gptel-agent-runtime--skeptic-extract-json-object
@@ -99,6 +109,56 @@ Safe / read steps are not verified -- the cost outweighs the benefit
 for cheap, easily-redoable actions. Match this against `skeptic-trigger-
 risks' to keep the gate semantics consistent."
   :type '(repeat symbol)
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-verifier-completeness-mode 'heuristic
+  "Operating mode for the response-completeness check.
+
+The completeness check is orthogonal to the primary verifier
+(`verifier-mode'): it asks `did the final user-facing response relay
+all of the prior tool output, or did the model summarise it away?',
+not `did the action succeed?'.
+
+- `off':         no completeness check.
+- `heuristic':   deterministic line-count + item-count comparison
+                 between the prior step's tool output and the current
+                 step's response. Cheap, sometimes false-positive on
+                 prose responses.
+- `model-based': sends (TOOL-OUTPUT, RESPONSE) back to the model
+                 with the explicit question `does the response include
+                 every item from the tool output? Y/N + missing list'.
+                 One extra LLM call per response step.
+
+A failed completeness verdict produces a retry verdict with a
+:suggested-correction telling the model to relay every item, which the
+existing retry path picks up."
+  :type '(choice (const :tag "Off" off)
+                 (const :tag "Heuristic (deterministic)" heuristic)
+                 (const :tag "Model-based" model-based))
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-verifier-completeness-min-items 3
+  "Don't fire the completeness check unless prior tool output has at
+least this many enumerable items.  Below this count the heuristic is
+noisy and the model-based check rarely catches real summarisation."
+  :type 'integer
+  :safe #'integerp
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-verifier-completeness-min-ratio 0.5
+  "Heuristic verdict fails when (response-items / prior-items) < this
+ratio.  0.5 means `the response only covers half or fewer of the prior
+items' triggers a retry; bump higher to be stricter."
+  :type 'float
+  :safe #'floatp
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-verifier-completeness-trigger-tools
+  '("direct_response")
+  "Tools whose action results get a completeness pass.
+Default is `direct_response' since that is the user-facing render
+step; the response is what we are checking for faithful relay."
+  :type '(repeat string)
   :group 'gptel-agent-runtime)
 
 (defvar gptel-agent-runtime--last-verifier-verdicts nil
@@ -308,35 +368,275 @@ verdict on timeout, abort, error, or unparseable model output."
           fallback))
      (t fallback))))
 
-(defun gptel-agent-runtime-verify-action-result (step result &optional task)
-  "Return a verifier verdict for STEP's RESULT, or nil when the verifier is off.
-TASK is the active runtime task (used for goal context in the model-based
-prompt). The dispatcher consults `gptel-agent-runtime-verifier-mode' and
-`--verifier-applies-p' to decide whether to fire; when it does, pushes
-the verdict onto `--last-verifier-verdicts' (ring of 50) and emits a
-`verifier-verdict' event for observability."
+(defun gptel-agent-runtime--verifier-extract-item-count (text)
+  "Best-effort count of enumerable items in TEXT.
+Looks for common list patterns (bullets, numbered, Org TODO state
+brackets, bracketed state markers from `get_todos').  Returns 0
+when TEXT is nil/empty.  When multiple patterns match, returns the
+highest -- a text that looks list-shaped by ANY measure is
+considered list-shaped at that count."
+  (if (or (null text) (and (stringp text) (string-empty-p text)))
+      0
+    (let* ((patterns
+            '("^\\[\\(?:TODO\\|NEXT\\|IN-PROGRESS\\|WAIT\\|REVIEW\\|DONE\\)\\]"
+              "^[-*+] "
+              "^[0-9]+\\.[[:space:]]"
+              "^[0-9]+)[[:space:]]"
+              "^\\*+ \\(?:TODO\\|NEXT\\|IN-PROGRESS\\|WAIT\\|REVIEW\\) "))
+           (counts
+            (mapcar
+             (lambda (p)
+               (with-temp-buffer
+                 (insert (or text ""))
+                 (goto-char (point-min))
+                 (let ((n 0))
+                   (while (re-search-forward p nil t) (cl-incf n))
+                   n)))
+             patterns)))
+      (apply #'max 0 counts))))
+
+(defun gptel-agent-runtime--verifier-find-prior-tool-result (step task)
+  "Return the action-result of the most recent prior `done' step in TASK's
+plan whose result has non-empty output, or nil.  STEP is the current
+step being verified; its own result is excluded from the search."
+  (let* ((plan (and task (gptel-agent-runtime-task-notes task)))
+         (steps (and plan (gptel-agent-runtime-plan-steps plan)))
+         (current-id (and step (gptel-agent-runtime-plan-step-id step)))
+         (last-done nil))
+    (cl-loop for s in (or steps '())
+             ;; Stop the moment we hit the current step.
+             when (and current-id
+                       (equal (gptel-agent-runtime-plan-step-id s)
+                              current-id))
+             return last-done
+             do (let ((r (gptel-agent-runtime-plan-step-result s)))
+                  (when (and (eq (gptel-agent-runtime-plan-step-status s)
+                                 'done)
+                             r
+                             (gptel-agent-runtime-action-result-p r)
+                             (let ((o (gptel-agent-runtime-action-result-output
+                                       r)))
+                               (and (stringp o) (not (string-empty-p o)))))
+                    (setq last-done r)))
+             finally return last-done)))
+
+(defun gptel-agent-runtime--verifier-completeness-applies-p (step prior-result)
+  "Return non-nil when the completeness check should fire for STEP.
+Requires that the completeness mode is on, the step's tool is in the
+trigger list, and PRIOR-RESULT's output has enough enumerable items."
+  (and (not (eq gptel-agent-runtime-verifier-completeness-mode 'off))
+       (let ((tool (or (gptel-agent-runtime-plan-step-suggested-tool step)
+                       "direct_response")))
+         (member tool
+                 gptel-agent-runtime-verifier-completeness-trigger-tools))
+       prior-result
+       (gptel-agent-runtime-action-result-p prior-result)
+       (let* ((prior-text (gptel-agent-runtime-action-result-output
+                           prior-result))
+              (prior-items
+               (gptel-agent-runtime--verifier-extract-item-count prior-text)))
+         (>= prior-items
+             (or gptel-agent-runtime-verifier-completeness-min-items 3)))))
+
+(defun gptel-agent-runtime--verifier-completeness-heuristic-verdict
+    (step result prior-result)
+  "Heuristic completeness verdict comparing STEP's RESULT against
+PRIOR-RESULT.  Returns a verdict plist (passed t/nil + correction)
+when applicable, nil otherwise."
+  (let* ((response-text
+          (or (gptel-agent-runtime-action-result-output result) ""))
+         (prior-text
+          (or (gptel-agent-runtime-action-result-output prior-result) ""))
+         (prior-items
+          (gptel-agent-runtime--verifier-extract-item-count prior-text))
+         (response-items
+          (gptel-agent-runtime--verifier-extract-item-count response-text))
+         (min-ratio
+          (or gptel-agent-runtime-verifier-completeness-min-ratio 0.5))
+         (ratio (if (> prior-items 0)
+                    (/ (float response-items) prior-items)
+                  1.0))
+         (passed (>= ratio min-ratio)))
+    (list :passed passed
+          :confidence (if passed 0.8 0.7)
+          :reason (format
+                   "Prior tool output had %d enumerable items; response surfaced %d (ratio %.2f, threshold %.2f)."
+                   prior-items response-items ratio min-ratio)
+          :suggested-correction
+          (if passed
+              ""
+            (format "Your previous response only included %d of %d items from the prior tool result. Re-render the response listing EVERY item verbatim as a numbered list. Do not summarise, do not pick favourites, do not add interpretive framing."
+                    response-items prior-items))
+          :mode 'completeness-heuristic
+          :step (or (gptel-agent-runtime-plan-step-title step) "")
+          :tool (or (gptel-agent-runtime-action-result-tool result) ""))))
+
+(defconst gptel-agent-runtime--verifier-completeness-system-prompt
+  "You compare a TOOL OUTPUT against a final RESPONSE and decide whether the response relays every item from the tool output. Return ONLY a single strict JSON object with keys: passed (true|false), confidence (0..1), missing (array of item strings; may be empty), reason (string). No prose, no markdown, no code fences. If the response includes every item -- even reformatted -- passed is true. If the response summarises, drops items, or only shows a subset, passed is false and `missing' lists the dropped items."
+  "System prompt for the model-based completeness verdict.")
+
+(defun gptel-agent-runtime--verifier-completeness-build-prompt
+    (step result prior-result)
+  "Build the user prompt for the model-based completeness verdict."
+  (format
+   "STEP TITLE:\n%s\n\nPRIOR TOOL OUTPUT (the items that should be relayed):\n%s\n\nRESPONSE (what was emitted to the user):\n%s\n\nReturn the JSON verdict now."
+   (or (gptel-agent-runtime-plan-step-title step) "")
+   (or (gptel-agent-runtime-action-result-output prior-result) "")
+   (or (gptel-agent-runtime-action-result-output result) "")))
+
+(defun gptel-agent-runtime--verifier-completeness-parse-verdict
+    (text step result prior-result)
+  "Parse TEXT as the model-based completeness verdict JSON.
+Returns a verifier-shaped verdict plist (`:passed' + correction etc.)
+on success, nil on parse failure so the dispatcher can fall back to
+the heuristic verdict."
+  (let ((json (gptel-agent-runtime--skeptic-extract-json-object text)))
+    (when json
+      (condition-case _err
+          (let* ((obj (let ((json-object-type 'plist)
+                            (json-array-type 'list)
+                            (json-key-type 'keyword))
+                        (json-read-from-string json)))
+                 (passed (eq (plist-get obj :passed) t))
+                 (missing (plist-get obj :missing))
+                 (reason (or (plist-get obj :reason) "")))
+            (list :passed passed
+                  :confidence (or (plist-get obj :confidence)
+                                  (if passed 0.8 0.7))
+                  :reason reason
+                  :suggested-correction
+                  (if passed
+                      ""
+                    (format
+                     "The previous response dropped these items from the tool output: %S. Re-render the response with EVERY item from the tool output as a numbered list. Do not summarise."
+                     (or missing '())))
+                  :mode 'completeness-model-based
+                  :step (or (gptel-agent-runtime-plan-step-title step) "")
+                  :tool (or (gptel-agent-runtime-action-result-tool result)
+                            "")))
+        (error nil)))))
+
+(cl-defun gptel-agent-runtime--verifier-completeness-model-based-verdict
+    (step result prior-result &optional _task)
+  "Synchronously ask the model to compare STEP's RESULT against
+PRIOR-RESULT for completeness.  Falls back to the heuristic verdict on
+timeout / abort / error / unparseable output."
+  (unless (and (fboundp 'gptel-request) (boundp 'gptel-model))
+    (cl-return-from gptel-agent-runtime--verifier-completeness-model-based-verdict
+      (gptel-agent-runtime--verifier-completeness-heuristic-verdict
+       step result prior-result)))
+  (let* ((fallback (gptel-agent-runtime--verifier-completeness-heuristic-verdict
+                    step result prior-result))
+         (budget-secs (max 0.5
+                           (/ (or gptel-agent-runtime-verifier-budget-ms 3000)
+                              1000.0)))
+         (system gptel-agent-runtime--verifier-completeness-system-prompt)
+         (prompt (gptel-agent-runtime--verifier-completeness-build-prompt
+                  step result prior-result))
+         (req-buf (generate-new-buffer " *gar-completeness-request*"))
+         (response nil) (done nil)
+         (gptel-model (or gptel-agent-runtime-verifier-model
+                          (and (boundp 'gptel-model) gptel-model)))
+         (gptel-use-tools nil)
+         (gptel-stream nil))
+    (unwind-protect
+        (condition-case _err
+            (progn
+              (with-current-buffer req-buf
+                (gptel-request prompt
+                  :buffer req-buf
+                  :stream nil
+                  :system system
+                  :callback (lambda (r _info) (setq response r done t))))
+              (let ((deadline (+ (float-time) budget-secs)))
+                (while (and (not done) (< (float-time) deadline))
+                  (accept-process-output nil 0.05))
+                (unless done
+                  (ignore-errors (gptel-abort req-buf))
+                  (setq response :timeout))))
+          (error (setq response :error)))
+      (when (buffer-live-p req-buf) (kill-buffer req-buf)))
+    (cond
+     ((eq response :timeout) fallback)
+     ((eq response :error) fallback)
+     ((eq response 'abort) fallback)
+     ((stringp response)
+      (or (gptel-agent-runtime--verifier-completeness-parse-verdict
+           response step result prior-result)
+          fallback))
+     (t fallback))))
+
+(defun gptel-agent-runtime--verifier-completeness-verdict
+    (step result &optional task)
+  "Dispatcher for the completeness check.
+Returns a verifier-shaped verdict plist when the check applies and
+fires, nil otherwise (so the primary verdict still drives behaviour)."
+  (let ((prior-result
+         (gptel-agent-runtime--verifier-find-prior-tool-result step task)))
+    (when (gptel-agent-runtime--verifier-completeness-applies-p
+           step prior-result)
+      (pcase gptel-agent-runtime-verifier-completeness-mode
+        ('heuristic
+         (gptel-agent-runtime--verifier-completeness-heuristic-verdict
+          step result prior-result))
+        ('model-based
+         (gptel-agent-runtime--verifier-completeness-model-based-verdict
+          step result prior-result task))
+        (_ nil)))))
+
+(defun gptel-agent-runtime--verifier-primary-verdict (step result task)
+  "Run the primary safety verifier (rule-based or model-based) for STEP.
+Returns nil when the verifier is off or the step's risk is below the
+trigger threshold."
   (when (and (gptel-agent-runtime-plan-step-p step)
              (gptel-agent-runtime--verifier-applies-p
               (or (gptel-agent-runtime-plan-step-risk step) 'safe)))
-    (let ((verdict
-           (pcase gptel-agent-runtime-verifier-mode
-             ('rule-based
-              (gptel-agent-runtime--verifier-rule-based-verdict step result))
-             ('model-based
-              (gptel-agent-runtime--verifier-model-based-verdict
-               step result task))
-             (_ nil))))
-      (when verdict
-        (push (cons (gptel-agent-runtime--timestamp) verdict)
-              gptel-agent-runtime--last-verifier-verdicts)
-        (when (> (length gptel-agent-runtime--last-verifier-verdicts) 50)
-          (setcdr (nthcdr 49 gptel-agent-runtime--last-verifier-verdicts) nil))
-        (gptel-agent-runtime-emit-event
-         'verifier-verdict
-         :source "verifier"
-         :payload verdict
-         :taint 'trusted)
-        verdict))))
+    (pcase gptel-agent-runtime-verifier-mode
+      ('rule-based
+       (gptel-agent-runtime--verifier-rule-based-verdict step result))
+      ('model-based
+       (gptel-agent-runtime--verifier-model-based-verdict
+        step result task))
+      (_ nil))))
+
+(defun gptel-agent-runtime-verify-action-result (step result &optional task)
+  "Return a verifier verdict for STEP's RESULT, or nil when no verifier fires.
+TASK is the active runtime task.  Runs two orthogonal checks:
+
+- The primary verifier (safety / correctness) -- fires only for risky
+  steps (`verifier-trigger-risks').
+- The completeness verifier -- fires on direct-response steps when
+  the most recent prior `done' step in the same plan produced a
+  list-like tool result.
+
+A failing completeness verdict ALWAYS wins, so the model is forced to
+re-render with the missing items even when the primary verifier would
+have considered the step a success."
+  (let* ((primary (gptel-agent-runtime--verifier-primary-verdict
+                   step result task))
+         (completeness (gptel-agent-runtime--verifier-completeness-verdict
+                        step result task))
+         (verdict
+          (cond
+           ;; Completeness explicitly failed -- override the primary.
+           ((and completeness (not (plist-get completeness :passed)))
+            completeness)
+           ;; No completeness check fired, return whatever primary says.
+           ((not completeness) primary)
+           ;; Completeness passed: combine into a single passing verdict
+           ;; if the primary also passed (or was absent).
+           (t (or primary completeness)))))
+    (when verdict
+      (push (cons (gptel-agent-runtime--timestamp) verdict)
+            gptel-agent-runtime--last-verifier-verdicts)
+      (when (> (length gptel-agent-runtime--last-verifier-verdicts) 50)
+        (setcdr (nthcdr 49 gptel-agent-runtime--last-verifier-verdicts) nil))
+      (gptel-agent-runtime-emit-event
+       'verifier-verdict
+       :source "verifier"
+       :payload verdict
+       :taint 'trusted)
+      verdict)))
 
 (defun gptel-agent-runtime--verifier-should-retry-p (step verdict)
   "Return non-nil when STEP should be auto-retried given VERDICT.
