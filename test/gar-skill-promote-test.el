@@ -372,6 +372,138 @@ replaces the existing playbook with the candidate body."
                          (gptel-agent-runtime-playbook-summary pb)))))
     (when (file-directory-p tmp-root) (delete-directory tmp-root t))))
 
+;; ============================================================================
+;; PR 19: trust lifecycle  -- proposed -> approved -> trusted
+;; ============================================================================
+
+(defmacro gar-skill-promote-test--with-clean-trust (&rest body)
+  "Run BODY with a fresh empty trust registry + temp persistence file."
+  (declare (indent 0))
+  `(let* ((tmp (make-temp-file "gar-trust-" nil ".el"))
+          (gptel-agent-runtime--skill-promote-trust-registry nil)
+          (gptel-agent-runtime-skill-promote-trust-file tmp))
+     (unwind-protect (progn ,@body)
+       (ignore-errors (delete-file tmp)))))
+
+(ert-deftest gar-skill-promote-trust-mark-approved-sets-state ()
+  "`--mark-approved' transitions an unknown id into `approved'."
+  (gar-skill-promote-test--with-clean-trust
+    (gptel-agent-runtime--skill-promote-mark-approved "auto-x")
+    (should (eq 'approved
+                (gptel-agent-runtime--skill-promote-trust-state "auto-x")))
+    ;; Counter starts at zero.
+    (let ((entry (cdr (assoc "auto-x"
+                              gptel-agent-runtime--skill-promote-trust-registry))))
+      (should (= 0 (plist-get entry :invocations-since-approval))))))
+
+(ert-deftest gar-skill-promote-trust-mark-approved-is-no-op-on-trusted ()
+  "A trusted skill stays trusted -- the ratchet only moves forward."
+  (gar-skill-promote-test--with-clean-trust
+    (gptel-agent-runtime--skill-promote-trust-entry-set
+     "auto-x"
+     (list :state 'trusted :approved-at "ts"
+           :invocations-since-approval 5 :promoted-at "ts2"))
+    (gptel-agent-runtime--skill-promote-mark-approved "auto-x")
+    (should (eq 'trusted
+                (gptel-agent-runtime--skill-promote-trust-state "auto-x")))))
+
+(ert-deftest gar-skill-promote-trust-bump-promotes-at-threshold ()
+  "After threshold successful invocations, the state becomes `trusted'."
+  (gar-skill-promote-test--with-clean-trust
+    (let ((gptel-agent-runtime-skill-promote-trust-threshold 3))
+      (gptel-agent-runtime--skill-promote-mark-approved "auto-y")
+      ;; Bumps 1 and 2 stay `approved'.
+      (gptel-agent-runtime--skill-promote-bump-invocation "auto-y")
+      (gptel-agent-runtime--skill-promote-bump-invocation "auto-y")
+      (should (eq 'approved
+                  (gptel-agent-runtime--skill-promote-trust-state "auto-y")))
+      ;; The 3rd bump triggers the transition.
+      (gptel-agent-runtime--skill-promote-bump-invocation "auto-y")
+      (should (eq 'trusted
+                  (gptel-agent-runtime--skill-promote-trust-state "auto-y"))))))
+
+(ert-deftest gar-skill-promote-trust-bump-noop-without-approval ()
+  "`--bump-invocation' on an unknown id is a no-op (trust counter
+only progresses for explicitly-approved skills)."
+  (gar-skill-promote-test--with-clean-trust
+    (gptel-agent-runtime--skill-promote-bump-invocation "auto-z")
+    (should-not (assoc "auto-z"
+                       gptel-agent-runtime--skill-promote-trust-registry))))
+
+(ert-deftest gar-skill-promote-trust-persists-and-loads ()
+  "Save + reload round-trips the trust registry through disk."
+  (gar-skill-promote-test--with-clean-trust
+    (gptel-agent-runtime--skill-promote-mark-approved "auto-persist")
+    (gptel-agent-runtime--skill-promote-bump-invocation "auto-persist")
+    (gptel-agent-runtime--skill-promote-save-trust-registry)
+    (setq gptel-agent-runtime--skill-promote-trust-registry nil)
+    (gptel-agent-runtime--skill-promote-load-trust-registry)
+    (let ((entry (cdr (assoc "auto-persist"
+                              gptel-agent-runtime--skill-promote-trust-registry))))
+      (should entry)
+      (should (eq 'approved (plist-get entry :state)))
+      (should (= 1 (plist-get entry :invocations-since-approval))))))
+
+(ert-deftest gar-skill-promote-trust-bypass-skips-write-for-trusted ()
+  "When `auto-bypass' is on and a trusted skill already covers a goal,
+`--write-from-payload' returns nil without writing to disk."
+  (gar-skill-promote-test--with-clean-trust
+    (let* ((tmp-dir (make-temp-file "gar-skill-promote-bypass-" t))
+           (gptel-agent-runtime-skills-directory tmp-dir)
+           (gptel-agent-runtime-skill-promote-trust-auto-bypass t)
+           (traj (gptel-agent-runtime-trajectory-create
+                  :id "t1"
+                  :goal "list my todos here"
+                  :outcome 'success
+                  :finalized-at "ts"
+                  :steps (list (gptel-agent-runtime-trajectory-step-create
+                                :title "answer"
+                                :suggested-tool "direct_response"))))
+           (gptel-agent-runtime--trajectories (list traj)))
+      (unwind-protect
+          (progn
+            ;; The id derived from this goal is what the synth would
+            ;; produce. Mark it trusted and confirm bypass.
+            (let ((id (gptel-agent-runtime--skill-promote-derive-id
+                       "list my todos here")))
+              (gptel-agent-runtime--skill-promote-trust-entry-set
+               id (list :state 'trusted
+                        :approved-at "ts"
+                        :invocations-since-approval 10
+                        :promoted-at "ts2"))
+              (let* ((payload (list :id (gptel-agent-runtime-trajectory-id traj)
+                                    :goal "list my todos here"
+                                    :outcome 'success))
+                     (cluster (list (list :id "t1" :outcome 'success)
+                                    (list :id "t2" :outcome 'success)))
+                     (result
+                      (gptel-agent-runtime--skill-promote-write-from-payload
+                       payload cluster)))
+                ;; Bypass should return nil and NOT write a file.
+                (should-not result)
+                (let* ((auto-dir (gptel-agent-runtime--skill-promote-directory))
+                       (md-files (and (file-directory-p auto-dir)
+                                      (directory-files auto-dir t "\\.md\\'"))))
+                  (should (null md-files))))))
+        (when (file-directory-p tmp-dir) (delete-directory tmp-dir t))))))
+
+(ert-deftest gar-skill-promote-trust-status-command-creates-buffer ()
+  (gar-skill-promote-test--with-clean-trust
+    (gptel-agent-runtime--skill-promote-mark-approved "auto-show")
+    (let ((buf-name "*gptel-agent-skill-promote-trust*"))
+      (unwind-protect
+          (progn
+            (gptel-agent-runtime-skill-promote-trust-status)
+            (let ((buf (get-buffer buf-name)))
+              (should (bufferp buf))
+              (with-current-buffer buf
+                (should buffer-read-only)
+                (should (string-match-p "auto-show"
+                                         (buffer-string)))
+                (should (string-match-p "state=approved"
+                                         (buffer-string))))))
+        (when (get-buffer buf-name) (kill-buffer buf-name))))))
+
 (provide 'gar-skill-promote-test)
 
 ;;; gar-skill-promote-test.el ends here
