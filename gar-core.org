@@ -427,6 +427,39 @@ index."
   :type 'boolean
   :group 'gptel-agent-runtime)
 
+(defcustom gptel-agent-runtime-direct-response-destination 'output-buffer
+  "Where the autonomous loop renders direct-response output.
+
+Options:
+- `output-buffer' (default, safe): always render into a dedicated
+  `*gptel-agent-output*' buffer.  User files are never modified by
+  the rendering step.  Use this unless you specifically want
+  responses inserted into source files.
+- `origin-buffer': render into the buffer that was current when
+  `gptel-agent-runtime-start' was called -- with file-backed buffers
+  still protected (those redirect to the output buffer).  Useful
+  when the runtime is being used as an in-place renderer for math
+  graphs / explanations in scratch buffers.
+- `origin-buffer-unsafe': literally insert into whatever buffer was
+  current, including org agenda files and source code.  This was the
+  pre-PR-14 behaviour and is preserved only as an escape hatch -- it
+  caused real data corruption (run_elisp tool-call transcripts
+  appended to user TODO files) before being made non-default.
+
+If you've ever seen `#+begin_tool' or `#+begin_src' blocks appear
+in your org TODO files, you were on `origin-buffer-unsafe'."
+  :type '(choice (const :tag "Dedicated output buffer (safe)" output-buffer)
+                 (const :tag "Origin buffer, file-backed protected" origin-buffer)
+                 (const :tag "Origin buffer, unsafe (legacy)" origin-buffer-unsafe))
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-direct-response-buffer-name
+  "*gptel-agent-output*"
+  "Buffer name used when `direct-response-destination' is `output-buffer'
+or when origin-buffer protection redirects file-backed buffers."
+  :type 'string
+  :group 'gptel-agent-runtime)
+
 (defcustom gptel-agent-runtime-planner-similar-trajectories-strategy 'similar
   "Search strategy used to find prior trajectories for the planner.
 
