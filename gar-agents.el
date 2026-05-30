@@ -939,6 +939,8 @@ Be specific. Cite exact arguments, paths, patterns, or capability mismatches whe
   (gptel-agent-runtime-load-trajectories))
 (when (fboundp 'gptel-agent-runtime-load-experiments)
   (gptel-agent-runtime-load-experiments))
+(when (fboundp 'gptel-agent-runtime-load-skills-from-directory)
+  (gptel-agent-runtime-load-skills-from-directory))
 
 (defun gptel-agent-runtime--model-router-count-matches (patterns text)
   "Return number of PATTERNS matching TEXT."
@@ -1149,24 +1151,42 @@ Each entry is a plist with :state :heading :file :deadline :tags."
     (nreverse results)))
 
 (defun gptel-agent-runtime-build-workspace-context ()
-  "Build a compact workspace context string for the gptel system prompt."
+  "Build a compact workspace context string for the gptel system prompt.
+
+TODO entries are grouped by STATE and then by FILE so the model
+sees `Hello2 lives in ~/org/reminders.org' instead of `Hello2
+exists somewhere'.  Without the file-grouping a model with weak
+agentic instincts (notably Haiku, gpt-4o-mini, and other small
+remote models) had no path from `set a deadline on Hello2' to
+`open reminders.org' -- it would either guess paths or fail."
   (let* ((todos (gptel-agent-runtime-collect-org-todos 80))
          (by-state (seq-group-by (lambda (e) (plist-get e :state)) todos))
+         (format-entry
+          (lambda (e)
+            (let ((dl (plist-get e :deadline))
+                  (tags (plist-get e :tags)))
+              (format "    - %s%s%s"
+                      (plist-get e :heading)
+                      (if (and dl (not (string-empty-p dl)))
+                          (format " [due: %s]" dl) "")
+                      (if (and tags (not (string-empty-p tags)))
+                          (format " :%s:" tags) "")))))
          (format-entries
           (lambda (state entries)
             (when entries
-              (concat (format "\n[%s]\n" state)
-                      (mapconcat
-                       (lambda (e)
-                         (let ((dl (plist-get e :deadline))
-                               (tags (plist-get e :tags)))
-                           (format "  - %s%s%s"
-                                   (plist-get e :heading)
-                                   (if (and dl (not (string-empty-p dl)))
-                                       (format " [due: %s]" dl) "")
-                                   (if (and tags (not (string-empty-p tags)))
-                                       (format " :%s:" tags) ""))))
-                       entries "\n")))))
+              (let ((by-file (seq-group-by (lambda (e) (plist-get e :file))
+                                           entries)))
+                (concat
+                 (format "\n[%s]\n" state)
+                 (mapconcat
+                  (lambda (file-group)
+                    (let ((file (or (car file-group) "(unknown file)"))
+                          (file-entries (cdr file-group)))
+                      (concat (format "  in %s:\n" file)
+                              (mapconcat format-entry
+                                         file-entries "\n"))))
+                  by-file
+                  "\n"))))))
          (buf (current-buffer))
          (buf-name (buffer-name buf))
          (major (format "%s" major-mode))
@@ -1180,7 +1200,7 @@ Each entry is a plist with :state :heading :file :deadline :tags."
      (when open-org
        (format "Open org buffers: %s\n"
                (mapconcat #'buffer-name open-org ", ")))
-     "\nTODO summary:\n"
+     "\nTODO summary (grouped by state then by file):\n"
      (mapconcat (lambda (state)
                   (funcall format-entries state (cdr (assoc state by-state))))
                 '("NEXT" "IN-PROGRESS" "TODO" "WAIT" "REVIEW") "")
