@@ -130,6 +130,40 @@
       (when (file-directory-p gptel-agent-runtime-trajectories-directory)
         (delete-directory gptel-agent-runtime-trajectories-directory t)))))
 
+(ert-deftest gar-trajectory-record-respects-sqlite-disabled-flag ()
+  "Regression for the SQLite test-leak bug.  When
+`gptel-agent-runtime-sqlite-enabled' is nil (the default for tests
+since test-helper.el sets it), `record-trajectory' must NOT create
+or open the SQLite DB file pointed at by `sqlite-file'.  Before the
+fix, several gar-trajectory-tests let-bound the trajectories
+directory to a temp path but forgot the sqlite-file, so every
+record-trajectory call wrote rows into the user's real
+~/.emacs.d/gptel-agent-runtime/agent.sqlite archive."
+  (let* ((tmp-root (expand-file-name (make-temp-name "gar-traj-test-")
+                                     temporary-file-directory))
+         (sqlite-target (expand-file-name "agent.sqlite" tmp-root))
+         (gptel-agent-runtime-sqlite-enabled nil)
+         (gptel-agent-runtime-sqlite-file sqlite-target)
+         (gptel-agent-runtime--sqlite-db nil)
+         (gptel-agent-runtime--trajectories nil)
+         (gptel-agent-runtime-trajectories-directory
+          (expand-file-name "trajectories" tmp-root))
+         (step (gar-trajectory-test--step))
+         (session (gar-trajectory-test--session-with-step step))
+         (gptel-agent-runtime-playbook-registry nil)
+         (traj (gptel-agent-runtime-trajectory-from-session session 'done)))
+    (unwind-protect
+        (progn
+          (gptel-agent-runtime-record-trajectory traj)
+          ;; Flat-file write happens (in-memory ring filled, dir created).
+          (should (= 1 (length gptel-agent-runtime--trajectories)))
+          ;; SQLite write does not -- the target file must not exist.
+          (should-not (file-exists-p sqlite-target))
+          ;; And the cached db handle stays nil.
+          (should-not gptel-agent-runtime--sqlite-db))
+      (when (file-directory-p tmp-root)
+        (delete-directory tmp-root t)))))
+
 (ert-deftest gar-trajectory-record-persists-and-loads ()
   "record + load round-trips the trajectory through disk."
   (let* ((gptel-agent-runtime-trajectories-directory
