@@ -179,6 +179,29 @@ human approves'."
   :type 'boolean
   :group 'gptel-agent-runtime)
 
+(defcustom gptel-agent-runtime-skill-promote-trust-threshold 5
+  "Number of successful invocations after approval before a skill
+transitions from `approved' to `trusted'.
+
+Once `trusted', a re-proposal of the same pattern is short-circuited:
+the system stops asking the user to review the same approved skill
+every time the underlying goal repeats.  This is the gradient that
+turns review-fatigue into autonomy."
+  :type 'integer
+  :safe #'integerp
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-skill-promote-trust-auto-bypass t
+  "When non-nil, candidates whose id matches an already-trusted skill
+do NOT get written to auto-synth/ for review -- the trusted skill
+already covers the pattern.
+
+When nil, every cluster still produces a candidate file even when an
+identical trusted skill exists (useful for debugging the promotion
+detector)."
+  :type 'boolean
+  :group 'gptel-agent-runtime)
+
 (defvar gptel-agent-runtime--skill-promote-recent-ids nil
   "Recently-promoted skill ids -- alist (id . trajectory-count-at-promotion).
 Used to enforce `skill-promote-cooldown-trajectories'.")
@@ -186,6 +209,20 @@ Used to enforce `skill-promote-cooldown-trajectories'.")
 (defvar gptel-agent-runtime--skill-promote-trajectory-count 0
   "Running count of trajectories observed since this Emacs started.
 Used to age `--skill-promote-recent-ids' for the cooldown.")
+
+(defvar gptel-agent-runtime--skill-promote-trust-registry nil
+  "Alist (PLAYBOOK-ID . PLIST) tracking the trust lifecycle.
+
+The plist has shape:
+  (:state STATE :approved-at TS :invocations-since-approval N :promoted-at TS)
+
+STATE is one of:
+  `proposed'  -- candidate written to auto-synth/, awaiting review.
+  `approved'  -- user clicked `a' once; skill is now an active
+                 playbook but still requires re-review on re-proposal.
+  `trusted'   -- skill has been used successfully
+                 `skill-promote-trust-threshold' times since approval;
+                 re-proposals of the same id are now auto-handled.")
 #+end_src
 
 * Auto-synth subdirectory
@@ -400,15 +437,193 @@ and writes."
       (let ((skill (gptel-agent-runtime--skill-promote-synthesize
                     traj cluster)))
         (when skill
-          (let ((file (gptel-agent-runtime--skill-promote-write skill)))
-            (gptel-agent-runtime-emit-event
-             'skill-promote-written
-             :source "skill-promote"
-             :payload (list :id (plist-get skill :id)
-                            :file file
-                            :cluster-size (length cluster))
-             :taint 'trusted)
-            file))))))
+          (let ((id (plist-get skill :id)))
+            (cond
+             ;; PR 19: bypass writing when an already-trusted skill
+             ;; covers this exact pattern -- the user has already
+             ;; approved + successfully used it `trust-threshold' times,
+             ;; so we don't need to ask again.
+             ((and gptel-agent-runtime-skill-promote-trust-auto-bypass
+                   (eq 'trusted
+                       (gptel-agent-runtime--skill-promote-trust-state id)))
+              (gptel-agent-runtime-emit-event
+               'skill-promote-trust-bypassed
+               :source "skill-promote"
+               :payload (list :id id
+                              :reason "Skill is already trusted; skipping review.")
+               :taint 'trusted)
+              nil)
+             (t
+              (let ((file (gptel-agent-runtime--skill-promote-write skill)))
+                (gptel-agent-runtime-emit-event
+                 'skill-promote-written
+                 :source "skill-promote"
+                 :payload (list :id id
+                                :file file
+                                :cluster-size (length cluster))
+                 :taint 'trusted)
+                file)))))))))
+
+;; ---------------------------------------------------------------------------
+;; Trust lifecycle (PR 19) -- proposed -> approved -> trusted
+;; ---------------------------------------------------------------------------
+
+(defcustom gptel-agent-runtime-skill-promote-trust-file
+  (expand-file-name
+   "skill-promote-trust.el"
+   (or (and (boundp 'gptel-agent-runtime-memory-directory)
+            gptel-agent-runtime-memory-directory)
+       (expand-file-name "gptel-agent-runtime/" user-emacs-directory)))
+  "Path of the on-disk trust-registry snapshot.
+
+Persistence lets the trust state survive across Emacs sessions --
+otherwise every restart resets every approved skill to a state where
+`auto-promote-trusted' has nothing to bypass."
+  :type 'file
+  :group 'gptel-agent-runtime)
+
+(defun gptel-agent-runtime--skill-promote-trust-state (id)
+  "Return the current `:state' for ID's trust entry, or nil when
+the id has no entry (still implicitly `proposed')."
+  (let ((entry (cdr (assoc id gptel-agent-runtime--skill-promote-trust-registry))))
+    (plist-get entry :state)))
+
+(defun gptel-agent-runtime--skill-promote-trust-entry-set (id plist)
+  "Insert / replace ID's PLIST in the trust registry."
+  (setq gptel-agent-runtime--skill-promote-trust-registry
+        (cons (cons id plist)
+              (cl-remove id gptel-agent-runtime--skill-promote-trust-registry
+                         :key #'car :test #'equal)))
+  (gptel-agent-runtime--skill-promote-save-trust-registry)
+  plist)
+
+(defun gptel-agent-runtime--skill-promote-mark-approved (id)
+  "Transition ID into `approved' state at the current timestamp.
+Idempotent -- re-approving an already-trusted skill is a no-op so
+the trust ratchet only moves forward."
+  (let ((current (gptel-agent-runtime--skill-promote-trust-state id)))
+    (unless (eq current 'trusted)
+      (gptel-agent-runtime--skill-promote-trust-entry-set
+       id
+       (list :state 'approved
+             :approved-at (gptel-agent-runtime--timestamp)
+             :invocations-since-approval 0))
+      (gptel-agent-runtime-emit-event
+       'skill-promote-trust-approved
+       :source "skill-promote"
+       :payload (list :id id)
+       :taint 'trusted))))
+
+(defun gptel-agent-runtime--skill-promote-bump-invocation (id)
+  "Increment ID's `:invocations-since-approval' counter and, when
+the threshold is reached, transition to `trusted'.  Called from the
+`playbook-invocation-recorded' subscriber for successful invocations."
+  (let* ((entry (cdr (assoc id gptel-agent-runtime--skill-promote-trust-registry)))
+         (state (plist-get entry :state)))
+    (when (eq state 'approved)
+      (let* ((n (1+ (or (plist-get entry :invocations-since-approval) 0)))
+             (threshold gptel-agent-runtime-skill-promote-trust-threshold)
+             (new-entry (plist-put (copy-sequence entry)
+                                   :invocations-since-approval n)))
+        (if (>= n threshold)
+            (let ((trusted-entry
+                   (plist-put
+                    (plist-put new-entry :state 'trusted)
+                    :promoted-at (gptel-agent-runtime--timestamp))))
+              (gptel-agent-runtime--skill-promote-trust-entry-set id trusted-entry)
+              (gptel-agent-runtime-emit-event
+               'skill-promote-trust-promoted
+               :source "skill-promote"
+               :payload (list :id id :invocations n)
+               :taint 'trusted)
+              (message "Skill %s reached trusted state (%d successful invocations)"
+                       id n))
+          (gptel-agent-runtime--skill-promote-trust-entry-set id new-entry))))))
+
+(defun gptel-agent-runtime--skill-promote-on-playbook-invocation (event)
+  "Subscriber for `playbook-invocation-recorded'.  Bumps the trust
+counter when the outcome is success."
+  (condition-case _err
+      (let* ((payload (and event
+                           (gptel-agent-runtime-event-payload event)))
+             (id (plist-get payload :playbook-id))
+             (outcome (plist-get payload :outcome)))
+        (when (and id (or (eq outcome 'success)
+                          (and (stringp outcome)
+                               (string= "success" outcome))))
+          (gptel-agent-runtime--skill-promote-bump-invocation id)))
+    (error nil)))
+
+(defun gptel-agent-runtime--skill-promote-save-trust-registry ()
+  "Persist `--skill-promote-trust-registry' to
+`skill-promote-trust-file'.  Best-effort -- errors are swallowed."
+  (condition-case _err
+      (let ((file gptel-agent-runtime-skill-promote-trust-file))
+        (when (and file (stringp file))
+          (let ((dir (file-name-directory file)))
+            (unless (file-directory-p dir) (make-directory dir t)))
+          (with-temp-file file
+            (let ((create-lockfiles nil))
+              (prin1 (gptel-agent-runtime--state-header "skill-promote-trust")
+                     (current-buffer))
+              (insert "\n")
+              (prin1 gptel-agent-runtime--skill-promote-trust-registry
+                     (current-buffer))
+              (insert "\n")))))
+    (error nil)))
+
+(defun gptel-agent-runtime--skill-promote-load-trust-registry ()
+  "Read the persisted registry into `--skill-promote-trust-registry'.
+No-op when the file does not exist."
+  (condition-case _err
+      (let ((file gptel-agent-runtime-skill-promote-trust-file))
+        (when (and file (stringp file) (file-exists-p file))
+          (let* ((versioned (gptel-agent-runtime--read-versioned file))
+                 (rest (cdr versioned)))
+            (when rest
+              (with-temp-buffer
+                (insert-file-contents file)
+                (goto-char rest)
+                (let ((data (read (current-buffer))))
+                  (when (listp data)
+                    (setq gptel-agent-runtime--skill-promote-trust-registry
+                          data))))))))
+    (error nil)))
+
+;;;###autoload
+(defun gptel-agent-runtime-skill-promote-trust-status ()
+  "Open a buffer summarising the trust state of every known skill."
+  (interactive)
+  (let ((buf (get-buffer-create "*gptel-agent-skill-promote-trust*")))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert (format "Skill trust registry  (%d entries)\n\n"
+                        (length gptel-agent-runtime--skill-promote-trust-registry)))
+        (dolist (entry gptel-agent-runtime--skill-promote-trust-registry)
+          (let ((id (car entry))
+                (plist (cdr entry)))
+            (insert (format "  %-30s  state=%-9s  inv=%d  approved=%s%s\n"
+                            id
+                            (or (plist-get plist :state) "?")
+                            (or (plist-get plist :invocations-since-approval) 0)
+                            (or (plist-get plist :approved-at) "?")
+                            (if (eq (plist-get plist :state) 'trusted)
+                                (format "  promoted=%s"
+                                        (or (plist-get plist :promoted-at) "?"))
+                              ""))))))
+      (goto-char (point-min))
+      (special-mode))
+    (display-buffer buf)))
+
+(when (fboundp 'gptel-agent-runtime-subscribe)
+  (gptel-agent-runtime-subscribe
+   'playbook-invocation-recorded
+   #'gptel-agent-runtime--skill-promote-on-playbook-invocation))
+
+;; Eagerly load any persisted trust state at module load time -- no-op
+;; when the file doesn't exist yet.
+(gptel-agent-runtime--skill-promote-load-trust-registry)
 
 ;; ---------------------------------------------------------------------------
 ;; Review / approve / reject flow (PR 16)
@@ -546,6 +761,9 @@ already-approved refinement candidates."
                (fboundp 'gptel-agent-runtime--skills-md-register-playbook))
       (gptel-agent-runtime--skills-md-register-playbook
        (gptel-agent-runtime--skills-md-skill->playbook skill)))
+    (when (and skill (plist-get skill :id))
+      (gptel-agent-runtime--skill-promote-mark-approved
+       (plist-get skill :id)))
     (gptel-agent-runtime-emit-event
      'skill-promote-approved
      :source "skill-promote"

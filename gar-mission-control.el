@@ -393,14 +393,25 @@ status, and the registered agent capability allowlist."
                   (cl-remove-if
                    #'file-directory-p
                    (directory-files refine-dir t "\\.el\\'")))))
-       (format "  Skill promotion mode: %s   Min cluster: %s   Trajectories: %s\n  Pending skill candidates: %d   Approved skills: %d   Rejected skills: %d\n  Pending refinement candidates: %d\n  Review (both queues): M-x gptel-agent-runtime-skill-promote-review"
-               (or mode 'off)
-               (or min-n "?")
-               (or count 0)
-               (length (or skill-candidates '()))
-               (length (or approved '()))
-               (length (or skill-rejected '()))
-               (length (or refine-candidates '())))))
+       (let* ((trust-reg
+               (and (boundp 'gptel-agent-runtime--skill-promote-trust-registry)
+                    gptel-agent-runtime--skill-promote-trust-registry))
+              (trusted-count
+               (cl-count 'trusted trust-reg
+                         :key (lambda (e) (plist-get (cdr e) :state))))
+              (approved-active-count
+               (cl-count 'approved trust-reg
+                         :key (lambda (e) (plist-get (cdr e) :state)))))
+         (format "  Skill promotion mode: %s   Min cluster: %s   Trajectories: %s\n  Pending skill candidates: %d   Approved skills on disk: %d   Rejected skills: %d\n  Trust state: %d trusted, %d approved-pending-trust\n  Pending refinement candidates: %d\n  Review (both queues): M-x gptel-agent-runtime-skill-promote-review"
+                 (or mode 'off)
+                 (or min-n "?")
+                 (or count 0)
+                 (length (or skill-candidates '()))
+                 (length (or approved '()))
+                 (length (or skill-rejected '()))
+                 trusted-count
+                 approved-active-count
+                 (length (or refine-candidates '()))))))
     (gptel-agent-runtime--mission-control-section
      "Failure patterns"
      (if (fboundp 'gptel-agent-runtime-failure-analytics-summary)
