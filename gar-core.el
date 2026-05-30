@@ -349,6 +349,39 @@ patterns are configured.  Useful for A/B testing or offline operation."
   :type 'boolean
   :group 'gptel-agent-runtime)
 
+(defcustom gptel-agent-runtime-planner-similar-trajectories-count 3
+  "Number of past similar trajectories to inject into the planner prompt.
+
+This is the bridge between the SQLite/FTS5/cosine trajectory archive
+(`gar-memory-sqlite') and the planner.  Each new goal triggers a top-K
+search; the top hits land in the planner prompt as `SIMILAR PAST GOALS'
+context.  Set to 0 to disable injection without losing the underlying
+index."
+  :type 'integer
+  :safe #'integerp
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-planner-similar-trajectories-enabled t
+  "When nil, the planner does not consult the past-trajectory archive."
+  :type 'boolean
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-planner-similar-trajectories-strategy 'similar
+  "Search strategy used to find prior trajectories for the planner.
+
+- `similar': cosine similarity over Ollama embeddings (best quality
+   when an embeddings model is reachable; needs `gar-memory.--ollama-
+   embedding'); falls back to `lexical' when embeddings are
+   unavailable.
+- `lexical': FTS5 / LIKE keyword search.  Always available when SQLite
+   is on.
+- `off': same as setting `--planner-similar-trajectories-enabled' to
+   nil (kept for symmetry with other strategy defcustoms)."
+  :type '(choice (const :tag "Cosine similarity (Ollama embeddings)" similar)
+                 (const :tag "Lexical keyword search (FTS5/LIKE)" lexical)
+                 (const :tag "Off" off))
+  :group 'gptel-agent-runtime)
+
 (defcustom gptel-agent-runtime-memory-retrieval-method 'lexical
   "Memory retrieval method.
 `lexical' uses local keyword scoring. `ollama-embeddings' asks Ollama for
