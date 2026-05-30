@@ -138,6 +138,90 @@ sections AND the M-x report hint."
                 (should (> (buffer-size) 20)))))
         (when (get-buffer buf-name) (kill-buffer buf-name))))))
 
+;; ============================================================================
+;; Followup: remediation suggestions (failure -> action)
+;; ============================================================================
+
+(ert-deftest gar-failure-analytics-suggestion-specific-tool-wins ()
+  "Lookup prefers (REASON . TOOL) over the (REASON . nil) generic."
+  (let ((gptel-agent-runtime-failure-remediation-suggestions
+         '((("foo" . "tool-A") . "specific advice")
+           (("foo" . nil)      . "generic advice"))))
+    (should (string= "specific advice"
+                     (gptel-agent-runtime-failure-remediation-suggestion
+                      "foo" "tool-A")))))
+
+(ert-deftest gar-failure-analytics-suggestion-falls-back-to-generic ()
+  (let ((gptel-agent-runtime-failure-remediation-suggestions
+         '((("foo" . nil) . "generic advice"))))
+    (should (string= "generic advice"
+                     (gptel-agent-runtime-failure-remediation-suggestion
+                      "foo" "any-tool")))
+    (should (string= "generic advice"
+                     (gptel-agent-runtime-failure-remediation-suggestion
+                      "foo" nil)))))
+
+(ert-deftest gar-failure-analytics-suggestion-nil-when-no-entry ()
+  (let ((gptel-agent-runtime-failure-remediation-suggestions
+         '((("known" . nil) . "known advice"))))
+    (should-not (gptel-agent-runtime-failure-remediation-suggestion
+                 "unknown-reason" "any"))))
+
+(ert-deftest gar-failure-analytics-top-tool-for-reason-picks-most-frequent ()
+  (let ((failures (list (list :reason "not found" :tool "set_deadline")
+                        (list :reason "not found" :tool "set_deadline")
+                        (list :reason "not found" :tool "read_file")
+                        (list :reason "ambiguous heading" :tool "change_todo_state"))))
+    (should (string= "set_deadline"
+                     (gptel-agent-runtime--failure-analytics-top-tool-for-reason
+                      "not found" failures)))))
+
+(ert-deftest gar-failure-analytics-summary-injects-suggestion-arrow ()
+  "When a failure's top reason+tool has a suggestion, the summary
+includes a `→ <suggestion>' line beneath the count."
+  (let ((gptel-agent-runtime--last-verifier-verdicts
+         (list (cons "ts1"
+                     (list :passed nil :tool "set_deadline"
+                           :reason "Heading not found in reminders.org"
+                           :step "x"))))
+        (gptel-agent-runtime--trajectories nil))
+    (let ((s (gptel-agent-runtime-failure-analytics-summary)))
+      (should (string-match-p "not found" s))
+      (should (string-match-p "→" s))
+      (should (string-match-p "org-agenda-files" s)))))
+
+(ert-deftest gar-failure-analytics-summary-no-arrow-when-no-suggestion ()
+  "Reasons without a registered suggestion render the count alone --
+no spurious `→' line."
+  (let ((gptel-agent-runtime--last-verifier-verdicts
+         (list (cons "ts1"
+                     (list :passed nil :tool "weird_tool"
+                           :reason "Some genuinely unexpected condition"
+                           :step "x"))))
+        (gptel-agent-runtime--trajectories nil)
+        ;; Empty the suggestion alist so "other" has no match.
+        (gptel-agent-runtime-failure-remediation-suggestions nil))
+    (let ((s (gptel-agent-runtime-failure-analytics-summary)))
+      (should-not (string-match-p "→" s)))))
+
+(ert-deftest gar-failure-analytics-report-includes-suggested-line ()
+  (let ((gptel-agent-runtime--last-verifier-verdicts
+         (list (cons "ts1"
+                     (list :passed nil :tool "set_deadline"
+                           :reason "Heading not found in reminders.org"
+                           :step "x"))))
+        (gptel-agent-runtime--trajectories nil)
+        (buf-name "*gar-failure-test-buf-sugg*"))
+    (let ((gptel-agent-runtime-failure-report-buffer-name buf-name))
+      (unwind-protect
+          (progn
+            (gptel-agent-runtime-failure-report)
+            (with-current-buffer buf-name
+              (let ((content (buffer-string)))
+                (should (string-match-p "Suggested:" content))
+                (should (string-match-p "org-agenda-files" content)))))
+        (when (get-buffer buf-name) (kill-buffer buf-name))))))
+
 (provide 'gar-failure-analytics-test)
 
 ;;; gar-failure-analytics-test.el ends here

@@ -110,6 +110,50 @@ in-memory ring is already capped at 200 (per
   "Regexps applied to verdict/error text to bucket failures.
 Order matters -- the first matching pattern wins, so put more
 specific patterns earlier.")
+
+(defcustom gptel-agent-runtime-failure-remediation-suggestions
+  '((("not found"
+      . "set_deadline")
+     . "Heading lives in a file not in `org-agenda-files'. Add it via M-: (add-to-list 'org-agenda-files \"/path/to/file.org\").")
+    (("not found"
+      . "change_todo_state")
+     . "Heading lives in a file not in `org-agenda-files'. Add it via M-: (add-to-list 'org-agenda-files \"/path/to/file.org\").")
+    (("not found"
+      . "add_tag")
+     . "Heading lives in a file not in `org-agenda-files'. Add it via M-: (add-to-list 'org-agenda-files \"/path/to/file.org\").")
+    (("not found"
+      . "read_file")
+     . "File path may be wrong. Use M-x list-buffers to see open buffers, or find-file with completion.")
+    (("ambiguous heading" . nil)
+     . "Two or more headings share the same text. Re-run with a more specific heading or include the file path explicitly.")
+    (("policy denied" . nil)
+     . "Current policy preset blocked the action. Inspect M-x gptel-agent-runtime-mission-control under Policy, then switch presets via M-x gptel-agent-runtime-apply-policy-preset.")
+    (("void function/symbol" . nil)
+     . "Missing function or variable in scope. Check if a feature needs (require ...) or a host-config function is undefined.")
+    (("schema violation" . nil)
+     . "Tool was called with wrong argument types. Inspect the tool's :args spec via M-x describe-function on the tool's underlying lambda.")
+    (("timeout" . nil)
+     . "Model response took too long. For local Ollama, first call after 5min idle reloads the model (slow). For verifier-specific timeouts, raise gptel-agent-runtime-verifier-budget-ms.")
+    (("path protected" . nil)
+     . "Path is in my/gptel-protected-files. Either move the file out of the protected list or pick a different destination.")
+    (("incomplete answer" . nil)
+     . "Model summarised tool output instead of relaying it. Consider routing this query class to a more instruction-faithful model via gptel-agent-runtime-high-fidelity-model + matching pattern in -high-fidelity-patterns.")
+    (("quarantined" . nil)
+     . "Step arguments came from un-promoted quarantined evidence. Run M-x gptel-agent-runtime-promote-evidence on the relevant evidence first."))
+  "PR 18-followup: human-readable remediation suggestions per failure pattern.
+
+Alist keyed on (REASON . TOOL) with the REASON labels matching
+`--failure-analytics-reason-patterns' and TOOL being either a
+specific tool name string or nil (matches any tool).  The lookup
+in `--failure-remediation-suggestion' tries the specific
+(REASON . TOOL) pair first, then falls back to (REASON . nil).
+
+Customise to add or override suggestions for your own workflow."
+  :type '(alist :key-type (cons (string :tag "Reason label")
+                                (choice (const :tag "Any tool" nil)
+                                        (string :tag "Specific tool")))
+                :value-type (string :tag "Suggestion"))
+  :group 'gptel-agent-runtime)
 #+end_src
 
 * Aggregation
@@ -220,27 +264,71 @@ Suitable for both the mission-control summary and the detailed report."
 * Dashboard summary text
 
 #+begin_src emacs-lisp
+(defun gptel-agent-runtime-failure-remediation-suggestion (reason &optional tool)
+  "Look up a remediation suggestion for REASON (and optional TOOL).
+
+Tries (REASON . TOOL) first, falls back to (REASON . nil) so a
+suggestion that applies regardless of tool still matches.  Returns
+the suggestion string or nil when no entry exists."
+  (or (and tool
+           (alist-get (cons reason tool)
+                      gptel-agent-runtime-failure-remediation-suggestions
+                      nil nil #'equal))
+      (alist-get (cons reason nil)
+                 gptel-agent-runtime-failure-remediation-suggestions
+                 nil nil #'equal)))
+
+(defun gptel-agent-runtime--failure-analytics-top-tool-for-reason (reason failures)
+  "Return the most-failing TOOL name for REASON among FAILURES, or nil."
+  (let ((counts (make-hash-table :test #'equal)))
+    (dolist (f failures)
+      (when (equal reason (plist-get f :reason))
+        (let ((tool (or (plist-get f :tool) "<unknown>")))
+          (puthash tool (1+ (gethash tool counts 0)) counts))))
+    (let (best best-count)
+      (maphash (lambda (k v)
+                 (when (or (null best) (> v best-count))
+                   (setq best k best-count v)))
+               counts)
+      best)))
+
 (defun gptel-agent-runtime-failure-analytics-summary ()
   "Return a multi-line string for the mission-control `Failure
-patterns' section."
+patterns' section.  Each top reason gets a `→ <suggestion>' line when
+a remediation is registered in `failure-remediation-suggestions'."
   (let* ((stats (gptel-agent-runtime-failure-analytics-stats))
          (total (plist-get stats :total))
          (by-tool (plist-get stats :by-tool))
          (by-reason (plist-get stats :by-reason))
-         (format-line
+         (all-failures (gptel-agent-runtime--failure-analytics-all-failures))
+         (format-tool-line
           (lambda (pair)
-            (format "    %-28s  %d" (car pair) (cdr pair)))))
+            (format "    %-28s  %d" (car pair) (cdr pair))))
+         (format-reason-line
+          (lambda (pair)
+            (let* ((reason (car pair))
+                   (count (cdr pair))
+                   (top-tool
+                    (gptel-agent-runtime--failure-analytics-top-tool-for-reason
+                     reason all-failures))
+                   (suggestion
+                    (gptel-agent-runtime-failure-remediation-suggestion
+                     reason top-tool)))
+              (concat
+               (format "    %-28s  %d" reason count)
+               (when suggestion
+                 (format "\n      → %s" suggestion)))))))
     (if (zerop total)
         "  (no failures recorded yet -- the substrate is healthy or empty)"
       (concat
        (format "  Total recent failures: %d\n" total)
        "  By tool:\n"
        (if by-tool
-           (mapconcat format-line by-tool "\n")
+           (mapconcat format-tool-line by-tool "\n")
          "    (no per-tool data)")
        "\n  By reason:\n"
        (if by-reason
-           (mapconcat format-line by-reason "\n")
+           (mapconcat format-reason-line by-reason "\n")
          "    (no per-reason data)")
        "\n  Report: M-x gptel-agent-runtime-failure-report"))))
 #+end_src
@@ -276,7 +364,17 @@ trajectory + verifier-verdict ring.  Read-only buffer."
         (insert "\nBy reason:\n")
         (if (plist-get stats :by-reason)
             (dolist (pair (plist-get stats :by-reason))
-              (insert (format "  %-30s  %d\n" (car pair) (cdr pair))))
+              (let* ((reason (car pair))
+                     (count (cdr pair))
+                     (top-tool
+                      (gptel-agent-runtime--failure-analytics-top-tool-for-reason
+                       reason failures))
+                     (suggestion
+                      (gptel-agent-runtime-failure-remediation-suggestion
+                       reason top-tool)))
+                (insert (format "  %-30s  %d\n" reason count))
+                (when suggestion
+                  (insert (format "    Suggested: %s\n" suggestion)))))
           (insert "  (none)\n"))
         (insert "\nRecent failure messages (last 20):\n\n")
         (dolist (f (cl-subseq failures 0 (min 20 (length failures))))
