@@ -279,6 +279,240 @@ flowchart LR
     Mission --> Reports
 ```
 
+## When Each Flow Runs
+
+This section is the "conditions legend" for the diagrams above.
+
+### Package Load
+
+Runs when Emacs loads `gptel-agent-runtime.el`, normally through the private
+Emacs setup file or package installation.
+
+Conditions:
+
+- Always requires the modules in the master load order.
+- Forwards a pre-bound `my/data-dir` into
+  `gptel-agent-runtime-data-directory` when present.
+- Activates `gar-response-executor-mode` when that function is available.
+- Selects the default local Ollama model only when
+  `gptel-agent-runtime-ollama-backend` is already registered.
+- Enables global gptel tools after `gptel` itself is loaded.
+- Applies `gptel-agent-runtime-chat-router-startup-mode`, whose default is
+  `off`; use `ask` or `auto` if chat-to-swarm should be active after startup.
+
+### Normal gptel Chat
+
+Runs when the user calls `gptel-send` and the chat router does not take over.
+
+Conditions:
+
+- Always available when gptel is loaded.
+- Workspace context is injected only when
+  `gptel-agent-runtime-context-enabled` is non-nil.
+- Model-router switching happens only when
+  `gptel-agent-runtime-model-router-enabled` is non-nil.
+- Native gptel tools run only when the active buffer has `gptel-use-tools`
+  enabled and `gptel-tools` is non-empty, and the backend/model actually emits
+  tool calls.
+- Response Executor post-processing runs only after a model response arrives
+  and `gar-response-executor-mode` is active.
+
+Normal chat stays normal when any of these are true:
+
+- `gptel-agent-runtime-enabled` is nil.
+- `gptel-agent-runtime-chat-router-enabled` is nil.
+- `gptel-agent-runtime-chat-router-mode` is `off`.
+- The request is classified as a capability/status question.
+- The chat-router score is below `gptel-agent-runtime-chat-router-min-score`.
+- Router mode is `ask` and the user declines.
+
+### Response Executor
+
+Runs after a gptel response, not before the model answers.
+
+Conditions:
+
+- `gar-response-executor-mode` must be active.
+- It only does work when the response contains recognized executable or
+  renderable artifacts.
+- Babel execution requires a supported Org Babel language and local executable
+  dependencies such as `gnuplot` when that language needs them.
+- AUTORUN Elisp runs only for blocks marked in the expected AUTORUN shape and
+  allowed by the executor's safety settings.
+- File-output and inline-image behavior requires a block/link that names an
+  output file.
+- Repair hooks are narrow compatibility paths for known local-model mistakes;
+  they do not make arbitrary prose executable.
+
+### Chat-To-Swarm Routing
+
+Runs inside the gptel-send advice before ordinary chat is sent.
+
+Conditions:
+
+- `gptel-agent-runtime-enabled` must be non-nil.
+- `gptel-agent-runtime-chat-router-enabled` must be non-nil.
+- `gptel-agent-runtime-chat-router-mode` must be `auto` or `ask`.
+- The latest request text must not be a capability/status question.
+- The chat-router score must meet or exceed
+  `gptel-agent-runtime-chat-router-min-score`.
+- In `auto` mode the runtime starts an autonomous session immediately.
+- In `ask` mode the runtime asks before starting.
+- In `off` mode or below threshold, the request remains normal gptel chat.
+
+The router score rises for prompts that look like implementation work,
+research, multi-step workflow, file/org changes, planning, review, or tool-heavy
+tasks.
+
+### Manual Autonomous Session
+
+Runs when the user explicitly calls `M-x gptel-agent-runtime-start`.
+
+Conditions:
+
+- Does not require chat-router activation.
+- Uses the provided goal, role, and process if supplied.
+- Falls back to `gptel-agent-runtime-default-role` and
+  `gptel-agent-runtime-default-process`.
+- Stops after a terminal state or after `gptel-agent-runtime-max-iterations`.
+
+### Autonomous Planning
+
+Runs at the start of an autonomous session and again whenever reflection asks
+to continue, retry, or replan.
+
+Conditions:
+
+- Workspace observation is always attempted, but details depend on available
+  buffers/files.
+- Similar trajectory context is included only when the relevant planner
+  trajectory settings are enabled and there is matching history.
+- Recent handover context is included only when
+  `gptel-agent-runtime-planner-handover-enabled` is non-nil and trajectories
+  exist.
+- Matching playbooks are included only when playbook routing finds matches.
+- Model routing inside the session can switch backends only when matching
+  profiles exist in `gptel-agent-runtime-backends`.
+- Plan review runs only when `gptel-agent-runtime-enable-plan-review` is
+  non-nil and the plan risk meets `gptel-agent-runtime-plan-review-risk-threshold`.
+
+### Worker And Parallel Execution
+
+Runs after a plan exists and the loop selects executable steps.
+
+Conditions:
+
+- A step can run only after policy allows it or the user confirms it.
+- Parallel worker dispatch requires `gptel-agent-runtime-enable-parallel-workers`.
+- Safe/read tools are eligible when their tool names are in
+  `gptel-agent-runtime-parallel-safe-tool-names`.
+- Mutating tools are eligible for parallel execution only when
+  `gptel-agent-runtime-enable-parallel-mutations` is non-nil, the tool is in
+  `gptel-agent-runtime-parallel-mutation-tool-names`, policy allows it, and
+  target paths do not conflict.
+- Concurrency is capped by `gptel-agent-runtime-max-parallel-workers`.
+- Failed/cancelled workers can be retried up to
+  `gptel-agent-runtime-worker-max-retries`.
+
+### Tool Safety
+
+Runs before every autonomous tool/action step.
+
+Conditions:
+
+- Capability enforcement runs when
+  `gptel-agent-runtime-capability-enforcement-enabled` is non-nil.
+- Tool argument schema validation runs when the tool has an `:arg-schema`.
+- Protected path and allowed write-root checks run for steps with path-like
+  arguments.
+- Blocked shell and placeholder checks run for command/code-like arguments.
+- Quarantine pre-flight runs only when
+  `gptel-agent-runtime-quarantine-pre-flight-enabled` is non-nil.
+- Per-tool policy applies when `gptel-agent-runtime-policy-enabled` is non-nil.
+- The skeptic runs only for allowed steps whose risk/capabilities match
+  `gptel-agent-runtime-skeptic-trigger-risks` or
+  `gptel-agent-runtime-skeptic-trigger-caps`, and only when
+  `gptel-agent-runtime-skeptic-enabled` is non-nil.
+- Confirmation is requested when the policy/risk decision requires it, or when
+  a high-risk skeptic verdict escalates the decision.
+
+### Verification And Retry
+
+Runs after a tool/action result is observed.
+
+Conditions:
+
+- Primary verification runs according to `gptel-agent-runtime-verifier-mode`.
+  `off` disables it, `rule-based` uses deterministic checks, and model modes
+  can ask a verifier model.
+- Verification applies only to risks listed in
+  `gptel-agent-runtime-verifier-trigger-risks`.
+- Completeness verification is separate and runs only when
+  `gptel-agent-runtime-verifier-completeness-mode` is not `off`, the tool is in
+  `gptel-agent-runtime-verifier-completeness-trigger-tools`, and prior tool
+  output contains enough items to compare against.
+- Retry preparation happens only when the verdict failed, has a correction, and
+  the step has not exceeded `gptel-agent-runtime-verifier-max-retries`.
+- Final failures are recorded for failure analytics and future refinement.
+
+### Memory And Trajectories
+
+Runs when sessions are saved, finalized, resumed, or used as planner context.
+
+Conditions:
+
+- Session state is written during loop progress and finalization.
+- Trajectory recording runs on session finalization.
+- SQLite indexing runs only when `gptel-agent-runtime-sqlite-enabled` is
+  non-nil and SQLite support is available.
+- Embedding retrieval runs only when
+  `gptel-agent-runtime-memory-retrieval-method` is `ollama-embeddings` and the
+  embedding model is reachable; otherwise lexical retrieval is used.
+- Embedding cache writes happen only when
+  `gptel-agent-runtime-embedding-cache-enabled` is non-nil.
+
+### Learning Features
+
+These flows are subscribers: they react to finalized sessions or recorded
+trajectories.
+
+Conditions:
+
+- Playbook refinement runs automatically only when
+  `gptel-agent-runtime-refine-mode` is `auto`, the playbook has at least
+  `gptel-agent-runtime-refine-min-runs`, the recent failure rate is at least
+  `gptel-agent-runtime-refine-failure-threshold`, and cooldown allows it.
+- Playbook experiments run only after an experiment is started with
+  `gptel-agent-runtime-experiment-start`; auto-decision requires
+  `gptel-agent-runtime-experiment-auto-decide` and enough samples for the
+  selected decision rule.
+- Skill promotion runs according to `gptel-agent-runtime-skill-promote-mode`.
+  It needs enough similar successful trajectories, no active cooldown, and a
+  cluster similarity above `gptel-agent-runtime-skill-promote-similarity-threshold`.
+- Trust bypass applies only after a skill reaches the configured trust
+  threshold.
+- Transfer-trust auto approval applies only when transfer trust is enabled and
+  enough trusted similar skills match the candidate.
+- Failure analytics updates when verifier verdicts or failed trajectories
+  exist; reports are visible on demand and in mission control.
+
+### Event Pump And Observability
+
+Runs whenever code calls `gptel-agent-runtime-emit-event`.
+
+Conditions:
+
+- Every non-tick event advances the monotonic tick counter.
+- Event log writes happen only when `gptel-agent-runtime-event-log-enabled` is
+  non-nil; write failures are ignored when
+  `gptel-agent-runtime-event-log-ignore-write-errors` is non-nil.
+- Swarm trace updates when live trace display is enabled.
+- Mission control is visible only when opened, but it reads the latest state
+  produced by events, verifier/skeptic results, canaries, experiments, skill
+  promotion, and failure analytics.
+- Idle-pump ticks occur only when `gptel-agent-runtime-idle-pump-enabled` is
+  non-nil and the idle timer has been started.
+
 ## Main Components
 
 ### Backend and Model Layer
