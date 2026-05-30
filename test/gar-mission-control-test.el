@@ -18,6 +18,23 @@
                   (re-search-forward (concat "=== " (regexp-quote s) " ===")
                                      nil t)))))))
 
+(ert-deftest gar-mission-control-renders-skill-promotion-section ()
+  "PR 16: the dashboard surfaces the skill-promotion subsystem with
+pending / approved / rejected counts and the review M-x hint."
+  (gptel-agent-runtime-mission-control)
+  (with-current-buffer gptel-agent-runtime-mission-control-buffer-name
+    (should (save-excursion
+              (goto-char (point-min))
+              (re-search-forward "=== Skill promotion ===" nil t)))
+    (should (save-excursion
+              (goto-char (point-min))
+              (re-search-forward "Pending candidates:" nil t)))
+    (should (save-excursion
+              (goto-char (point-min))
+              (re-search-forward
+               "M-x gptel-agent-runtime-skill-promote-review"
+               nil t)))))
+
 (ert-deftest gar-mission-control-renders-with-trajectories-present ()
   "Regression: rendering with a non-empty trajectory ring does NOT error.
 The Trajectories section once used `t' as a loop variable, which fails

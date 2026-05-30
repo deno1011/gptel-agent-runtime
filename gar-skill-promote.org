@@ -391,30 +391,165 @@ and writes."
              :taint 'trusted)
             file))))))
 
+;; ---------------------------------------------------------------------------
+;; Review / approve / reject flow (PR 16)
+;; ---------------------------------------------------------------------------
+
+(defcustom gptel-agent-runtime-skill-promote-review-buffer-name
+  "*gptel-agent-skill-promote-review*"
+  "Buffer name for the tabulated-list review of auto-synth candidates."
+  :type 'string
+  :group 'gptel-agent-runtime)
+
+(defun gptel-agent-runtime--skill-promote-rejected-directory ()
+  "Return (and create) the auto-synth/rejected/ subdirectory.
+Rejected candidates move here so they're out of the active review
+list but still recoverable for inspection."
+  (let ((dir (expand-file-name
+              "rejected/"
+              (gptel-agent-runtime--skill-promote-directory))))
+    (unless (file-directory-p dir) (make-directory dir t))
+    dir))
+
+(defun gptel-agent-runtime--skill-promote-candidate-files ()
+  "Return the list of candidate file paths in the auto-synth directory.
+Excludes the rejected/ subdirectory."
+  (let ((dir (gptel-agent-runtime--skill-promote-directory)))
+    (when (file-directory-p dir)
+      (cl-remove-if
+       (lambda (f) (file-directory-p f))
+       (directory-files dir t "\\.md\\'")))))
+
+(defun gptel-agent-runtime--skill-promote-rows ()
+  "Build `tabulated-list-entries' for the review buffer."
+  (let ((files (gptel-agent-runtime--skill-promote-candidate-files)))
+    (mapcar
+     (lambda (file)
+       (let* ((name (file-name-base file))
+              (mtime (format-time-string
+                      "%Y-%m-%d %H:%M"
+                      (file-attribute-modification-time
+                       (file-attributes file))))
+              (size-bytes (file-attribute-size (file-attributes file)))
+              (size (cond ((< size-bytes 1024) (format "%d B" size-bytes))
+                          ((< size-bytes 1048576)
+                           (format "%.1f KB" (/ size-bytes 1024.0)))
+                          (t (format "%.1f MB"
+                                     (/ size-bytes 1048576.0))))))
+         (list file (vector name mtime size))))
+     (or files '()))))
+
+(defun gptel-agent-runtime--skill-promote-current-file ()
+  "Return the candidate file path on the current line, or signal."
+  (or (tabulated-list-get-id)
+      (user-error "No candidate on this line")))
+
+(defun gptel-agent-runtime--skill-promote-load-skill (file)
+  "Read FILE as a Markdown skill and return the plist, or nil on error."
+  (when (and (fboundp 'gptel-agent-runtime-skill-from-file)
+             (file-exists-p file))
+    (condition-case _err
+        (gptel-agent-runtime-skill-from-file file)
+      (error nil))))
+
 ;;;###autoload
-(defun gptel-agent-runtime-list-auto-synth-skills ()
-  "List the auto-synthesised skill candidates in
-`skills-directory/auto-synth/'."
+(defun gptel-agent-runtime-skill-promote-approve ()
+  "Move the candidate on the current line into the active skills
+directory and (when `skills-md' is loaded) register it as a playbook."
   (interactive)
-  (let* ((dir (gptel-agent-runtime--skill-promote-directory))
-         (files (and (file-directory-p dir)
-                     (directory-files dir t "\\.md\\'")))
-         (buf (get-buffer-create "*gptel-agent-auto-synth-skills*")))
+  (let* ((src (gptel-agent-runtime--skill-promote-current-file))
+         (skills-dir (or (and (boundp 'gptel-agent-runtime-skills-directory)
+                              gptel-agent-runtime-skills-directory)
+                         user-emacs-directory))
+         (dst (expand-file-name (file-name-nondirectory src) skills-dir))
+         (skill (gptel-agent-runtime--skill-promote-load-skill src)))
+    (unless (file-directory-p skills-dir) (make-directory skills-dir t))
+    (rename-file src dst t)
+    (when (and skill
+               (fboundp 'gptel-agent-runtime--skills-md-skill->playbook)
+               (fboundp 'gptel-agent-runtime--skills-md-register-playbook))
+      (gptel-agent-runtime--skills-md-register-playbook
+       (gptel-agent-runtime--skills-md-skill->playbook skill)))
+    (gptel-agent-runtime-emit-event
+     'skill-promote-approved
+     :source "skill-promote"
+     :payload (list :file dst
+                    :id (and skill (plist-get skill :id)))
+     :taint 'trusted)
+    (when (derived-mode-p 'gptel-agent-runtime-skill-promote-review-mode)
+      (tabulated-list-revert))
+    (message "Approved: %s -> %s" (file-name-base src) dst)))
+
+;;;###autoload
+(defun gptel-agent-runtime-skill-promote-reject ()
+  "Move the candidate on the current line into the
+auto-synth/rejected/ subdirectory.  Recoverable -- the file
+isn't deleted, just shelved."
+  (interactive)
+  (let* ((src (gptel-agent-runtime--skill-promote-current-file))
+         (dst (expand-file-name (file-name-nondirectory src)
+                                (gptel-agent-runtime--skill-promote-rejected-directory))))
+    (rename-file src dst t)
+    (gptel-agent-runtime-emit-event
+     'skill-promote-rejected
+     :source "skill-promote"
+     :payload (list :file dst)
+     :taint 'trusted)
+    (when (derived-mode-p 'gptel-agent-runtime-skill-promote-review-mode)
+      (tabulated-list-revert))
+    (message "Rejected: %s" (file-name-base src))))
+
+;;;###autoload
+(defun gptel-agent-runtime-skill-promote-view ()
+  "Open the candidate on the current line in a read-only view buffer."
+  (interactive)
+  (let ((src (gptel-agent-runtime--skill-promote-current-file)))
+    (view-file src)))
+
+(defvar gptel-agent-runtime-skill-promote-review-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "a") #'gptel-agent-runtime-skill-promote-approve)
+    (define-key map (kbd "r") #'gptel-agent-runtime-skill-promote-reject)
+    (define-key map (kbd "v") #'gptel-agent-runtime-skill-promote-view)
+    (define-key map (kbd "RET") #'gptel-agent-runtime-skill-promote-view)
+    map)
+  "Keymap for `gptel-agent-runtime-skill-promote-review-mode'.")
+
+(define-derived-mode gptel-agent-runtime-skill-promote-review-mode
+  tabulated-list-mode "GAR-Skill-Promote"
+  "Major mode for reviewing auto-synth skill candidates.
+
+Key bindings (inherited from `tabulated-list-mode' plus this mode's):
+  a    Approve current candidate -- move to skills/ + register as playbook.
+  r    Reject current candidate -- move to skills/auto-synth/rejected/.
+  v    View current candidate in a read-only buffer.
+  RET  Same as v.
+  g    Refresh.
+  q    Quit."
+  (setq tabulated-list-format
+        [("Skill id"     40 t)
+         ("Last modified" 17 t)
+         ("Size"          10 t)])
+  (setq tabulated-list-padding 1)
+  (setq tabulated-list-entries
+        #'gptel-agent-runtime--skill-promote-rows)
+  (tabulated-list-init-header))
+
+;;;###autoload
+(defun gptel-agent-runtime-skill-promote-review ()
+  "Open the tabulated-list reviewer for auto-synth skill candidates."
+  (interactive)
+  (let ((buf (get-buffer-create
+              gptel-agent-runtime-skill-promote-review-buffer-name)))
     (with-current-buffer buf
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        (insert (format "Auto-synth skills directory: %s\n" dir))
-        (insert (format "Candidates: %d\n\n" (length (or files '()))))
-        (dolist (f (or files '()))
-          (insert (format "  %s  (%s)\n"
-                          (file-name-nondirectory f)
-                          (format-time-string
-                           "%Y-%m-%d %H:%M"
-                           (file-attribute-modification-time
-                            (file-attributes f)))))))
-      (goto-char (point-min))
-      (special-mode))
-    (display-buffer buf)))
+      (gptel-agent-runtime-skill-promote-review-mode)
+      (tabulated-list-print))
+    (pop-to-buffer buf)))
+
+;;;###autoload
+(defalias 'gptel-agent-runtime-list-auto-synth-skills
+  #'gptel-agent-runtime-skill-promote-review
+  "Backward-compatible alias for the review UI.")
 
 (when (fboundp 'gptel-agent-runtime-subscribe)
   (gptel-agent-runtime-subscribe

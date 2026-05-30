@@ -206,6 +206,91 @@ candidate is written to disk."
         :created-at "2026-05-30T00:00:00")))
     (should-not called)))
 
+;; ============================================================================
+;; PR 16: review / approve / reject flow
+;; ============================================================================
+
+(defmacro gar-skill-promote-test--with-temp-skills (&rest body)
+  "Run BODY with a fresh skills-directory layout in temp."
+  (declare (indent 0))
+  `(let* ((tmp (make-temp-file "gar-skill-promote-review-" t))
+          (gptel-agent-runtime-skills-directory tmp)
+          (auto-dir (expand-file-name "auto-synth/" tmp)))
+     (make-directory auto-dir t)
+     (unwind-protect
+         (progn ,@body)
+       (when (file-directory-p tmp)
+         (delete-directory tmp t)))))
+
+(defun gar-skill-promote-test--seed-candidate (id)
+  "Write a tiny markdown skill candidate under auto-synth/ and return path."
+  (let* ((auto-dir (gptel-agent-runtime--skill-promote-directory))
+         (file (expand-file-name (format "%s.md" id) auto-dir))
+         (skill (list :id id
+                      :summary (format "Test candidate %s" id)
+                      :triggers '("test")
+                      :steps '((:title "Step 1"
+                                :tool "direct_response")))))
+    (gptel-agent-runtime-skill-to-file skill file)
+    file))
+
+(ert-deftest gar-skill-promote-review-rows-lists-candidates ()
+  "Rows builder lists every .md file under auto-synth/ excluding
+the rejected/ subdirectory."
+  (gar-skill-promote-test--with-temp-skills
+    (gar-skill-promote-test--seed-candidate "auto-one")
+    (gar-skill-promote-test--seed-candidate "auto-two")
+    ;; Seed a rejected file too -- it must NOT show up.
+    (let ((rej-dir (gptel-agent-runtime--skill-promote-rejected-directory)))
+      (with-temp-file (expand-file-name "auto-old.md" rej-dir)
+        (insert "---\nid: auto-old\n---\n# old\n")))
+    (let ((rows (gptel-agent-runtime--skill-promote-rows)))
+      (should (= 2 (length rows))))))
+
+(ert-deftest gar-skill-promote-reject-moves-to-rejected-dir ()
+  (gar-skill-promote-test--with-temp-skills
+    (let* ((file (gar-skill-promote-test--seed-candidate "auto-rejectme")))
+      (cl-letf (((symbol-function 'gptel-agent-runtime--skill-promote-current-file)
+                 (lambda () file)))
+        (gptel-agent-runtime-skill-promote-reject))
+      (should-not (file-exists-p file))
+      (let ((rej (expand-file-name
+                  "auto-rejectme.md"
+                  (gptel-agent-runtime--skill-promote-rejected-directory))))
+        (should (file-exists-p rej))))))
+
+(ert-deftest gar-skill-promote-approve-moves-and-registers ()
+  "Approve moves the file out of auto-synth and into the skills-dir
+root AND registers a playbook with the same id."
+  (gar-skill-promote-test--with-temp-skills
+    (let* ((file (gar-skill-promote-test--seed-candidate "auto-keep"))
+           (gptel-agent-runtime-playbook-registry nil))
+      (cl-letf (((symbol-function 'gptel-agent-runtime--skill-promote-current-file)
+                 (lambda () file)))
+        (gptel-agent-runtime-skill-promote-approve))
+      (should-not (file-exists-p file))
+      (let ((moved (expand-file-name
+                    "auto-keep.md"
+                    gptel-agent-runtime-skills-directory)))
+        (should (file-exists-p moved)))
+      (let ((registered (cl-find "auto-keep"
+                                  gptel-agent-runtime-playbook-registry
+                                  :key #'gptel-agent-runtime-playbook-id
+                                  :test #'equal)))
+        (should registered)))))
+
+(ert-deftest gar-skill-promote-review-mode-sets-tabulated-list-format ()
+  (gar-skill-promote-test--with-temp-skills
+    (let ((buf (get-buffer-create "*gar-skill-review-test*")))
+      (unwind-protect
+          (with-current-buffer buf
+            (gptel-agent-runtime-skill-promote-review-mode)
+            (should (vectorp tabulated-list-format))
+            (should (= 3 (length tabulated-list-format)))
+            (should (string= "Skill id"
+                             (car (aref tabulated-list-format 0)))))
+        (when (buffer-live-p buf) (kill-buffer buf))))))
+
 (provide 'gar-skill-promote-test)
 
 ;;; gar-skill-promote-test.el ends here

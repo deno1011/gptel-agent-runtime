@@ -390,6 +390,41 @@ status, and the registered agent capability allowlist."
                            0 (min 5 (length gptel-agent-runtime--last-refinements)))
                 "\n"))))
     (gptel-agent-runtime--mission-control-section
+     "Skill promotion"
+     (let* ((mode (and (boundp 'gptel-agent-runtime-skill-promote-mode)
+                       gptel-agent-runtime-skill-promote-mode))
+            (min-n (and (boundp 'gptel-agent-runtime-skill-promote-min-successes)
+                        gptel-agent-runtime-skill-promote-min-successes))
+            (count (and (boundp 'gptel-agent-runtime--skill-promote-trajectory-count)
+                        gptel-agent-runtime--skill-promote-trajectory-count))
+            (dir (and (fboundp 'gptel-agent-runtime--skill-promote-directory)
+                      (ignore-errors
+                        (gptel-agent-runtime--skill-promote-directory))))
+            (candidates (and dir (file-directory-p dir)
+                             (cl-remove-if
+                              #'file-directory-p
+                              (directory-files dir t "\\.md\\'"))))
+            (rejected-dir (and (fboundp 'gptel-agent-runtime--skill-promote-rejected-directory)
+                               (ignore-errors
+                                 (gptel-agent-runtime--skill-promote-rejected-directory))))
+            (rejected (and rejected-dir (file-directory-p rejected-dir)
+                           (cl-remove-if
+                            #'file-directory-p
+                            (directory-files rejected-dir t "\\.md\\'"))))
+            (skills-dir (and (boundp 'gptel-agent-runtime-skills-directory)
+                             gptel-agent-runtime-skills-directory))
+            (approved (and skills-dir (file-directory-p skills-dir)
+                           (cl-remove-if
+                            #'file-directory-p
+                            (directory-files skills-dir t "\\.md\\'")))))
+       (format "  Mode: %s   Min cluster: %s   Trajectories observed: %s\n  Pending candidates: %d   Approved skills: %d   Rejected: %d\n  Review: M-x gptel-agent-runtime-skill-promote-review"
+               (or mode 'off)
+               (or min-n "?")
+               (or count 0)
+               (length (or candidates '()))
+               (length (or approved '()))
+               (length (or rejected '())))))
+    (gptel-agent-runtime--mission-control-section
      "Memory index (SQLite)"
      (let ((stats (and (fboundp 'gptel-agent-runtime-sqlite-stats)
                        (gptel-agent-runtime-sqlite-stats))))
