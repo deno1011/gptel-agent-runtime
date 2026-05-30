@@ -4,9 +4,9 @@
 Master entrypoint for =deno1011/gptel-agent-runtime=. After the
 2026-05-27 monolith split this file is a thin loader: it carries the
 package header, declares the host =my/data-dir= fallback, requires the
-eleven =gar-*= modules in dependency order, runs the small tail-of-load
-wiring (Ollama-active-model selection and global =gptel-tools= setup),
-and =(provide)='s the package feature.
+=gar-*= modules in dependency order, runs the small tail-of-load wiring
+(Ollama-active-model selection, Response Executor activation, and global
+=gptel-tools= setup), and =(provide)='s the package feature.
 
 * Architecture Summary
 
@@ -61,6 +61,37 @@ isolated byte-compilation stays warning-free.
 - Validate the tangled =.el= with =check-parens= and a batch load smoke
   test before committing.
 - Keep =main= and =stable= synced unless =stable= intentionally diverges.
+
+** Complexity map
+
+The split is not mostly ceremony: the runtime now contains several
+independent subsystems that only make sense when they can evolve in
+separate modules.
+
+- =gar-core=, =gar-substrate=, =gar-policy=, =gar-tools=, =gar-loop=, and
+  =gar-agents= are the core runtime. Without them there is no typed state,
+  event pump, safety gate, tool registry, execution loop, or routing layer.
+- =gar-backend=, =gar-directives=, =gar-context=, and =gar-executor= are
+  gptel integration helpers. These are user-visible and could stay enabled
+  even if the autonomous runtime is off.
+- =gar-memory=, =gar-trajectory=, =gar-memory-sqlite=,
+  =gar-playbook-refine=, =gar-playbook-experiment=, =gar-skills-md=,
+  =gar-skill-promote=, and =gar-failure-analytics= form the learning
+  layer. This is where most optional complexity lives: it exists to remember
+  what worked, find similar past runs, refine playbooks, promote durable
+  skills, and explain recurring failures.
+- =gar-quarantine=, =gar-skeptic=, =gar-skeptic-model=, =gar-verifier=,
+  =gar-validator=, and =gar-canaries= are guardrails. They deliberately add
+  lines because they make model/tool execution inspectable instead of
+  trusting raw generated text.
+- =gar-mission-control= is observability and UI: it makes the above state
+  visible in Emacs buffers.
+
+If the goal is fewer lines for daily use, the safest simplification is not
+to merge the files. A better path is to make optional layers lazy or
+feature-gated: keep the core/runtime/gptel integration loaded, and load the
+learning, experiment, SQLite, model-skeptic, canary, and mission-control
+layers only when their defcustoms or commands are used.
 
 * Master entrypoint
 
