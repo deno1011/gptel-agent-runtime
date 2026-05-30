@@ -28,6 +28,27 @@ See also:
   trajectory at finalize time)
 - [[file:gar-loop.org][gar-loop]] (emits =session-finalized=)
 
+<!-- gar:function-reference:start -->
+* Function reference
+
+This section is generated from the Elisp docstrings in this Org file. It is Org prose, not tangled code, so it explains the functions without changing runtime behavior.
+
+- =gptel-agent-runtime--trajectory-shorten-output=: Return TEXT (a string or nil) clipped to the trajectory output max.
+- =gptel-agent-runtime--snapshot-plan-step=: Return a `trajectory-step' snapshot of plan-step STEP.
+- =gptel-agent-runtime--verifier-verdicts-during=: Return verifier verdicts from `--last-verifier-verdicts' whose timestamp falls between START-ISO and END-ISO (string compare on ISO timestamps).
+- =gptel-agent-runtime-trajectory-from-session=: Build a trajectory snapshot of SESSION at finalize time.
+- =gptel-agent-runtime--trajectories-ensure-dir=: Ensure the trajectories directory exists; return its absolute path.
+- =gptel-agent-runtime--trajectory-file=: Return the on-disk file path for TRAJECTORY.
+- =gptel-agent-runtime--save-trajectory=: Persist TRAJECTORY to its on-disk file with the standard state header.
+- =gptel-agent-runtime--prune-trajectory-files=: Trim the on-disk trajectories directory to the configured cap.
+- =gptel-agent-runtime-record-trajectory=: Append TRAJECTORY to the in-memory ring and persist it to disk.
+- =gptel-agent-runtime-load-trajectories=: Read the persisted trajectories from disk into the in-memory ring.
+- =gptel-agent-runtime-trajectories-for-goal=: Return trajectories whose goal contains GOAL-PATTERN as a substring (case-insensitive).
+- =gptel-agent-runtime-trajectory-summary=: Return a short human-readable summary string of TRAJECTORY.
+- =gptel-agent-runtime-show-trajectory-history=: Open a buffer showing the most-recent trajectories.
+- =gptel-agent-runtime--record-trajectory-on-finalize=: Subscriber on `session-finalized': snapshot the active session into a trajectory.
+<!-- gar:function-reference:end -->
+
 * File header
 
 #+begin_src emacs-lisp

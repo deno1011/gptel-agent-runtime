@@ -34,6 +34,18 @@ See also:
 - [[file:gar-agents.org][gar-agents]] (=find-agent "skeptic"= supplies the system prompt at
   call time)
 
+<!-- gar:function-reference:start -->
+* Function reference
+
+This section is generated from the Elisp docstrings in this Org file. It is Org prose, not tangled code, so it explains the functions without changing runtime behavior.
+
+- =gptel-agent-runtime--skeptic-system-prompt=: Return the system prompt used for the model-based skeptic call.
+- =gptel-agent-runtime--skeptic-build-prompt=: Format the user-facing skeptic prompt for one proposed tool call.
+- =gptel-agent-runtime--skeptic-extract-json-object=: Return the first balanced JSON object embedded in TEXT, or nil.
+- =gptel-agent-runtime--skeptic-parse-verdict=: Parse a JSON skeptic verdict from TEXT into the verdict plist shape.
+- =gptel-agent-runtime--skeptic-model-based-verdict=: Synchronously ask a model for a skeptic verdict on this proposed tool call.
+<!-- gar:function-reference:end -->
+
 * File header
 
 #+begin_src emacs-lisp

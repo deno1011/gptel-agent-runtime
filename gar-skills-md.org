@@ -57,6 +57,28 @@ See also:
 - [[file:gar-playbook-refine.org][gar-playbook-refine]] (the refinement layer calls
   =emit-candidate-as-markdown= via =fboundp= when this module is loaded)
 
+<!-- gar:function-reference:start -->
+* Function reference
+
+This section is generated from the Elisp docstrings in this Org file. It is Org prose, not tangled code, so it explains the functions without changing runtime behavior.
+
+- =gptel-agent-runtime--skills-md-trim=: Trim whitespace from S; return nil when empty.
+- =gptel-agent-runtime--skills-md-parse-list-value=: Parse a frontmatter LIST value S.
+- =gptel-agent-runtime--skills-md-parse-frontmatter=: Return a plist parsed from TEXT (the frontmatter body, between ---).
+- =gptel-agent-runtime--skills-md-extract-frontmatter=: If TEXT begins with `---' delimited frontmatter, return (FRONTMATTER .
+- =gptel-agent-runtime--skills-md-extract-elisp-block=: Return the contents of the FIRST ```elisp ...``` fenced block in TEXT, or nil.
+- =gptel-agent-runtime-skill-from-markdown=: Parse TEXT as a markdown skill file.
+- =gptel-agent-runtime-skill-from-file=: Read and parse the markdown skill at FILE.
+- =gptel-agent-runtime--skills-md-format-list=: Format VALUES (a list of strings) for the frontmatter.
+- =gptel-agent-runtime-skill-to-markdown=: Serialize SKILL (a plist) as a markdown skill document.
+- =gptel-agent-runtime-skill-to-file=: Write SKILL (plist) as markdown to FILE.
+- =gptel-agent-runtime--skills-md-skill->playbook=: Convert a SKILL plist into a playbook struct ready for the registry.
+- =gptel-agent-runtime--skills-md-register-playbook=: Add PLAYBOOK to the registry, replacing any entry with the same id.
+- =gptel-agent-runtime-load-skills-from-directory=: Load every .md skill file under `gptel-agent-runtime-skills-directory'.
+- =gptel-agent-runtime-show-skills=: Open a buffer listing all hand-authored skills from the skills directory.
+- =gptel-agent-runtime-emit-candidate-as-markdown=: Write CANDIDATE (a candidate playbook plist) as a markdown sibling of ELISP-FILE.
+<!-- gar:function-reference:end -->
+
 * File header
 
 #+begin_src emacs-lisp

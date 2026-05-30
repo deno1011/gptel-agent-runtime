@@ -29,6 +29,36 @@ See also:
 - [[file:gar-executor.org][gar-executor]] (consumes the raw-tool allow-lists; its raw-tool shim
   reads them through plain symbol lookup at execute time)
 
+<!-- gar:function-reference:start -->
+* Function reference
+
+This section is generated from the Elisp docstrings in this Org file. It is Org prose, not tangled code, so it explains the functions without changing runtime behavior.
+
+- =gptel-agent-runtime-register-tool=: Register tool metadata.
+- =gptel-agent-runtime-find-tool=: Return registered tool metadata for NAME, or nil.
+- =gptel-agent-runtime-tools-by-category=: Return all registered tools in CATEGORY.
+- =gptel-agent-runtime-result-ok=: Create a successful action result.
+- =gptel-agent-runtime-result-error=: Create a failed action result.
+- =gptel-agent-runtime-result-pending-reflection-p=: Return non-nil when RESULT should trigger a reflection step.
+- =gptel-agent-runtime--proposed-tools-directory=: Return (and create) the proposed-tools directory.
+- =gptel-agent-runtime--rejected-tools-directory=: Return (and create) the rejected-tools directory.
+- =gptel-agent-runtime--symbol-allowed-prefix-p=: Return non-nil when SYM's name starts with an allowed prefix.
+- =gptel-agent-runtime--safe-form-violations=: Walk FORM and return a list of (SYMBOL .
+- =gptel-agent-runtime--read-all-forms=: Read all top-level Lisp forms from FILE and return them as a list.
+- =gptel-agent-runtime-propose-tool=: Save a tool proposal under proposed-tools/ and emit a submission event.
+- =gptel-agent-runtime--read-proposal=: Return the proposal plist stored in FILE, or nil when unreadable.
+- =gptel-agent-runtime--locate-emacs-binary=: Return an absolute path to the running Emacs binary, or nil.
+- =gptel-agent-runtime-validate-proposed-tool=: Validate the proposal at FILE through static + subprocess checks.
+- =gptel-agent-runtime-list-proposed-tools=: Return the list of proposed-tool files awaiting review.
+- =gptel-agent-runtime-approve-proposed-tool=: Approve and register the proposed tool from FILE.
+- =gptel-agent-runtime-reject-proposed-tool=: Move FILE to the rejected/ subdirectory.
+- =gptel-agent-runtime-review-proposed-tools=: Open a buffer summarizing proposed tools and their validation status.
+- =gptel-agent-runtime--path-protected-p=: Return non-nil when PATH is protected from agent writes.
+- =gptel-agent-runtime--heading-matches-in-file=: Return list of buffer positions in FILE that match HEADING as a TODO line.
+- =gptel-agent-runtime--resolve-single-heading=: Resolve HEADING in FILE to a single (POSITION .
+- =gptel-agent-runtime--heading-error-string=: Format an error string for a non-`:found' RESOLUTION from `--resolve-single-heading'.
+<!-- gar:function-reference:end -->
+
 * File header
 
 #+begin_src emacs-lisp

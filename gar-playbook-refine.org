@@ -36,6 +36,23 @@ See also:
   =gptel-request= with budget + JSON parse + fallback)
 - [[file:gar-verifier.org][gar-verifier]] (sibling: produces the signal; this module consumes it)
 
+<!-- gar:function-reference:start -->
+* Function reference
+
+This section is generated from the Elisp docstrings in this Org file. It is Org prose, not tangled code, so it explains the functions without changing runtime behavior.
+
+- =gptel-agent-runtime-trajectories-for-playbook=: Return the recent trajectories whose `playbook-ids' contains PLAYBOOK-ID.
+- =gptel-agent-runtime--refine-collect-failure-evidence=: Extract (GOAL FAILED-STEP-TITLE FAILED-TOOL VERIFIER-REASON CORRECTION) from TRAJECTORY when it ended in failure with at least one failed verdict.
+- =gptel-agent-runtime--refine-failure-pattern=: Inspect the recent trajectories of PLAYBOOK-ID for a consistent-failure pattern.
+- =gptel-agent-runtime--refine-cooled-down-p=: Return non-nil when PLAYBOOK-ID was refined recently AND not enough new trajectories have accumulated since then to warrant another refinement.
+- =gptel-agent-runtime--refine-build-prompt=: Format the refinement prompt for PLAYBOOK given PATTERN evidence.
+- =gptel-agent-runtime--refine-parse-candidate=: Parse model RESPONSE text into a candidate playbook plist.
+- =gptel-agent-runtime--refine-call-model=: Synchronously call the refinement model for PLAYBOOK given PATTERN evidence.
+- =gptel-agent-runtime--find-playbook-by-id=: Return the playbook struct for PLAYBOOK-ID, or nil.
+- =gptel-agent-runtime-refine-playbook=: Refine PLAYBOOK-ID.
+- =gptel-agent-runtime--maybe-auto-refine-on-trajectory=: Subscriber on `trajectory-recorded': in auto mode, check each matched playbook against the consistent-failure heuristic and trigger refinement when the pattern is found and cooldown allows.
+<!-- gar:function-reference:end -->
+
 * File header
 
 #+begin_src emacs-lisp

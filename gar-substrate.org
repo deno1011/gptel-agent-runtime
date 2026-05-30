@@ -39,6 +39,43 @@ See also:
 - [[file:gar-executor.org][gar-executor]] (calls into the swarm trace and =emit-event= when
   raw tool calls fire)
 
+<!-- gar:function-reference:start -->
+* Function reference
+
+This section is generated from the Elisp docstrings in this Org file. It is Org prose, not tangled code, so it explains the functions without changing runtime behavior.
+
+- =gptel-agent-runtime--timestamp=: Return an ISO-like local timestamp for runtime state.
+- =gptel-agent-runtime--event-log-directory=: Return the directory containing the append-only event log.
+- =gptel-agent-runtime--event-to-data=: Convert EVENT to printable data.
+- =gptel-agent-runtime--append-event-log-data=: Append printable event DATA to `gptel-agent-runtime-event-log-file'.
+- =gptel-agent-runtime--shorten=: Return TEXT truncated to MAX characters.
+- =gptel-agent-runtime-swarm-buffer=: Return the live swarm activity buffer, creating it when needed.
+- =gptel-agent-runtime-show-swarm=: Display the live swarm activity buffer.
+- =gptel-agent-runtime--payload-text=: Return string value for KEY in PAYLOAD, shortened to MAX.
+- =gptel-agent-runtime--format-swarm-event=: Return a concise live trace line for EVENT.
+- =gptel-agent-runtime--append-swarm-event=: Append EVENT to the live swarm trace buffer.
+- =gptel-agent-runtime--start-swarm-session-buffer=: Initialize the live swarm buffer for SESSION and GOAL.
+- =gptel-agent-runtime--advance-tick=: Advance the OpenClaw substrate tick counter.
+- =gptel-agent-runtime--emit-tick-event=: Emit a `tick' event without re-advancing the tick counter.
+- =gptel-agent-runtime-subscribe=: Subscribe HANDLER to runtime events of EVENT-TYPE.
+- =gptel-agent-runtime-unsubscribe=: Remove HANDLER from subscribers of EVENT-TYPE.
+- =gptel-agent-runtime--dispatch-event=: Dispatch EVENT to all subscribed handlers.
+- =gptel-agent-runtime-show-event-pump=: Open a buffer showing event-pump subscribers and recent dispatched events.
+- =gptel-agent-runtime--idle-pump-tick=: One idle-pump invocation: advance the tick with reason `idle-pump'.
+- =gptel-agent-runtime--start-idle-pump=: Start the idle pump timer if it is not already running.
+- =gptel-agent-runtime--stop-idle-pump=: Cancel the idle pump timer if it is running.
+- =gptel-agent-runtime-toggle-idle-pump=: Toggle the OpenClaw substrate idle pump.
+- =gptel-agent-runtime-make-evidence=: Construct a `gptel-agent-runtime-evidence' record with full provenance.
+- =gptel-agent-runtime--evidence-header-tag=: Return a compact bracketed header tag describing EVIDENCE provenance.
+- =gptel-agent-runtime-trace-evidence=: Open a buffer showing the recent evidence DAG, newest first.
+- =gptel-agent-runtime--state-header=: Return the standard schema header plist for persisted state files.
+- =gptel-agent-runtime--state-header-p=: Return non-nil when FORM looks like a runtime state header plist.
+- =gptel-agent-runtime--read-versioned=: Read the leading state header from FILE and return (HEADER .
+- =gptel-agent-runtime-migrate-state=: Inspect persisted runtime state files for schema compatibility.
+- =gptel-agent-runtime-emit-event=: Emit a runtime event of TYPE and return it.
+- =gptel-agent-runtime-list-events=: Return recent runtime events, newest first.
+<!-- gar:function-reference:end -->
+
 * File header
 
 #+begin_src emacs-lisp

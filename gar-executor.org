@@ -28,6 +28,72 @@ See also:
   inline-rendering repair when the model prints search-instructions
   instead of running a real search)
 
+<!-- gar:function-reference:start -->
+* Function reference
+
+This section is generated from the Elisp docstrings in this Org file. It is Org prose, not tangled code, so it explains the functions without changing runtime behavior.
+
+- =gar-response-executor--find-babel-blocks=: Find all Babel code blocks in the current (possibly narrowed) region.
+- =gar-response-executor--lang-extension=: File extension for LANG (used for temp file).
+- =gar-response-executor--lang-command=: Shell invocation for language LANG with file FILE.
+- =gar-response-executor--do-execute=: Write BODY to a temp file, call the matching language CLI, log in *Assistant Execution Results* and delete the temp file.
+- =gar-response-executor--file-output-block-p=: Return non-nil when BLOCK should be executed by Org Babel for file output.
+- =gar-response-executor--execute-org-babel-file-block=: Execute BLOCK with Org Babel and display generated images inline.
+- =gar-response-executor--execute-babel-block=: Execute a Babel block.
+- =gar-response-executor--find-commands=: Find commands in tags of the form '<!-- exec: COMMAND -->'.
+- =gar-response-executor-run-command=: Execute COMMAND in the shell.
+- =gar-response-executor--find-autorun-blocks=: Find elisp blocks whose header contains the AUTORUN tag.
+- =gar-response-executor--whitelist-allows-p=: Check whether CODE (string) only calls functions from `gar-response-executor-allowed-functions'.
+- =gar-response-executor--safe-eval=: Evaluate CODE (string) with error handling and logging.
+- =gar-executor--tutorial-plot-response-p=: Return non-nil when the narrowed response looks like plot instructions.
+- =gar-executor--gnuplot-block-has-file-p=: Return non-nil when the narrowed response has a gnuplot block with :file.
+- =gptel-agent-runtime-repair-inline-plot-response=: Append executable inline Org when a local model answers plot requests as a tutorial.
+- =gptel-agent-runtime--find-gptel-tool=: Return the registered gptel tool named NAME, or nil.
+- =gptel-agent-runtime--read-raw-tool-call=: Parse TEXT as one raw model-emitted tool call.
+- =gptel-agent-runtime--json-object-strings=: Return balanced top-level JSON object strings found in TEXT.
+- =gptel-agent-runtime--json-object-ranges=: Return balanced JSON objects in TEXT with :start, :end, and :object.
+- =gptel-agent-runtime--example-block-ranges=: Return ranges in TEXT that are documentation/example blocks.
+- =gptel-agent-runtime--offset-in-ranges-p=: Return non-nil when OFFSET is inside one of RANGES.
+- =gptel-agent-runtime--raw-tool-calls-in-region=: Return raw JSON tool calls found between BEG and END.
+- =gptel-agent-runtime--placeholder-argument-p=: Return non-nil when VALUE contains placeholder text.
+- =gptel-agent-runtime--raw-tool-call-risk=: Infer a conservative risk level for raw tool NAME with ARGUMENTS.
+- =gptel-agent-runtime--raw-tool-call-confirmed-p=: Return non-nil when raw tool CALL with RISK and STEP may execute.
+- =gptel-agent-runtime--execute-raw-tool-call=: Execute one safe raw JSON tool CALL and return an observation string.
+- =gptel-agent-runtime-trace-buffer=: Return the agent trace buffer, creating it when needed.
+- =gptel-agent-runtime-show-trace=: Display the agent trace buffer.
+- =gptel-agent-runtime--trace=: Append a trace line for JOB-ID using FORMAT-STRING and ARGS.
+- =gptel-agent-runtime--next-job-id=: Return a new lightweight agent job id.
+- =gptel-agent-runtime--job-cancelled-p=: Return non-nil when JOB-ID has been cancelled in the current buffer.
+- =gptel-agent-runtime-cancel-current-job=: Cancel the current raw tool continuation job in this buffer.
+- =gptel-agent-runtime--chat-status=: Insert a compact agent status line in the current chat buffer.
+- =gptel-agent-runtime-capability-summary=: Return a deterministic summary of registered Emacs agent capabilities.
+- =gptel-agent-runtime--capability-denial-p=: Return non-nil when TEXT denies an available runtime capability.
+- =gptel-agent-runtime--deterministic-capability-answer=: Return a model-independent answer for capability and swarm questions.
+- =gptel-agent-runtime-repair-capability-response=: Replace false capability denials in region BEG END with runtime facts.
+- =gptel-agent-runtime-list-tools=: Display all currently registered gptel tools and runtime policy metadata.
+- =gptel-agent-runtime--insert-list=: Insert TITLE and one line per value in VALUES into the current buffer.
+- =gptel-agent-runtime--tool-policy-lines=: Return formatted configured tool policy lines.
+- =gptel-agent-runtime--default-tool-policy-lines=: Return formatted default tool policy lines.
+- =gptel-agent-runtime--protected-path-lines=: Return configured protected path lines from runtime and host config.
+- =gptel-agent-runtime-guardrails-summary=: Return a human-readable summary of active runtime guardrails.
+- =gptel-agent-runtime-show-guardrails=: Display runtime policy, trust-boundary, and guardrail status.
+- =gptel-agent-runtime-list-organization=: Display the current agent organization and learned playbooks.
+- =gptel-agent-runtime--raw-tool-success-observation-p=: Return non-nil when OBSERVATION is a successful raw tool observation.
+- =gptel-agent-runtime--raw-observation-tool-name=: Return the tool name recorded in OBSERVATION, or nil.
+- =gptel-agent-runtime--web-search-only-observations-p=: Return non-nil when OBSERVATIONS only contain web_search results.
+- =gptel-agent-runtime--recoverable-skip-observation-p=: Return non-nil when OBSERVATION is a skipped raw call worth answering from.
+- =gptel-agent-runtime--recent-user-request-before=: Return recent likely user request text before POSITION.
+- =gptel-agent-runtime--raw-response-user-text=: Return likely user-facing text from RAW-RESPONSE, excluding JSON objects.
+- =gptel-agent-runtime--short-observation-reason=: Return a compact one-line reason extracted from OBSERVATION.
+- =gptel-agent-runtime--raw-tool-continuation-prompt=: Build a continuation prompt for raw tool OBSERVATIONS.
+- =gptel-agent-runtime--request-raw-tool-continuation=: Ask the model for a natural continuation after OBSERVATIONS.
+- =gptel-agent-runtime-execute-raw-tool-calls=: Execute safe raw JSON tool calls emitted as assistant text.
+- =gar-response-executor-response-hook=: Hook for Babel blocks, exec-tags and auto-pattern matching.
+- =gar-response-executor-autorun-hook=: Hook for AUTORUN elisp blocks.
+- =gar-response-executor-execute-all-blocks=: Manual variant: execute all Babel blocks in the current buffer.
+- =gar-response-executor-execute-block-at-point=: Execute the Babel block under the cursor.
+<!-- gar:function-reference:end -->
+
 * File header
 
 #+begin_src emacs-lisp

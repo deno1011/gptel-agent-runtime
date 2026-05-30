@@ -38,6 +38,21 @@ See also:
   gar-backend in the master's =(require)= order so the symbol is
   bound by the time the function is invoked)
 
+<!-- gar:function-reference:start -->
+* Function reference
+
+This section is generated from the Elisp docstrings in this Org file. It is Org prose, not tangled code, so it explains the functions without changing runtime behavior.
+
+- =gptel-agent-runtime--ollama-url=: Return the local Ollama URL for PATH.
+- =gptel-agent-runtime-ollama-running-p=: Return non-nil when the configured Ollama server responds.
+- =gptel-agent-runtime-start-ollama-if-needed=: Start Ollama in the background if configured and not already running.
+- =gptel-agent-runtime-active-ollama-model=: Return the first currently loaded Ollama model as a symbol, or nil.
+- =gptel-agent-runtime-model-id=: Return the symbol model id from MODEL, tolerating gptel metadata forms.
+- =gptel-agent-runtime-backend-model-symbols=: Return BACKEND model ids as symbols, tolerating list/vector metadata.
+- =gptel-agent-runtime-use-default-local-model=: Select the active or configured default local Ollama model when available.
+- =gptel-agent-runtime-register-model=: Register NAME with BACKEND+MODEL in `gptel-agent-runtime-backends'.
+<!-- gar:function-reference:end -->
+
 * File header
 
 #+begin_src emacs-lisp

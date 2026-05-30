@@ -42,6 +42,54 @@ See also:
 - [[file:gar-skills-md.org][gar-skills-md]] (provides the markdown skill format + writer)
 - [[file:gar-playbook-refine.org][gar-playbook-refine]] (the symmetric failure-side learner)
 
+<!-- gar:function-reference:start -->
+* Function reference
+
+This section is generated from the Elisp docstrings in this Org file. It is Org prose, not tangled code, so it explains the functions without changing runtime behavior.
+
+- =gptel-agent-runtime--skill-promote-directory=: Return (and create if needed) the auto-synth skills subdirectory.
+- =gptel-agent-runtime--skill-promote-fetch-similar=: Return up to `skill-promote-search-window' similar past trajectories for GOAL.
+- =gptel-agent-runtime--skill-promote-filter-cluster=: Return the subset of HITS that count as `same pattern' successes.
+- =gptel-agent-runtime--skill-promote-cooldown-active-p=: Return non-nil when a skill for GOAL was promoted within the last `skill-promote-cooldown-trajectories' new trajectories.
+- =gptel-agent-runtime--skill-promote-derive-id=: Derive a stable skill id from GOAL.
+- =gptel-agent-runtime--skill-promote-derive-triggers=: Derive a small trigger list from GOAL by lowercasing and splitting on non-alphanumerics, then dropping function words and short tokens.
+- =gptel-agent-runtime--skill-promote-extract-steps=: Extract a step-plist list from TRAJECTORY's trajectory-steps so the markdown skill writer can serialise them.
+- =gptel-agent-runtime--skill-promote-synthesize=: Build a skill plist from TRAJECTORY (the most-recent success in the cluster) and CLUSTER (list of trajectory summary plists, may include TRAJECTORY).
+- =gptel-agent-runtime--skill-promote-target-file=: Return the .md path for SKILL inside the auto-synth subdirectory.
+- =gptel-agent-runtime--skill-promote-write=: Persist SKILL to disk and return the path.
+- =gptel-agent-runtime--skill-promote-on-trajectory=: Subscriber for `trajectory-recorded' events.
+- =gptel-agent-runtime--skill-promote-write-from-payload=: Helper used by the subscriber when `mode' is `auto'.
+- =gptel-agent-runtime--skill-promote-trust-state=: Return the current `:state' for ID's trust entry, or nil when the id has no entry (still implicitly `proposed').
+- =gptel-agent-runtime--skill-promote-trust-entry-set=: Insert / replace ID's PLIST in the trust registry.
+- =gptel-agent-runtime--skill-promote-mark-approved=: Transition ID into `approved' state at the current timestamp.
+- =gptel-agent-runtime--skill-promote-bump-invocation=: Increment ID's `:invocations-since-approval' counter and, when the threshold is reached, transition to `trusted'.
+- =gptel-agent-runtime--skill-promote-on-playbook-invocation=: Subscriber for `playbook-invocation-recorded'.
+- =gptel-agent-runtime--skill-promote-save-trust-registry=: Persist `--skill-promote-trust-registry' to `skill-promote-trust-file'.
+- =gptel-agent-runtime--skill-promote-load-trust-registry=: Read the persisted registry into `--skill-promote-trust-registry'.
+- =gptel-agent-runtime--skill-promote-jaccard-similarity=: Return Jaccard similarity (0.0-1.0) over derived triggers of two goal strings.
+- =gptel-agent-runtime--skill-promote-similarity=: Return similarity (0.0-1.0) between two goal texts.
+- =gptel-agent-runtime--skill-promote-trusted-matches=: Return list of (TRUSTED-ID .
+- =gptel-agent-runtime--skill-promote-transfer-trust-applies-p=: Return non-nil when transfer-trust should auto-approve a candidate with CANDIDATE-GOAL.
+- =gptel-agent-runtime--skill-promote-auto-approve-via-transfer=: Register SKILL as a playbook AND mark it approved via transfer-trust.
+- =gptel-agent-runtime-skill-promote-trust-status=: Open a buffer summarising the trust state of every known skill.
+- =gptel-agent-runtime--skill-promote-rejected-directory=: Return (and create) the auto-synth/rejected/ subdirectory.
+- =gptel-agent-runtime--skill-promote-candidate-files=: Return the list of skill candidate file paths in the auto-synth directory.
+- =gptel-agent-runtime--skill-promote-refinement-candidate-files=: Return the list of refinement candidate file paths (PR 3).
+- =gptel-agent-runtime--skill-promote-candidate-type=: Classify a candidate FILE by extension.
+- =gptel-agent-runtime--skill-promote-rows=: Build `tabulated-list-entries' for the unified review buffer.
+- =gptel-agent-runtime--skill-promote-current-file=: Return the candidate file path on the current line, or signal.
+- =gptel-agent-runtime--skill-promote-load-skill=: Read FILE as a Markdown skill and return the plist, or nil on error.
+- =gptel-agent-runtime--skill-promote-load-refinement=: Read FILE as a refinement candidate plist (PR 3 format).
+- =gptel-agent-runtime--skill-promote-refinement-promoted-dir=: Return (and create) the candidates/promoted/ subdir for already-approved refinement candidates.
+- =gptel-agent-runtime--skill-promote-refinement-rejected-dir=: Return (and create) the candidates/rejected/ subdir.
+- =gptel-agent-runtime--skill-promote-approve-skill=: Internal: approve a SKILL candidate at SRC.
+- =gptel-agent-runtime--skill-promote-approve-refinement=: Internal: approve a REFINEMENT candidate at SRC.
+- =gptel-agent-runtime-skill-promote-approve=: Approve the candidate on the current line.
+- =gptel-agent-runtime-skill-promote-reject=: Reject the candidate on the current line.
+- =gptel-agent-runtime-skill-promote-view=: Open the candidate on the current line in a read-only view buffer.
+- =gptel-agent-runtime-skill-promote-review=: Open the tabulated-list reviewer for auto-synth skill candidates.
+<!-- gar:function-reference:end -->
+
 * File header
 
 #+begin_src emacs-lisp

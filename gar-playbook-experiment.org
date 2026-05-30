@@ -39,6 +39,41 @@ See also:
 - [[file:gar-agents.org][gar-agents]] (=route-task= calls =--experiment-resolve-matches=
   via =fboundp= guard)
 
+<!-- gar:function-reference:start -->
+* Function reference
+
+This section is generated from the Elisp docstrings in this Org file. It is Org prose, not tangled code, so it explains the functions without changing runtime behavior.
+
+- =gptel-agent-runtime-experiment-active-for-playbook=: Return the running experiment for PLAYBOOK-ID, or nil.
+- =gptel-agent-runtime-experiment-by-id=: Return the experiment with EXPERIMENT-ID, or nil.
+- =gptel-agent-runtime--experiment-pick-arm=: Pick `original' or `candidate' arm for EXPERIMENT given SESSION-ID.
+- =gptel-agent-runtime--experiment-fork-playbook=: Return PLAYBOOK unchanged when ARM is `original'; otherwise return a fork with the EXPERIMENT's candidate body but the SAME id as PLAYBOOK so accounting and trajectories keep the right key.
+- =gptel-agent-runtime--experiment-resolve-matches=: Resolver wired into `gar-agents.route-task' via fboundp.
+- =gptel-agent-runtime--exp-uniform-positive=: Return U ~ Uniform(0, 1] (never zero) using `random'.
+- =gptel-agent-runtime--exp-gamma-sample-integer=: Draw Gamma(K, 1) for positive integer K via Erlang sum of exponentials.
+- =gptel-agent-runtime--exp-beta-sample=: Draw Beta(ALPHA, BETA) where both are positive integers.
+- =gptel-agent-runtime--exp-prob-greater=: Estimate P(A > B) where A~Beta(A-ALPHA,A-BETA), B~Beta(B-ALPHA,B-BETA).
+- =gptel-agent-runtime--exp-credible-interval=: Return (LO HI) credible interval for Beta(ALPHA, BETA) at level CONF.
+- =gptel-agent-runtime--exp-bayesian-decision=: Beta-Bernoulli decision rule for EXPERIMENT.
+- =gptel-agent-runtime--experiment-success-rate=: Return success rate (0.0-1.0) from SUCCESSES and FAILURES; nil if no samples.
+- =gptel-agent-runtime--experiment-bump-arm=: Increment EXPERIMENT's counter for ARM given OUTCOME (success/failure).
+- =gptel-agent-runtime--exp-margin-decision=: Legacy simple-margin decision rule for EXPERIMENT.
+- =gptel-agent-runtime--experiment-decision=: Inspect EXPERIMENT's counters and return a decision plist or nil.
+- =gptel-agent-runtime--experiment-record-outcome=: Look up the arm assignment for (SESSION-ID, PLAYBOOK-ID), bump the matching experiment's counter, drop the assignment, save state, and possibly trigger an auto-decision.
+- =gptel-agent-runtime--experiment-maybe-decide=: Consult the decision rule on EXPERIMENT; auto-promote / -rollback when the rule fires (or do nothing when inconclusive).
+- =gptel-agent-runtime--experiments-ensure-dir=: Ensure the experiments directory exists; return its absolute path.
+- =gptel-agent-runtime--experiment-file=: Return the on-disk path for EXPERIMENT.
+- =gptel-agent-runtime--save-experiment=: Persist EXPERIMENT to its on-disk file.
+- =gptel-agent-runtime-load-experiments=: Read persisted experiments from disk into the in-memory list.
+- =gptel-agent-runtime--experiment-read-candidate-file=: Read the candidate plist from FILE (under candidates/ directory).
+- =gptel-agent-runtime-experiment-start=: Create and register an experiment from CANDIDATE-FILE.
+- =gptel-agent-runtime--experiment-find-playbook=: Return the registered playbook struct for PLAYBOOK-ID, or nil.
+- =gptel-agent-runtime-experiment-promote=: Promote the candidate of EXPERIMENT-ID into the playbook registry.
+- =gptel-agent-runtime-experiment-rollback=: Mark EXPERIMENT-ID as rolled back; the original playbook keeps its slot.
+- =gptel-agent-runtime-experiment-status=: Open a buffer summarizing all known experiments.
+- =gptel-agent-runtime--record-experiment-outcome-on-finalize=: Subscriber on `session-finalized': for each running experiment whose playbook matched this session, record the arm + outcome.
+<!-- gar:function-reference:end -->
+
 * File header
 
 #+begin_src emacs-lisp
