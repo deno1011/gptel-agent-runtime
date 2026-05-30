@@ -82,14 +82,28 @@ model router, and the =gptel-mode-hook= installed below.
   "\\(Ollama\\|LM Studio\\|MLX\\|qwen2\\.5\\|qwen3\\|llama\\|mistral\\|deepseek-r1\\)"
   "Regexp matching active backend/model values that should use the local directive.")
 
-(defun gptel-agent-runtime-directive-for-choice (choice)
-  "Return the directive symbol that should be used for model CHOICE."
-  (if (string-match-p gptel-agent-runtime-local-model-pattern choice)
-      'emacs-local-assistant
-    'emacs-assistant))
+(defun gptel-agent-runtime-directive-for-choice (_choice)
+  "Return the directive symbol that should be used for model CHOICE.
+
+History: this used to branch on the runtime, returning the thin
+`emacs-assistant' directive for non-local backends.  The thin directive
+turned out to under-serve the 7B-tier remote models (Haiku, gpt-4o-mini)
+that have re-emerged below the original API price floor -- they need
+the same hand-holding (CRITICAL RULES, CRITICAL REASONING, TOOL OUTPUT
+FAITHFULNESS, ORG FILES guidance) that the local-runtime directive
+provides to local 7B/14B models.  We now route every backend through
+the rich directive; large frontier models pay a small input-token tax
+but behave more consistently as a result.
+
+CHOICE is preserved as an argument for backwards compatibility; it is
+no longer consulted."
+  'emacs-local-assistant)
 
 (defun gptel-agent-runtime-local-runtime-p ()
-  "Return non-nil when the active gptel backend/model is local."
+  "Return non-nil when the active gptel backend/model is local.
+Still used by callers that need to know whether Ollama / LM Studio /
+MLX is in play (for example to skip API rate-limit checks), even now
+that directive selection no longer branches on this."
   (let ((backend-name (condition-case nil
                           (if (and (boundp 'gptel-backend)
                                    (fboundp 'gptel-backend-name))
@@ -101,10 +115,12 @@ model router, and the =gptel-mode-hook= installed below.
                     (concat backend-name " " model-name))))
 
 (defun gptel-agent-runtime-directive-for-current-runtime ()
-  "Return the directive symbol for the active gptel backend/model."
-  (if (gptel-agent-runtime-local-runtime-p)
-      'emacs-local-assistant
-    'emacs-assistant))
+  "Return the directive symbol for the active gptel backend/model.
+Always returns `emacs-local-assistant'.  See `directive-for-choice'
+for the rationale -- the thin `emacs-assistant' directive that this
+function used to return for non-local backends turned out to under-
+serve small remote models too."
+  'emacs-local-assistant)
 
 (defun gptel-agent-runtime-sync-directive-for-current-runtime ()
   "Set `gptel--system-message' according to the active backend/model."

@@ -25,6 +25,27 @@ tool list output verbatim instead of summarising."
     (should (string-match-p "MUST include all N[[:space:]]+items" d))
     (should (string-match-p "Do NOT pick a thematic subset" d))))
 
+;; --- PR 12: directive selection is no longer backend-conditional ---
+
+(ert-deftest gar-directives-current-runtime-returns-rich-directive ()
+  "PR 12: every backend, local or remote, gets the rich
+`emacs-local-assistant' directive.  The thin `emacs-assistant'
+variant left Haiku and other small remote models without the
+CRITICAL RULES / TOOL OUTPUT FAITHFULNESS / ORG FILES guidance
+that they need.  Now both code paths return the rich one."
+  (should (eq 'emacs-local-assistant
+              (gptel-agent-runtime-directive-for-current-runtime))))
+
+(ert-deftest gar-directives-choice-returns-rich-directive ()
+  "Same for `directive-for-choice' regardless of model string."
+  (dolist (m '("claude-haiku-4-5-20251001"
+               "claude-opus-4-7"
+               "gpt-4o-mini"
+               "qwen2.5:14b-instruct"
+               "llama3.2"))
+    (should (eq 'emacs-local-assistant
+                (gptel-agent-runtime-directive-for-choice m)))))
+
 (provide 'gar-directives-test)
 
 ;;; gar-directives-test.el ends here
