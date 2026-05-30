@@ -24,6 +24,19 @@ This section is generated from the Elisp docstrings in this Org file. It is Org 
 - =gptel-agent-runtime-run-injection-canaries=: Run the prompt-injection canary suite against the untrusted wrappers.
 <!-- gar:function-reference:end -->
 
+<!-- gar:execution-flow:start -->
+* Execution flow
+
+This section explains how the functions above participate in runtime execution. It is Org prose outside source blocks, so tangling preserves behavior.
+
+This module is a structural prompt-injection canary suite.
+
+- `gptel-agent-runtime-run-injection-canaries' wraps known hostile payloads through `gptel-agent-runtime-untrusted-context'.
+- Each result checks for required boundary and do-not-follow markers.
+- Results are stored in `gptel-agent-runtime--last-canary-results' for mission control.
+<!-- gar:execution-flow:end -->
+
+
 * File header
 
 #+begin_src emacs-lisp
@@ -38,7 +51,7 @@ This section is generated from the Elisp docstrings in this Org file. It is Org 
 ;; defvar holding the most recent run's results (so the mission-control
 ;; dashboard can summarize them), and one runner. The runner wraps each
 ;; payload through `gptel-agent-runtime-untrusted-context' (defined in
-;; gar-safety) and asserts the BEGIN/END markers and the do-not-follow
+;; gar-policy) and asserts the BEGIN/END markers and the do-not-follow
 ;; rule are present. A structural integrity check, not a live model
 ;; call.
 

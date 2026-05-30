@@ -46,6 +46,20 @@ This section is generated from the Elisp docstrings in this Org file. It is Org 
 - =gptel-agent-runtime--apply-skeptic-to-decision=: Mutate DECISION metadata with VERDICT and escalate confirmation for `high'.
 <!-- gar:function-reference:end -->
 
+<!-- gar:execution-flow:start -->
+* Execution flow
+
+This section explains how the functions above participate in runtime execution. It is Org prose outside source blocks, so tangling preserves behavior.
+
+This module is the deterministic Advocatus Diaboli gate used by policy evaluation.
+
+- `gptel-agent-runtime--skeptic-applies-p' decides whether a step is risky enough to review.
+- `gptel-agent-runtime--skeptic-rule-based-verdict' catches obvious risky patterns without a model call.
+- `gptel-agent-runtime-skeptic-evaluate' dispatches to rule-based or model-based mode.
+- `gptel-agent-runtime--apply-skeptic-to-decision' attaches the verdict to an allowed policy decision and can escalate confirmation.
+<!-- gar:execution-flow:end -->
+
+
 * File header
 
 #+begin_src emacs-lisp

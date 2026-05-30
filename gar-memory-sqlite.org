@@ -58,6 +58,21 @@ This section is generated from the Elisp docstrings in this Org file. It is Org 
 - =gptel-agent-runtime-similar-trajectories=: Find past trajectories whose goal is most similar to TEXT.
 <!-- gar:function-reference:end -->
 
+<!-- gar:execution-flow:start -->
+* Execution flow
+
+This section explains how the functions above participate in runtime execution. It is Org prose outside source blocks, so tangling preserves behavior.
+
+This optional module indexes trajectories in SQLite for FTS and vector-style retrieval.
+
+- `gptel-agent-runtime-sqlite-open' checks availability and ensures schema.
+- `gptel-agent-runtime-sqlite-insert-trajectory' stores summaries, serialized trajectory blobs, decision text, and optional embeddings.
+- Text search uses FTS5 when present and LIKE fallback when not.
+- Similarity search compares stored vectors or falls back to lexical search.
+- Migration reads flat trajectory files and inserts them into the database; stats/search commands expose the result.
+<!-- gar:execution-flow:end -->
+
+
 * File header
 
 #+begin_src emacs-lisp

@@ -26,9 +26,9 @@
 ;; too: every re-injection of external evidence into a prompt is
 ;; expected to flow through `gptel-agent-runtime-untrusted-context'.
 ;;
-;; Loaded AFTER gar-quarantine and gar-skeptic, BEFORE gar-safety. The
-;; remaining mission-control buffer in gar-safety reads this module's
-;; defcustoms via forward-defvar declarations.
+;; Loaded AFTER gar-quarantine and gar-skeptic, BEFORE
+;; gar-mission-control. Mission control reads this module's defcustoms
+;; via forward-defvar declarations.
 
 ;;; Code:
 

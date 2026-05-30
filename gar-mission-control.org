@@ -54,6 +54,21 @@ This section is generated from the Elisp docstrings in this Org file. It is Org 
 - =gptel-agent-runtime-tool-policy-editor=: Open the tabulated-list editor for `gptel-agent-runtime-tool-policy'.
 <!-- gar:function-reference:end -->
 
+<!-- gar:execution-flow:start -->
+* Execution flow
+
+This section explains how the functions above participate in runtime execution. It is Org prose outside source blocks, so tangling preserves behavior.
+
+This module is the dashboard and tool-policy editor.
+
+- `gptel-agent-runtime-mission-control' builds the dashboard buffer from live state across modules.
+- Section helpers render recent events, evidence, canaries, policy posture, verifier/skeptic state, failure analytics, experiments, and skill candidates.
+- Tool-policy editor entry flows through `gptel-agent-runtime-tool-policy-editor'.
+- The editor renders rows with `gptel-agent-runtime--tool-policy-row' / `--tool-policy-rows' and mutates entries through cycle/reset/save commands.
+- Policy edits update `gptel-agent-runtime-tool-policy' and can be saved back to customization.
+<!-- gar:execution-flow:end -->
+
+
 * File header
 
 #+begin_src emacs-lisp

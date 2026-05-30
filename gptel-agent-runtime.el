@@ -50,7 +50,7 @@ the master load sequence. New setups should customise
 `gptel-agent-runtime-data-directory' directly.")
 
 ;; Module load order (respects the dependency DAG).
-(require 'gar-core)        ; defgroup + ~50 defcustoms + all cl-defstructs + base helpers
+(require 'gar-core)        ; defgroup + defcustoms + all cl-defstructs + base helpers
 (require 'gar-substrate)   ; tick, event pump, evidence, versioned state
 (require 'gar-quarantine)  ; per-source quarantine + promote + pre-flight conflict check
 (require 'gar-skeptic)     ; Advocatus Diaboli core (rule-based + dispatcher)

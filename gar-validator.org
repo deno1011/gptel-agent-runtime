@@ -42,6 +42,20 @@ This section is generated from the Elisp docstrings in this Org file. It is Org 
 - =gptel-agent-runtime-args-valid-p=: Return non-nil when ARGS satisfies SCHEMA.
 <!-- gar:function-reference:end -->
 
+<!-- gar:execution-flow:start -->
+* Execution flow
+
+This section explains how the functions above participate in runtime execution. It is Org prose outside source blocks, so tangling preserves behavior.
+
+This module validates tool arguments against the package's small JSON-Schema-inspired subset.
+
+- Policy and tests call `gptel-agent-runtime-validate-args' or `gptel-agent-runtime-args-valid-p'.
+- Validation descends through internal `--validate-value', `--validate-object', `--validate-array', and `--validate-string' helpers.
+- Object validation checks required keys, unknown keys, and nested property schemas.
+- Primitive validation checks type, enum, min/max, length, and regexp pattern constraints.
+<!-- gar:execution-flow:end -->
+
+
 * File header
 
 #+begin_src emacs-lisp

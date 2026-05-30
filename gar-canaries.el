@@ -9,7 +9,7 @@
 ;; defvar holding the most recent run's results (so the mission-control
 ;; dashboard can summarize them), and one runner. The runner wraps each
 ;; payload through `gptel-agent-runtime-untrusted-context' (defined in
-;; gar-safety) and asserts the BEGIN/END markers and the do-not-follow
+;; gar-policy) and asserts the BEGIN/END markers and the do-not-follow
 ;; rule are present. A structural integrity check, not a live model
 ;; call.
 

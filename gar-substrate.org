@@ -13,8 +13,8 @@ underpins every other module:
   =show-event-pump= for an inspectable buffer.
 - /Provenance/: =make-evidence= constructor + =--evidence-header-tag=
   formatter + =trace-evidence= viewer. The evidence trace is the
-  single mutable history that gar-safety's quarantine logic and
-  gar-memory's retrieval both consult.
+  single mutable history that =gar-quarantine=, =gar-policy=, and
+  =gar-memory= consult.
 - /Versioned state/: =state-schema-version=, =--state-header=,
   =--read-versioned=, and =migrate-state= so persisted files
   (sessions, embedding cache, candidate playbooks, proposed tools)
@@ -75,6 +75,22 @@ This section is generated from the Elisp docstrings in this Org file. It is Org 
 - =gptel-agent-runtime-emit-event=: Emit a runtime event of TYPE and return it.
 - =gptel-agent-runtime-list-events=: Return recent runtime events, newest first.
 <!-- gar:function-reference:end -->
+
+<!-- gar:execution-flow:start -->
+* Execution flow
+
+This section explains how the functions above participate in runtime execution. It is Org prose outside source blocks, so tangling preserves behavior.
+
+This module is the event/evidence substrate. Runtime work emits events here; subscribers in later modules observe those events without tight coupling.
+
+- `gptel-agent-runtime-emit-event' is the main entry point: it advances the tick, records/logs the event, and dispatches it.
+- `gptel-agent-runtime--advance-tick' and `gptel-agent-runtime--emit-tick-event' keep tick events non-recursive.
+- `gptel-agent-runtime-subscribe' and `gptel-agent-runtime-unsubscribe' maintain event subscribers; `gptel-agent-runtime--dispatch-event' calls each handler safely.
+- Evidence creation flows through `gptel-agent-runtime-make-evidence', then `gptel-agent-runtime-trace-evidence' renders provenance.
+- State persistence helpers `gptel-agent-runtime--state-header', `gptel-agent-runtime--read-versioned', and `gptel-agent-runtime-migrate-state' protect future migrations.
+- UI helpers `gptel-agent-runtime-show-swarm' and `gptel-agent-runtime-show-event-pump' expose the event stream.
+<!-- gar:execution-flow:end -->
+
 
 * File header
 

@@ -74,6 +74,21 @@ This section is generated from the Elisp docstrings in this Org file. It is Org 
 - =gptel-agent-runtime--record-experiment-outcome-on-finalize=: Subscriber on `session-finalized': for each running experiment whose playbook matched this session, record the arm + outcome.
 <!-- gar:function-reference:end -->
 
+<!-- gar:execution-flow:start -->
+* Execution flow
+
+This section explains how the functions above participate in runtime execution. It is Org prose outside source blocks, so tangling preserves behavior.
+
+This module A/B tests refined playbooks against originals.
+
+- Experiments are started with `gptel-agent-runtime-experiment-start'.
+- Session assignment flows through experiment lookup and deterministic arm picking.
+- Outcome recording bumps original/candidate arm statistics.
+- Decision helpers apply either a margin rule or Beta-Bernoulli Bayesian comparison.
+- Public promote/rollback commands apply the decision, persist state, and emit experiment events.
+<!-- gar:execution-flow:end -->
+
+
 * File header
 
 #+begin_src emacs-lisp

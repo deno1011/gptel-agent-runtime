@@ -94,6 +94,21 @@ This section is generated from the Elisp docstrings in this Org file. It is Org 
 - =gar-response-executor-execute-block-at-point=: Execute the Babel block under the cursor.
 <!-- gar:function-reference:end -->
 
+<!-- gar:execution-flow:start -->
+* Execution flow
+
+This section explains how the functions above participate in runtime execution. It is Org prose outside source blocks, so tangling preserves behavior.
+
+This module watches gptel responses and executes approved response artifacts.
+
+- `gar-response-executor-mode' installs/removes response hooks.
+- Response scanning detects Org source blocks, AUTORUN markers, file-output blocks, and result destinations.
+- Execution validates language/path/allowlist settings, runs Babel or file writes, captures output, and inserts rendered results.
+- Display helpers update inline images and output buffers.
+- Legacy `claude-executor-*' aliases keep old user config working while the runtime uses `gar-response-executor-*' names.
+<!-- gar:execution-flow:end -->
+
+
 * File header
 
 #+begin_src emacs-lisp

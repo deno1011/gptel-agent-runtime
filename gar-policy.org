@@ -78,6 +78,22 @@ This section is generated from the Elisp docstrings in this Org file. It is Org 
 - =gptel-agent-runtime-trusted-context=: Wrap trusted runtime TEXT-OR-EVIDENCE with LABEL for prompt readability.
 <!-- gar:function-reference:end -->
 
+<!-- gar:execution-flow:start -->
+* Execution flow
+
+This section explains how the functions above participate in runtime execution. It is Org prose outside source blocks, so tangling preserves behavior.
+
+This module is the safety broker that decides whether a planned step may execute.
+
+- `gptel-agent-runtime-policy-evaluate-step' is the main gate for plan steps.
+- It resolves tool metadata, risk, required capabilities, per-agent capability allowlists, argument schemas, quarantine conflicts, policy presets, and optional skeptic verdicts.
+- `gptel-agent-runtime-safety-check-step' handles lower-level shell/path/risk checks.
+- `gptel-agent-runtime-confirmation-required-p' converts risk/policy results into confirmation requirements.
+- `gptel-agent-runtime-untrusted-context' and `gptel-agent-runtime-trusted-context' wrap text/evidence before model prompts see it.
+- Preset helpers let mission control and users inspect or switch safety posture.
+<!-- gar:execution-flow:end -->
+
+
 * File header
 
 #+begin_src emacs-lisp
@@ -109,9 +125,9 @@ This section is generated from the Elisp docstrings in this Org file. It is Org 
 ;; too: every re-injection of external evidence into a prompt is
 ;; expected to flow through `gptel-agent-runtime-untrusted-context'.
 ;;
-;; Loaded AFTER gar-quarantine and gar-skeptic, BEFORE gar-safety. The
-;; remaining mission-control buffer in gar-safety reads this module's
-;; defcustoms via forward-defvar declarations.
+;; Loaded AFTER gar-quarantine and gar-skeptic, BEFORE
+;; gar-mission-control. Mission control reads this module's defcustoms
+;; via forward-defvar declarations.
 
 ;;; Code:
 

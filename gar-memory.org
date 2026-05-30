@@ -93,6 +93,21 @@ This section is generated from the Elisp docstrings in this Org file. It is Org 
 - =gptel-agent-runtime-memory-context=: Return formatted memory context for QUERY.
 <!-- gar:function-reference:end -->
 
+<!-- gar:execution-flow:start -->
+* Execution flow
+
+This section explains how the functions above participate in runtime execution. It is Org prose outside source blocks, so tangling preserves behavior.
+
+This module supplies session memory, playbook scoring, novelty detection, and strategy synthesis.
+
+- Session persistence flows through memory directory/path helpers, save/load helpers, and retrieval functions.
+- Embedding retrieval flows through text embedding, cache lookup/write, cosine similarity, and result ranking.
+- Playbook learning records invocations, computes success rates, ranks matching playbooks, and formats memory context for planners.
+- Novelty detection scores task text against known playbooks and emits novelty events when configured.
+- Strategy synthesis consumes successful playbooks and writes reviewable candidates rather than auto-applying them.
+<!-- gar:execution-flow:end -->
+
+
 * File header
 
 #+begin_src emacs-lisp

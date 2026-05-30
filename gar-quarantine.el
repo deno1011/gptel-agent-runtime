@@ -15,7 +15,7 @@
 ;; arguments contain a substring of significant length from un-promoted
 ;; quarantined evidence text.
 ;;
-;; Loaded BEFORE gar-safety so the policy broker and the
+;; Loaded BEFORE gar-policy so the policy broker and the
 ;; untrusted-context wrapper can call into this module directly without
 ;; fboundp guards.
 
