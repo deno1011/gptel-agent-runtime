@@ -18,17 +18,21 @@
                   (re-search-forward (concat "=== " (regexp-quote s) " ===")
                                      nil t)))))))
 
-(ert-deftest gar-mission-control-renders-skill-promotion-section ()
-  "PR 16: the dashboard surfaces the skill-promotion subsystem with
-pending / approved / rejected counts and the review M-x hint."
+(ert-deftest gar-mission-control-renders-candidates-section ()
+  "PR 16/17: dashboard surfaces the candidate subsystems (skill +
+refinement) with pending / approved / rejected counts and the
+review M-x hint."
   (gptel-agent-runtime-mission-control)
   (with-current-buffer gptel-agent-runtime-mission-control-buffer-name
     (should (save-excursion
               (goto-char (point-min))
-              (re-search-forward "=== Skill promotion ===" nil t)))
+              (re-search-forward "=== Candidates" nil t)))
     (should (save-excursion
               (goto-char (point-min))
-              (re-search-forward "Pending candidates:" nil t)))
+              (re-search-forward "Pending skill candidates:" nil t)))
+    (should (save-excursion
+              (goto-char (point-min))
+              (re-search-forward "Pending refinement candidates:" nil t)))
     (should (save-excursion
               (goto-char (point-min))
               (re-search-forward

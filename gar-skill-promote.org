@@ -92,11 +92,30 @@ See also:
 (declare-function gptel-agent-runtime-sqlite-search-by-text
                   "gar-memory-sqlite" (pattern &optional limit))
 
-;; gar-skills-md writer
+;; gar-skills-md writer + reader
 (declare-function gptel-agent-runtime-skill-to-file
                   "gar-skills-md" (skill file))
+(declare-function gptel-agent-runtime-skill-from-file
+                  "gar-skills-md" (file))
+(declare-function gptel-agent-runtime--skills-md-skill->playbook
+                  "gar-skills-md" (skill))
+(declare-function gptel-agent-runtime--skills-md-register-playbook
+                  "gar-skills-md" (playbook))
+
+;; gar-memory refinement-candidate reader/dir
+(declare-function gptel-agent-runtime--candidates-directory
+                  "gar-memory" ())
+(declare-function gptel-agent-runtime--read-versioned
+                  "gar-substrate" (file))
+
+;; gar-core playbook struct
+(declare-function gptel-agent-runtime-playbook-create
+                  "gptel-agent-runtime" (&rest plist))
+(declare-function gptel-agent-runtime-playbook-id
+                  "gptel-agent-runtime" (playbook))
 
 (defvar gptel-agent-runtime-skills-directory)
+(defvar gptel-agent-runtime-playbook-registry)
 #+end_src
 
 * Defcustoms
@@ -412,7 +431,7 @@ list but still recoverable for inspection."
     dir))
 
 (defun gptel-agent-runtime--skill-promote-candidate-files ()
-  "Return the list of candidate file paths in the auto-synth directory.
+  "Return the list of skill candidate file paths in the auto-synth directory.
 Excludes the rejected/ subdirectory."
   (let ((dir (gptel-agent-runtime--skill-promote-directory)))
     (when (file-directory-p dir)
@@ -420,12 +439,42 @@ Excludes the rejected/ subdirectory."
        (lambda (f) (file-directory-p f))
        (directory-files dir t "\\.md\\'")))))
 
+(defun gptel-agent-runtime--skill-promote-refinement-candidate-files ()
+  "Return the list of refinement candidate file paths (PR 3).
+Comes from `gar-memory.--candidates-directory'.  Empty list when
+gar-memory hasn't initialised the directory yet."
+  (when (fboundp 'gptel-agent-runtime--candidates-directory)
+    (let ((dir (ignore-errors
+                 (gptel-agent-runtime--candidates-directory))))
+      (when (and dir (file-directory-p dir))
+        (cl-remove-if
+         (lambda (f) (file-directory-p f))
+         (directory-files dir t "\\.el\\'"))))))
+
+(defun gptel-agent-runtime--skill-promote-candidate-type (file)
+  "Classify a candidate FILE by extension.
+Returns `skill' for .md auto-synth candidates and `refinement' for
+.el playbook-refinement candidates."
+  (cond
+   ((string-suffix-p ".md" file) 'skill)
+   ((string-suffix-p ".el" file) 'refinement)
+   (t 'unknown)))
+
 (defun gptel-agent-runtime--skill-promote-rows ()
-  "Build `tabulated-list-entries' for the review buffer."
-  (let ((files (gptel-agent-runtime--skill-promote-candidate-files)))
+  "Build `tabulated-list-entries' for the unified review buffer.
+Lists BOTH skill candidates (PR 15) and refinement candidates (PR 3)
+so a single keystroke (`a' approve / `r' reject) can act on either."
+  (let* ((skills (gptel-agent-runtime--skill-promote-candidate-files))
+         (refines (gptel-agent-runtime--skill-promote-refinement-candidate-files))
+         (files (append (or skills '()) (or refines '()))))
     (mapcar
      (lambda (file)
        (let* ((name (file-name-base file))
+              (type (gptel-agent-runtime--skill-promote-candidate-type file))
+              (type-label (pcase type
+                            ('skill "skill")
+                            ('refinement "refinement")
+                            (_ "?")))
               (mtime (format-time-string
                       "%Y-%m-%d %H:%M"
                       (file-attribute-modification-time
@@ -436,8 +485,8 @@ Excludes the rejected/ subdirectory."
                            (format "%.1f KB" (/ size-bytes 1024.0)))
                           (t (format "%.1f MB"
                                      (/ size-bytes 1048576.0))))))
-         (list file (vector name mtime size))))
-     (or files '()))))
+         (list file (vector type-label name mtime size))))
+     files)))
 
 (defun gptel-agent-runtime--skill-promote-current-file ()
   "Return the candidate file path on the current line, or signal."
@@ -452,13 +501,40 @@ Excludes the rejected/ subdirectory."
         (gptel-agent-runtime-skill-from-file file)
       (error nil))))
 
-;;;###autoload
-(defun gptel-agent-runtime-skill-promote-approve ()
-  "Move the candidate on the current line into the active skills
-directory and (when `skills-md' is loaded) register it as a playbook."
-  (interactive)
-  (let* ((src (gptel-agent-runtime--skill-promote-current-file))
-         (skills-dir (or (and (boundp 'gptel-agent-runtime-skills-directory)
+(defun gptel-agent-runtime--skill-promote-load-refinement (file)
+  "Read FILE as a refinement candidate plist (PR 3 format).
+Returns the plist or nil on parse failure."
+  (when (and (fboundp 'gptel-agent-runtime--read-versioned)
+             (file-exists-p file))
+    (condition-case _err
+        (let* ((parsed (gptel-agent-runtime--read-versioned file))
+               (rest (cdr parsed)))
+          (with-temp-buffer
+            (insert-file-contents file)
+            (goto-char rest)
+            (read (current-buffer))))
+      (error nil))))
+
+(defun gptel-agent-runtime--skill-promote-refinement-promoted-dir ()
+  "Return (and create) the candidates/promoted/ subdir for
+already-approved refinement candidates."
+  (let ((dir (expand-file-name
+              "promoted/"
+              (gptel-agent-runtime--candidates-directory))))
+    (unless (file-directory-p dir) (make-directory dir t))
+    dir))
+
+(defun gptel-agent-runtime--skill-promote-refinement-rejected-dir ()
+  "Return (and create) the candidates/rejected/ subdir."
+  (let ((dir (expand-file-name
+              "rejected/"
+              (gptel-agent-runtime--candidates-directory))))
+    (unless (file-directory-p dir) (make-directory dir t))
+    dir))
+
+(defun gptel-agent-runtime--skill-promote-approve-skill (src)
+  "Internal: approve a SKILL candidate at SRC."
+  (let* ((skills-dir (or (and (boundp 'gptel-agent-runtime-skills-directory)
                               gptel-agent-runtime-skills-directory)
                          user-emacs-directory))
          (dst (expand-file-name (file-name-nondirectory src) skills-dir))
@@ -473,31 +549,96 @@ directory and (when `skills-md' is loaded) register it as a playbook."
     (gptel-agent-runtime-emit-event
      'skill-promote-approved
      :source "skill-promote"
-     :payload (list :file dst
+     :payload (list :type 'skill
+                    :file dst
                     :id (and skill (plist-get skill :id)))
      :taint 'trusted)
+    (format "skill -> %s" dst)))
+
+(defun gptel-agent-runtime--skill-promote-approve-refinement (src)
+  "Internal: approve a REFINEMENT candidate at SRC.
+Replaces the original playbook in the registry with the candidate
+body and moves the .el to candidates/promoted/."
+  (let* ((candidate (gptel-agent-runtime--skill-promote-load-refinement src))
+         (id (and candidate (plist-get candidate :id)))
+         (dst (expand-file-name
+               (file-name-nondirectory src)
+               (gptel-agent-runtime--skill-promote-refinement-promoted-dir))))
+    (when (and id
+               (boundp 'gptel-agent-runtime-playbook-registry)
+               (fboundp 'gptel-agent-runtime-playbook-create))
+      (let ((pb (gptel-agent-runtime-playbook-create
+                 :id id
+                 :summary (or (plist-get candidate :summary) "")
+                 :triggers (or (plist-get candidate :triggers) '())
+                 :steps (or (plist-get candidate :steps) '())
+                 :success-count 0
+                 :failure-count 0
+                 :updated-at (gptel-agent-runtime--timestamp))))
+        (setq gptel-agent-runtime-playbook-registry
+              (cons pb
+                    (cl-remove id
+                               gptel-agent-runtime-playbook-registry
+                               :key #'gptel-agent-runtime-playbook-id
+                               :test #'equal)))))
+    (rename-file src dst t)
+    (gptel-agent-runtime-emit-event
+     'skill-promote-approved
+     :source "skill-promote"
+     :payload (list :type 'refinement
+                    :file dst
+                    :id id)
+     :taint 'trusted)
+    (format "refinement -> %s" dst)))
+
+;;;###autoload
+(defun gptel-agent-runtime-skill-promote-approve ()
+  "Approve the candidate on the current line.
+
+Dispatches by file type:
+- .md (skill candidate) -- move into the active skills directory,
+  register as a playbook via gar-skills-md.
+- .el (refinement candidate) -- replace the matching playbook in
+  the registry with the candidate body, move .el to
+  candidates/promoted/."
+  (interactive)
+  (let* ((src (gptel-agent-runtime--skill-promote-current-file))
+         (type (gptel-agent-runtime--skill-promote-candidate-type src))
+         (result (pcase type
+                   ('skill
+                    (gptel-agent-runtime--skill-promote-approve-skill src))
+                   ('refinement
+                    (gptel-agent-runtime--skill-promote-approve-refinement src))
+                   (_ (user-error "Unknown candidate type: %s" src)))))
     (when (derived-mode-p 'gptel-agent-runtime-skill-promote-review-mode)
       (tabulated-list-revert))
-    (message "Approved: %s -> %s" (file-name-base src) dst)))
+    (message "Approved %s: %s" type result)))
 
 ;;;###autoload
 (defun gptel-agent-runtime-skill-promote-reject ()
-  "Move the candidate on the current line into the
-auto-synth/rejected/ subdirectory.  Recoverable -- the file
-isn't deleted, just shelved."
+  "Reject the candidate on the current line.
+Moves the file into the type-specific rejected/ subdirectory.
+Recoverable -- the file isn't deleted, just shelved."
   (interactive)
   (let* ((src (gptel-agent-runtime--skill-promote-current-file))
-         (dst (expand-file-name (file-name-nondirectory src)
-                                (gptel-agent-runtime--skill-promote-rejected-directory))))
+         (type (gptel-agent-runtime--skill-promote-candidate-type src))
+         (rejected-dir
+          (pcase type
+            ('skill
+             (gptel-agent-runtime--skill-promote-rejected-directory))
+            ('refinement
+             (gptel-agent-runtime--skill-promote-refinement-rejected-dir))
+            (_ (user-error "Unknown candidate type: %s" src))))
+         (dst (expand-file-name (file-name-nondirectory src) rejected-dir)))
     (rename-file src dst t)
     (gptel-agent-runtime-emit-event
      'skill-promote-rejected
      :source "skill-promote"
-     :payload (list :file dst)
+     :payload (list :type type :file dst)
      :taint 'trusted)
     (when (derived-mode-p 'gptel-agent-runtime-skill-promote-review-mode)
       (tabulated-list-revert))
-    (message "Rejected: %s" (file-name-base src))))
+    (message "Rejected %s: %s" type (file-name-base src))))
 
 ;;;###autoload
 (defun gptel-agent-runtime-skill-promote-view ()
@@ -527,7 +668,8 @@ Key bindings (inherited from `tabulated-list-mode' plus this mode's):
   g    Refresh.
   q    Quit."
   (setq tabulated-list-format
-        [("Skill id"     40 t)
+        [("Type"          11 t)
+         ("Candidate id"  36 t)
          ("Last modified" 17 t)
          ("Size"          10 t)])
   (setq tabulated-list-padding 1)
