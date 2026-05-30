@@ -15,7 +15,7 @@ package header, declares the host =my/data-dir= fallback, requires the
 A user gptel-send (or an interactive =M-x gptel-agent-runtime-start=)
 travels through this layered stack:
 
-1. =gar-substrate= advances the OpenClaw tick and emits a user-request
+1. =gar-substrate= advances the runtime tick and emits a user-request
    event through the pump.
 2. =gar-agents= classifies the request (chat router score, model router
    profile, organization unit, agent role, matching skills/playbooks).

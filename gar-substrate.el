@@ -1,4 +1,4 @@
-;;; gar-substrate.el --- OpenClaw substrate: tick, event pump, provenance, versioned state -*- lexical-binding: t; -*-
+;;; gar-substrate.el --- Runtime substrate: tick, event pump, provenance, versioned state -*- lexical-binding: t; -*-
 
 ;; Part of deno1011/gptel-agent-runtime. Extracted from the monolith
 ;; gptel-agent-runtime.org on 2026-05-27 as PR 7 of the module split.
@@ -57,7 +57,7 @@
   "Recent in-memory runtime event log.")
 
 (defvar gptel-agent-runtime-tick-counter 0
-  "Monotonic OpenClaw substrate tick counter.
+  "Monotonic runtime substrate tick counter.
 Advanced by `gptel-agent-runtime--advance-tick' whenever a runtime event is
 emitted or the optional idle pump fires. Used to stamp evidence and to provide
 a deterministic time axis for the mission-control UI and trace tooling.")
@@ -74,7 +74,7 @@ cannot crash the pump or the runtime.")
 Used by `M-x gptel-agent-runtime-trace-evidence' to render the lineage DAG.")
 
 (defvar gptel-agent-runtime--idle-pump-timer nil
-  "Live `run-with-idle-timer' handle for the OpenClaw idle pump, or nil.")
+  "Live `run-with-idle-timer' handle for the runtime idle pump, or nil.")
 
 (defvar gptel-agent-runtime--last-dispatched-events nil
   "Recent dispatched events, newest first, for the event-pump live buffer.")
@@ -106,7 +106,7 @@ Used by `M-x gptel-agent-runtime-trace-evidence' to render the lineage DAG.")
     session-started
     session-resumed
     policy-changed)
-  "Canonical OpenClaw substrate event-type taxonomy.
+  "Canonical runtime substrate event-type taxonomy.
 The list is informational; subscribers may register for any symbol, but new
 event types should be added here so the mission-control UI and trace tooling
 know about them.")
@@ -334,10 +334,10 @@ know about them.")
     (when gptel-agent-runtime-show-swarm-buffer-on-start
       (gptel-agent-runtime-show-swarm))))
 
-;; ===== OpenClaw substrate: tick, event pump, provenance =====
+;; ===== Runtime substrate: tick, event pump, provenance =====
 
 (defun gptel-agent-runtime--advance-tick (reason)
-  "Advance the OpenClaw substrate tick counter.
+  "Advance the runtime substrate tick counter.
 REASON is a short string recorded on the resulting `tick' event so callers can
 trace what advanced the clock (an event emit, the idle pump, a manual call)."
   (setq gptel-agent-runtime-tick-counter
@@ -357,7 +357,7 @@ log just like a normal event, and then dispatches subscribers."
                              gptel-agent-runtime-tick-counter
                              (format-time-string "%H%M%S%N"))
                  :type 'tick
-                 :source "openclaw-substrate"
+                 :source "runtime-substrate"
                  :session-id nil
                  :parent-id nil
                  :payload (list :tick gptel-agent-runtime-tick-counter
@@ -482,7 +482,7 @@ buffer."
 
 ;;;###autoload
 (defun gptel-agent-runtime-toggle-idle-pump (&optional arg)
-  "Toggle the OpenClaw substrate idle pump.
+  "Toggle the runtime substrate idle pump.
 With prefix ARG positive, force on; with non-positive ARG, force off."
   (interactive "P")
   (let ((want-on (cond ((null arg) (not gptel-agent-runtime--idle-pump-timer))
@@ -640,7 +640,7 @@ SOURCE identifies the component creating the event. SESSION-ID and PARENT-ID
 link the event to an agent session or prior event. PAYLOAD is printable data.
 TAINT is normally `trusted' or `untrusted'.
 
-Also advances the OpenClaw substrate tick (unless TYPE is itself `tick' to
+Also advances the runtime substrate tick (unless TYPE is itself `tick' to
 avoid infinite recursion) and dispatches the event to subscribed handlers
 through `gptel-agent-runtime--dispatch-event'."
   (let* ((event (gptel-agent-runtime-event-create

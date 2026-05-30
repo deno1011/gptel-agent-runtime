@@ -194,7 +194,7 @@
 ;;;###autoload
 (defun gptel-agent-runtime-mission-control ()
   "Open the unified mission-control dashboard buffer.
-Shows the OpenClaw tick, idle-pump state, recent dispatched events, active
+Shows the runtime tick, idle-pump state, recent dispatched events, active
 policy preset, recent evidence flow with taint, quarantine size, canary
 status, and the registered agent capability allowlist."
   (interactive)

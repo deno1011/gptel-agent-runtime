@@ -25,7 +25,7 @@ and records a trajectory in the in-memory ring."
       (should (cl-find :direct gar-test--fake-llm-call-log :key #'car)))))
 
 (ert-deftest gar-e2e-happy-path-bumps-tick-and-emits-events ()
-  "A clean session advances the OpenClaw tick and emits events."
+  "A clean session advances the runtime tick and emits events."
   (gar-test-with-sandboxed-state
     (let ((start-tick (or gptel-agent-runtime-tick-counter 0))
           (start-events (length gptel-agent-runtime-event-log)))
