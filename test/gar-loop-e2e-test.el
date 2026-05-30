@@ -485,6 +485,83 @@ fallback runs."
       (gptel-agent-runtime--planner-similar-trajectories-context "x")
       (should lex-called))))
 
+;; ============================================================================
+;; PR 14: direct-response destination policy -- never pollute user files
+;; ============================================================================
+
+(ert-deftest gar-e2e-direct-response-default-routes-to-output-buffer ()
+  "With the default `output-buffer' policy, the resolver always returns
+the dedicated output buffer regardless of CANDIDATE."
+  (let ((gptel-agent-runtime-direct-response-destination 'output-buffer)
+        (gptel-agent-runtime-direct-response-buffer-name "*gar-test-out*")
+        (origin (get-buffer-create "*gar-test-origin*")))
+    (unwind-protect
+        (should (string= "*gar-test-out*"
+                         (buffer-name
+                          (gptel-agent-runtime--resolve-direct-response-buffer
+                           origin))))
+      (when (get-buffer "*gar-test-out*") (kill-buffer "*gar-test-out*"))
+      (when (buffer-live-p origin) (kill-buffer origin)))))
+
+(ert-deftest gar-e2e-direct-response-origin-mode-protects-file-backed ()
+  "With `origin-buffer' policy, a file-backed candidate gets redirected
+to the output buffer.  This is the regression for the reminders.org
+pollution bug -- the loop must never append direct-response output
+into a user's org or source file."
+  (let ((gptel-agent-runtime-direct-response-destination 'origin-buffer)
+        (gptel-agent-runtime-direct-response-buffer-name "*gar-test-out*")
+        (tmp (make-temp-file "gar-direct-resp-" nil ".org")))
+    (unwind-protect
+        (let ((origin (find-file-noselect tmp)))
+          (should (string= "*gar-test-out*"
+                           (buffer-name
+                            (gptel-agent-runtime--resolve-direct-response-buffer
+                             origin))))
+          (kill-buffer origin))
+      (when (get-buffer "*gar-test-out*") (kill-buffer "*gar-test-out*"))
+      (ignore-errors (delete-file tmp)))))
+
+(ert-deftest gar-e2e-direct-response-origin-mode-protects-read-only ()
+  "Read-only buffers also redirect under `origin-buffer' policy."
+  (let ((gptel-agent-runtime-direct-response-destination 'origin-buffer)
+        (gptel-agent-runtime-direct-response-buffer-name "*gar-test-out*")
+        (origin (get-buffer-create "*gar-test-ro*")))
+    (with-current-buffer origin (setq buffer-read-only t))
+    (unwind-protect
+        (should (string= "*gar-test-out*"
+                         (buffer-name
+                          (gptel-agent-runtime--resolve-direct-response-buffer
+                           origin))))
+      (when (get-buffer "*gar-test-out*") (kill-buffer "*gar-test-out*"))
+      (when (buffer-live-p origin) (kill-buffer origin)))))
+
+(ert-deftest gar-e2e-direct-response-origin-mode-honours-scratch ()
+  "Under `origin-buffer', a writable, non-file-backed candidate IS used
+(the in-place renderer mode for scratch math/explanation buffers)."
+  (let ((gptel-agent-runtime-direct-response-destination 'origin-buffer)
+        (gptel-agent-runtime-direct-response-buffer-name "*gar-test-out*")
+        (origin (get-buffer-create "*gar-test-scratch*")))
+    (unwind-protect
+        (should (eq origin
+                    (gptel-agent-runtime--resolve-direct-response-buffer
+                     origin)))
+      (when (get-buffer "*gar-test-out*") (kill-buffer "*gar-test-out*"))
+      (when (buffer-live-p origin) (kill-buffer origin)))))
+
+(ert-deftest gar-e2e-direct-response-unsafe-mode-honours-any-buffer ()
+  "The `origin-buffer-unsafe' escape hatch is honoured for legacy users."
+  (let ((gptel-agent-runtime-direct-response-destination 'origin-buffer-unsafe)
+        (gptel-agent-runtime-direct-response-buffer-name "*gar-test-out*")
+        (tmp (make-temp-file "gar-direct-resp-" nil ".org")))
+    (unwind-protect
+        (let ((origin (find-file-noselect tmp)))
+          (should (eq origin
+                      (gptel-agent-runtime--resolve-direct-response-buffer
+                       origin)))
+          (kill-buffer origin))
+      (when (get-buffer "*gar-test-out*") (kill-buffer "*gar-test-out*"))
+      (ignore-errors (delete-file tmp)))))
+
 (provide 'gar-loop-e2e-test)
 
 ;;; gar-loop-e2e-test.el ends here

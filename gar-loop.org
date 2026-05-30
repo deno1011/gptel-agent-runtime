@@ -147,6 +147,37 @@ See also:
 
 #+begin_src emacs-lisp
 
+(defun gptel-agent-runtime--resolve-direct-response-buffer (candidate)
+  "Return the buffer the autonomous loop should render direct-response output into.
+CANDIDATE is the would-be buffer (usually `(current-buffer)' at session
+start, or the live `--origin-buffer' at render time).  Returns either
+CANDIDATE or the dedicated output buffer, depending on
+`gptel-agent-runtime-direct-response-destination' and the safety
+checks (read-only, file-backed) that override the user's choice.
+
+The check ladder:
+
+- `output-buffer'        -> always the dedicated output buffer
+- `origin-buffer'        -> CANDIDATE unless it is read-only OR
+                            backed by a file on disk (the latter
+                            prevents direct-response transcripts
+                            from being appended to org TODO files
+                            and other user data)
+- `origin-buffer-unsafe' -> CANDIDATE unconditionally (legacy
+                            behaviour, kept as an escape hatch)"
+  (let ((out (get-buffer-create
+              gptel-agent-runtime-direct-response-buffer-name)))
+    (pcase gptel-agent-runtime-direct-response-destination
+      ('output-buffer out)
+      ('origin-buffer-unsafe (or candidate out))
+      (_  ;; 'origin-buffer or anything else: protect file-backed +
+          ;; read-only buffers, otherwise honour the candidate.
+       (cond
+        ((not (buffer-live-p candidate)) out)
+        ((with-current-buffer candidate buffer-read-only) out)
+        ((with-current-buffer candidate (buffer-file-name)) out)
+        (t candidate))))))
+
 ;;;###autoload
 (defun gptel-agent-runtime-start (goal &optional role process)
   "Start an autonomous agent session for GOAL with optional ROLE and PROCESS.
@@ -160,9 +191,8 @@ remember -> continue."
       (setf (gptel-agent-runtime-session-process session) process))
     (setq gptel-agent-runtime--current-session session)
     (setq gptel-agent-runtime--origin-buffer
-          (if buffer-read-only
-              (get-buffer-create "*gptel-agent-output*")
-            (current-buffer)))
+          (gptel-agent-runtime--resolve-direct-response-buffer
+           (current-buffer)))
     (setf (gptel-agent-runtime-task-status task) 'running)
     (gptel-agent-runtime--start-swarm-session-buffer session goal)
     (gptel-agent-runtime-emit-event
@@ -245,9 +275,8 @@ remember -> continue."
     (gptel-agent-runtime--requeue-running-work session)
     (setq gptel-agent-runtime--current-session session)
     (setq gptel-agent-runtime--origin-buffer
-          (if buffer-read-only
-              (get-buffer-create "*gptel-agent-output*")
-            (current-buffer)))
+          (gptel-agent-runtime--resolve-direct-response-buffer
+           (current-buffer)))
     (gptel-agent-runtime--start-swarm-session-buffer
      session
      (gptel-agent-runtime-task-goal
@@ -1914,15 +1943,18 @@ backend handles the request."
               (gptel-agent-runtime-result-error
                :tool "direct_response"
                :error "Direct response returned no output.")))
-         (let ((buffer (or (and (buffer-live-p gptel-agent-runtime--origin-buffer)
-                                gptel-agent-runtime--origin-buffer)
-                           (current-buffer))))
+         (let ((buffer (gptel-agent-runtime--resolve-direct-response-buffer
+                        (or (and (buffer-live-p
+                                  gptel-agent-runtime--origin-buffer)
+                                 gptel-agent-runtime--origin-buffer)
+                            (current-buffer)))))
            (with-current-buffer buffer
              (let ((beg (point-max)))
                (goto-char beg)
                (unless (bolp) (insert "\n"))
                (insert response "\n")
-               (run-hook-with-args 'gptel-post-response-functions beg (point)))))
+               (run-hook-with-args 'gptel-post-response-functions beg (point))))
+           (display-buffer buffer))
          (gptel-agent-runtime-emit-event
           'worker-finished
           :source "direct-response"
