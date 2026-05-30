@@ -33,6 +33,31 @@ See also:
 - [[file:gar-memory.org][gar-memory]] (owns the Ollama embedding cache + cosine helper
   reused for vector search)
 
+<!-- gar:function-reference:start -->
+* Function reference
+
+This section is generated from the Elisp docstrings in this Org file. It is Org prose, not tangled code, so it explains the functions without changing runtime behavior.
+
+- =gptel-agent-runtime--sqlite-available-p=: Return non-nil when Emacs is built with SQLite support.
+- =gptel-agent-runtime--sqlite-fts5-available-p=: Return non-nil when DB's SQLite build was compiled with FTS5.
+- =gptel-agent-runtime--sqlite-ensure-schema=: Create the trajectories tables + FTS5 (when available) on DB.
+- =gptel-agent-runtime-sqlite-open=: Open the SQLite connection, ensuring the schema.
+- =gptel-agent-runtime-sqlite-close=: Close the live SQLite connection, if any.
+- =gptel-agent-runtime--sqlite-vec-to-string=: Encode a vector VEC (list of floats) as a comma-separated string.
+- =gptel-agent-runtime--sqlite-vec-from-string=: Decode a comma-separated string S into a list of floats.
+- =gptel-agent-runtime--sqlite-trajectory-blob=: Return the prin1'd TRAJECTORY for storage in the blob column.
+- =gptel-agent-runtime--sqlite-decisions-text=: Return the trajectory's decisions concatenated into one TEXT string.
+- =gptel-agent-runtime-sqlite-insert-trajectory=: Mirror TRAJECTORY into the SQLite index.
+- =gptel-agent-runtime--sqlite-row-to-summary=: Convert a SELECT row (id goal outcome finalized_at) into a plist summary.
+- =gptel-agent-runtime-sqlite-search-by-text=: Return up to LIMIT trajectory summaries whose goal/decisions match PATTERN.
+- =gptel-agent-runtime-sqlite-similar-trajectories=: Return up to LIMIT trajectory summaries most similar to TEXT.
+- =gptel-agent-runtime-sqlite-get-trajectory=: Return the deserialized trajectory struct with ID, or nil.
+- =gptel-agent-runtime-sqlite-migrate-flat-files=: Bulk-import every trajectory under `trajectories-directory' into SQLite.
+- =gptel-agent-runtime-sqlite-stats=: Return a plist describing the SQLite index state.
+- =gptel-agent-runtime-search-trajectories=: Search past trajectories by goal/decisions text PATTERN.
+- =gptel-agent-runtime-similar-trajectories=: Find past trajectories whose goal is most similar to TEXT.
+<!-- gar:function-reference:end -->
+
 * File header
 
 #+begin_src emacs-lisp

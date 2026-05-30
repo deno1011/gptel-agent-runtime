@@ -14,6 +14,18 @@ See also:
 - [[file:gar-safety.org][gar-safety]] (calls =--quarantine-rule-text= from =untrusted-context=
   and =--quarantine-conflict-p= from =policy-evaluate-step=)
 
+<!-- gar:function-reference:start -->
+* Function reference
+
+This section is generated from the Elisp docstrings in this Org file. It is Org prose, not tangled code, so it explains the functions without changing runtime behavior.
+
+- =gptel-agent-runtime-evidence-quarantined-p=: Return non-nil when EVIDENCE is currently in quarantine.
+- =gptel-agent-runtime-quarantined-evidence=: Return the list of evidence records currently in quarantine, newest first.
+- =gptel-agent-runtime-promote-evidence=: Promote EVIDENCE-ID out of quarantine so its text may route tool calls.
+- =gptel-agent-runtime--quarantine-rule-text=: Return the quarantine rule appended to untrusted wrappers when active.
+- =gptel-agent-runtime--quarantine-conflict-p=: Return a deny-reason string when STEP arguments overlap quarantined text.
+<!-- gar:function-reference:end -->
+
 * File header
 
 #+begin_src emacs-lisp

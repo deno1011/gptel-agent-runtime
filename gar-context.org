@@ -18,6 +18,27 @@ that currently shares a source block with it.
 See also:
 - [[file:gptel-agent-runtime.org][gptel-agent-runtime]] (master entrypoint that requires this module)
 
+<!-- gar:function-reference:start -->
+* Function reference
+
+This section is generated from the Elisp docstrings in this Org file. It is Org prose, not tangled code, so it explains the functions without changing runtime behavior.
+
+- =gptel-agent-runtime--image-helper-name=: Return the name of the OS clipboard-image helper for the current platform.
+- =gptel-agent-runtime--image-helper-available-p=: Return non-nil when the platform's clipboard-image helper is on PATH.
+- =gptel-agent-runtime-install-image-helpers=: Install the OS-native clipboard-image helper interactively.
+- =gar-context--shrink-image=: Shrink PATH if necessary.
+- =gar-context--clipboard-to-file=: Save clipboard image to PATH using the available backend.
+- =gptel-agent-runtime-insert-clipboard-image=: Save clipboard image, shrink if needed, insert as org link and attach to gptel.
+- =gptel-agent-runtime-attach-image-at-point=: Find the org file: link at/around point and attach PATH to the next gptel request.
+- =gptel-agent-runtime-web-fetch=: Fetch URL synchronously, return body as string.
+- =gptel-agent-runtime-web-html=: Fetch URL and return a parsed DOM tree.
+- =gptel-agent-runtime-web-text=: Fetch URL, render as readable plain text via shr.
+- =gptel-agent-runtime-web-search-ddg=: DuckDuckGo HTML search.
+- =gptel-agent-runtime-web-fetch-image=: Download image from URL to DIR (default temporary-file-directory).
+- =gptel-agent-runtime-web-extract-images=: Return absolute image URLs from a page, max LIMIT (default 10).
+- =gptel-agent-runtime-insert-image-inline=: Append FILE-OR-URL as an org image link to the current buffer end.
+<!-- gar:function-reference:end -->
+
 * File header
 
 #+begin_src emacs-lisp

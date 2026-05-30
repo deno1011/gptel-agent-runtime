@@ -16,6 +16,14 @@ See also:
 - [[file:gar-policy.org][gar-policy]] (provides =untrusted-context=, the wrapper under test)
 - [[file:gar-substrate.org][gar-substrate]] (provides =timestamp= and the evidence taxonomy)
 
+<!-- gar:function-reference:start -->
+* Function reference
+
+This section is generated from the Elisp docstrings in this Org file. It is Org prose, not tangled code, so it explains the functions without changing runtime behavior.
+
+- =gptel-agent-runtime-run-injection-canaries=: Run the prompt-injection canary suite against the untrusted wrappers.
+<!-- gar:function-reference:end -->
+
 * File header
 
 #+begin_src emacs-lisp

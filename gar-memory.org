@@ -43,6 +43,56 @@ See also:
   tool results are normalized into is defined there; this module's
   session serializer can revive that struct via =--data-to-struct=)
 
+<!-- gar:function-reference:start -->
+* Function reference
+
+This section is generated from the Elisp docstrings in this Org file. It is Org prose, not tangled code, so it explains the functions without changing runtime behavior.
+
+- =gptel-agent-runtime--significant-tokens=: Return a deduplicated list of significant tokens for novelty scoring.
+- =gptel-agent-runtime--jaccard=: Return the Jaccard similarity between token lists A and B (0.0-1.0).
+- =gptel-agent-runtime-novelty-score=: Return a 0.0-1.0 novelty score for TEXT against past sessions and playbooks.
+- =gptel-agent-runtime-novel-task-p=: Return non-nil and emit `novelty-detected' when TEXT is novel.
+- =gptel-agent-runtime-playbook-success-rate=: Return the success rate (0.0-1.0) for PLAYBOOK or nil when unused.
+- =gptel-agent-runtime--playbook-invocations-file=: Return the absolute path of the playbook-invocations log.
+- =gptel-agent-runtime--save-playbook-invocations=: Persist the in-memory invocation log to disk with the schema header.
+- =gptel-agent-runtime-load-playbook-invocations=: Load the persisted invocation log, replacing the in-memory ring.
+- =gptel-agent-runtime-record-playbook-invocation=: Append one PLAYBOOK-ID invocation entry to the log.
+- =gptel-agent-runtime-playbook-invocations-for=: Return invocation plists for PLAYBOOK-ID, newest first, capped at LIMIT.
+- =gptel-agent-runtime-playbook-recent-success-rate=: Return rolling success rate for PLAYBOOK over the recent invocations.
+- =gptel-agent-runtime-playbook-last-used-at=: Return the timestamp of the most recent recorded invocation, or nil.
+- =gptel-agent-runtime-rank-playbooks-by-success=: Return registered playbooks ordered by best success rate.
+- =gptel-agent-runtime-next-time-do-this-first=: Return a one-line hint about which playbook to try first for TEXT, or nil.
+- =gptel-agent-runtime--session-finalized-outcome=: Map a `--finalize-task' REASON symbol to a playbook outcome symbol.
+- =gptel-agent-runtime--record-playbook-invocations-on-finalize=: Subscriber: at `session-finalized', record one invocation per matched playbook.
+- =gptel-agent-runtime-show-playbook-history=: Open a buffer summarising the most recent playbook invocations.
+- =gptel-agent-runtime--candidates-directory=: Return the candidate-playbook directory, creating it as needed.
+- =gptel-agent-runtime--write-candidate-playbook=: Persist CANDIDATE plist to a new file under the candidates directory.
+- =gptel-agent-runtime-synthesize-candidate-playbook=: Produce one candidate playbook from the top-2 successful playbooks.
+- =gptel-agent-runtime--maybe-synthesize-on-tick=: Tick-subscribed callback that occasionally synthesizes a candidate playbook.
+- =gptel-agent-runtime-list-playbook-candidates=: Return the list of candidate playbook files.
+- =gptel-agent-runtime-review-playbook-candidates=: Open a buffer listing pending candidate playbooks for human review.
+- =gptel-agent-runtime-make-experiment-evidence=: Construct evidence of type `experiment'.
+- =gptel-agent-runtime-evaluate-experiment=: Apply PREDICATE-FN to the OBSERVED field of EVIDENCE.
+- =gptel-agent-runtime-memory-ensure-directory=: Ensure `gptel-agent-runtime-memory-directory' exists and return it.
+- =gptel-agent-runtime-memory-session-path=: Return the memory file path for SESSION.
+- =gptel-agent-runtime--struct-to-data=: Convert known runtime struct OBJECT into printable data.
+- =gptel-agent-runtime-memory-write-session=: Write SESSION to its memory file and return the file path.
+- =gptel-agent-runtime--data-to-struct=: Convert persisted DATA back into runtime structs.
+- =gptel-agent-runtime-memory-read-session=: Read runtime session memory FILE into structs.
+- =gptel-agent-runtime-memory-files=: Return existing runtime memory files, newest first.
+- =gptel-agent-runtime--text-score=: Return a simple lexical relevance score for QUERY against TEXT.
+- =gptel-agent-runtime-embedding-cache-path=: Return the persistent embedding cache path.
+- =gptel-agent-runtime-load-embedding-cache=: Load the persistent embedding cache.
+- =gptel-agent-runtime-save-embedding-cache=: Save the persistent embedding cache.
+- =gptel-agent-runtime--embedding-cache-key=: Return cache key for TEXT and current embedding model.
+- =gptel-agent-runtime--embedding-cache-get=: Return cached embedding for TEXT, or nil.
+- =gptel-agent-runtime--embedding-cache-put=: Cache EMBEDDING for TEXT.
+- =gptel-agent-runtime--ollama-embedding=: Return Ollama embedding vector for TEXT, or nil.
+- =gptel-agent-runtime--cosine-similarity=: Return cosine similarity between numeric vectors A and B.
+- =gptel-agent-runtime-memory-retrieve=: Return up to LIMIT memory snippets relevant to QUERY.
+- =gptel-agent-runtime-memory-context=: Return formatted memory context for QUERY.
+<!-- gar:function-reference:end -->
+
 * File header
 
 #+begin_src emacs-lisp

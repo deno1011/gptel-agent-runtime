@@ -50,6 +50,25 @@ See also:
 - every other =gar-*= module references defcustoms/defvars/structs
   defined here
 
+<!-- gar:function-reference:start -->
+* Function reference
+
+This section is generated from the Elisp docstrings in this Org file. It is Org prose, not tangled code, so it explains the functions without changing runtime behavior.
+
+- =gptel-agent-runtime-create-task=: Create a task object with TITLE, GOAL, and optional PARENT-ID.
+- =gptel-agent-runtime-create-session=: Create a session around ROOT-TASK using ROLE or the default role.
+- =gptel-agent-runtime-create-plan=: Create a plan for TASK with optional STEPS.
+- =gptel-agent-runtime-create-plan-step=: Create one draft plan step.
+- =gptel-agent-runtime-plan-complete-p=: Return non-nil when every step in PLAN is done.
+- =gptel-agent-runtime-next-plan-step=: Return the first non-done step in PLAN.
+- =gptel-agent-runtime-tools-all=: Return list of all registered gptel-tool structs.
+- =gptel-agent-runtime-sync-tools=: Enable all registered gptel tools in the current buffer.
+- =gptel-agent-runtime-select-model=: Select backend+model — sets globally AND in the active gptel buffer.
+- =gptel-agent-runtime-mode-line=: Show the active gptel model in the mode line.
+- =gptel-agent-runtime-status=: Display active gptel backend, model, directive, and tool count.
+- =gptel-agent-runtime-sync-and-status=: Synchronize the directive for the active runtime and display status.
+<!-- gar:function-reference:end -->
+
 * File header
 
 #+begin_src emacs-lisp

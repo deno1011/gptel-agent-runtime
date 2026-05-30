@@ -43,6 +43,30 @@ See also:
 - [[file:gar-loop.org][gar-loop]] (=--observe-result= calls
   =gptel-agent-runtime-verify-action-result= and routes by verdict)
 
+<!-- gar:function-reference:start -->
+* Function reference
+
+This section is generated from the Elisp docstrings in this Org file. It is Org prose, not tangled code, so it explains the functions without changing runtime behavior.
+
+- =gptel-agent-runtime--verifier-applies-p=: Return non-nil when the verifier should fire for plan-step RISK.
+- =gptel-agent-runtime--verifier-rule-based-verdict=: Return a rule-based verdict plist for STEP and RESULT.
+- =gptel-agent-runtime--verifier-build-prompt=: Format the user prompt for the model-based verifier.
+- =gptel-agent-runtime--verifier-parse-verdict=: Parse a JSON verifier verdict from TEXT into the verdict plist shape.
+- =gptel-agent-runtime--verifier-model-based-verdict=: Synchronously ask a model to verify STEP's RESULT in TASK's context.
+- =gptel-agent-runtime--verifier-extract-item-count=: Best-effort count of enumerable items in TEXT.
+- =gptel-agent-runtime--verifier-find-prior-tool-result=: Return the action-result of the most recent prior `done' step in TASK's plan whose result has non-empty output, or nil.
+- =gptel-agent-runtime--verifier-completeness-applies-p=: Return non-nil when the completeness check should fire for STEP.
+- =gptel-agent-runtime--verifier-completeness-heuristic-verdict=: Heuristic completeness verdict comparing STEP's RESULT against PRIOR-RESULT.
+- =gptel-agent-runtime--verifier-completeness-build-prompt=: Build the user prompt for the model-based completeness verdict.
+- =gptel-agent-runtime--verifier-completeness-parse-verdict=: Parse TEXT as the model-based completeness verdict JSON.
+- =gptel-agent-runtime--verifier-completeness-model-based-verdict=: Synchronously ask the model to compare STEP's RESULT against PRIOR-RESULT for completeness.
+- =gptel-agent-runtime--verifier-completeness-verdict=: Dispatcher for the completeness check.
+- =gptel-agent-runtime--verifier-primary-verdict=: Run the primary safety verifier (rule-based or model-based) for STEP.
+- =gptel-agent-runtime-verify-action-result=: Return a verifier verdict for STEP's RESULT, or nil when no verifier fires.
+- =gptel-agent-runtime--verifier-should-retry-p=: Return non-nil when STEP should be auto-retried given VERDICT.
+- =gptel-agent-runtime--verifier-prepare-retry=: Mutate STEP for the next --act pass, embedding VERDICT's suggested correction.
+<!-- gar:function-reference:end -->
+
 * File header
 
 #+begin_src emacs-lisp

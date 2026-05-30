@@ -59,6 +59,87 @@ See also:
 - [[file:gar-directives.org][gar-directives]] (the directive symbol on each agent record points
   to a directive registered there)
 
+<!-- gar:function-reference:start -->
+* Function reference
+
+This section is generated from the Elisp docstrings in this Org file. It is Org prose, not tangled code, so it explains the functions without changing runtime behavior.
+
+- =gptel-agent-runtime-route-event=: Route EVENT to an agent/skill decision.
+- =gptel-agent-runtime-register-agent=: Register an agent definition.
+- =gptel-agent-runtime-find-agent=: Return registered agent NAME, or nil.
+- =gptel-agent-runtime-enabled-agents=: Return all enabled registered agents.
+- =gptel-agent-runtime-register-skill=: Register a reusable skill.
+- =gptel-agent-runtime-find-skill=: Return registered skill NAME, or nil.
+- =gptel-agent-runtime-enabled-skills=: Return all enabled registered skills.
+- =gptel-agent-runtime-register-organization-unit=: Register an inspectable organization unit.
+- =gptel-agent-runtime-find-organization-unit=: Return organization unit NAME, or nil.
+- =gptel-agent-runtime-enabled-organization-units=: Return enabled organization units.
+- =gptel-agent-runtime--trigger-matches-p=: Return non-nil when TRIGGER matches TEXT.
+- =gptel-agent-runtime--organization-unit-score=: Return routing score for organization UNIT and TEXT.
+- =gptel-agent-runtime-route-organization=: Return best matching organization unit for TEXT.
+- =gptel-agent-runtime-playbook-path=: Return the playbook store path.
+- =gptel-agent-runtime-load-playbooks=: Load persisted playbooks from disk.
+- =gptel-agent-runtime-save-playbooks=: Persist playbooks to disk.
+- =gptel-agent-runtime-skill-stats-path=: Return the skill stats file path.
+- =gptel-agent-runtime-load-skill-stats=: Load persisted skill statistics.
+- =gptel-agent-runtime-save-skill-stats=: Persist skill statistics.
+- =gptel-agent-runtime-skill-stat=: Return stats plist for SKILL-NAME.
+- =gptel-agent-runtime-record-skill-outcome=: Record an outcome for SKILL-NAME.
+- =gptel-agent-runtime-register-playbook=: Register a learned strategy playbook.
+- =gptel-agent-runtime--tokenize-text=: Return simple lowercase tokens for TEXT.
+- =gptel-agent-runtime--playbook-score=: Return match score for PLAYBOOK and TEXT.
+- =gptel-agent-runtime-match-playbooks=: Return matching playbooks for TEXT, strongest first.
+- =gptel-agent-runtime-format-playbooks=: Return planner prompt text for PLAYBOOKS.
+- =gptel-agent-runtime-playbook-bump=: Mutate PLAYBOOK's success/failure count for OUTCOME and update updated-at.
+- =gptel-agent-runtime-record-session-playbook=: Create a reusable playbook from completed SESSION.
+- =gptel-agent-runtime-skill-score-adjustment=: Return routing adjustment from historical outcomes for SKILL.
+- =gptel-agent-runtime--skill-matches-p=: Return non-nil when SKILL trigger matches TEXT.
+- =gptel-agent-runtime-match-skills=: Return enabled skills whose triggers match TEXT.
+- =gptel-agent-runtime--agent-score=: Return a simple routing score for AGENT given TEXT and matched SKILLS.
+- =gptel-agent-runtime--organization-agent-allowed-p=: Return non-nil when UNIT allows AGENT, or no unit restriction exists.
+- =gptel-agent-runtime-route-task=: Route task TEXT to an agent and matching skills.
+- =gptel-agent-runtime-route-summary=: Return a human-readable route summary for TEXT.
+- =gptel-agent-runtime-describe-route=: Display the agent/skill route for TEXT.
+- =gptel-agent-runtime-agent-directive-symbol=: Return directive symbol for AGENT.
+- =gptel-agent-runtime-normalize-skills=: Return a flat list of valid skill structs from SKILLS.
+- =gptel-agent-runtime-format-skill-instructions=: Return prompt instructions for SKILLS.
+- =gptel-agent-runtime-apply-route-to-current-buffer=: Apply route for TEXT to the current gptel buffer.
+- =gptel-agent-runtime-register-default-agents-and-skills=: Register built-in starter agents and skills.
+- =gptel-agent-runtime--model-router-count-matches=: Return number of PATTERNS matching TEXT.
+- =gptel-agent-runtime-model-router-analyze=: Return model-router feature scores for TEXT.
+- =gptel-agent-runtime-model-router-profile-for-analysis=: Return model profile symbol for ANALYSIS.
+- =gptel-agent-runtime--model-entry-text=: Return searchable text for backend ENTRY.
+- =gptel-agent-runtime-model-router-find-entry=: Return the best available `gptel-agent-runtime-backends' entry for PROFILE.
+- =gptel-agent-runtime-model-router-classify=: Return a routing decision plist for TEXT.
+- =gptel-agent-runtime-apply-model-route=: Apply model-router decision for TEXT.
+- =gptel-agent-runtime-model-router-preview=: Preview the model-router decision for TEXT or current buffer request.
+- =gptel-agent-runtime-toggle-model-router=: Toggle automatic model routing before normal gptel sends.
+- =gptel-agent-runtime-collect-org-todos=: Return a list of TODO entries from all org agenda files.
+- =gptel-agent-runtime-build-workspace-context=: Build a compact workspace context string for the gptel system prompt.
+- =gptel-agent-runtime-workspace-context-string=: Return cached workspace context, refreshing if stale.
+- =gptel-agent-runtime-context-invalidate=: Force workspace context to be rebuilt on next gptel call.
+- =gptel-agent-runtime-current-buffer-task-text=: Return recent buffer text used for lightweight agent/skill routing.
+- =gptel-agent-runtime-capability-question-p=: Return non-nil when TEXT asks about runtime capabilities or organization.
+- =gptel-agent-runtime--latest-request-text=: Return the likely latest user request from recent gptel buffer TEXT.
+- =gptel-agent-runtime--chat-router-score=: Return a heuristic complexity score for routing TEXT into swarm mode.
+- =gptel-agent-runtime--chat-router-process=: Return preferred process symbol for prompt TEXT.
+- =gptel-agent-runtime--chat-capability-request-p=: Return non-nil when TEXT asks for a capability answer, not work routing.
+- =gptel-agent-runtime-classify-chat-request=: Return a plist describing whether TEXT should enter swarm mode.
+- =gptel-agent-runtime-chat-router-status=: Show the current chat router decision for recent buffer text.
+- =gptel-agent-runtime-router-state=: Return a concise string describing runtime routing state.
+- =gptel-agent-runtime-apply-chat-router-startup-mode=: Apply `gptel-agent-runtime-chat-router-startup-mode' to live routing state.
+- =gptel-agent-runtime-enable-swarm-routing=: Enable autonomous swarm routing for suitable normal gptel prompts.
+- =gptel-agent-runtime-disable-swarm-routing=: Disable autonomous swarm routing from normal gptel prompts.
+- =gptel-agent-runtime-toggle-swarm-routing=: Toggle autonomous swarm routing from normal gptel prompts.
+- =gptel-agent-runtime-set-chat-router-mode=: Set chat router MODE to `auto', `ask', or `off'.
+- =gptel-agent-runtime-set-chat-router-startup-mode=: Set chat router startup MODE to `off', `ask', or `auto'.
+- =gptel-agent-runtime-safe-swarm-self-test=: Run a safe synthetic swarm trace test without web, files, or shell tools.
+- =gptel-agent-runtime-worker-self-test=: Create COUNT synthetic visible swarm workers without running tools.
+- =gptel-agent-runtime-command-center=: Open a compact command menu for the Emacs agent runtime.
+- =gptel-agent-runtime--maybe-route-chat-to-swarm=: Maybe start a swarm session from TASK-TEXT and return non-nil if handled.
+- =gar-agents--inject-context=: Around advice for `gptel-send': route, sync directive, and prepend context.
+<!-- gar:function-reference:end -->
+
 * File header
 
 #+begin_src emacs-lisp

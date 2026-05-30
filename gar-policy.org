@@ -41,6 +41,43 @@ See also:
 - [[file:gar-agents.org][gar-agents]] (per-agent =allowed-caps= consulted by the capability
   gate via =resolve-agent-caps=)
 
+<!-- gar:function-reference:start -->
+* Function reference
+
+This section is generated from the Elisp docstrings in this Org file. It is Org prose, not tangled code, so it explains the functions without changing runtime behavior.
+
+- =gptel-agent-runtime--risk-value=: Return numeric value for RISK.
+- =gptel-agent-runtime-risk-at-least-p=: Return non-nil when RISK is at least THRESHOLD.
+- =gptel-agent-runtime--path-under-directory-p=: Return non-nil when PATH is inside DIRECTORY.
+- =gptel-agent-runtime-protected-path-p=: Return non-nil when PATH is protected by runtime or local policy.
+- =gptel-agent-runtime--allowed-write-root-p=: Return non-nil when PATH is under an allowed write root.
+- =gptel-agent-runtime-blocked-shell-command-p=: Return non-nil when COMMAND matches a blocked shell pattern.
+- =gptel-agent-runtime-placeholder-command-p=: Return non-nil when COMMAND contains placeholder credentials.
+- =gptel-agent-runtime--symbol-name=: Return VALUE as a stable string.
+- =gptel-agent-runtime--plist-values-for-keys=: Return values from PLIST for KEYS.
+- =gptel-agent-runtime--policy-for-tool=: Return configured policy plist for TOOL-NAME.
+- =gptel-agent-runtime-policy-preset-names=: Return all available policy preset names as symbols.
+- =gptel-agent-runtime-policy-preset-description=: Return human-readable description for PRESET.
+- =gptel-agent-runtime-apply-policy-preset=: Apply named policy PRESET.
+- =gptel-agent-runtime--policy-default-allows-p=: Return non-nil when POLICY default permits execution.
+- =gptel-agent-runtime--policy-agent-allowed-p=: Return non-nil when POLICY allows AGENT.
+- =gptel-agent-runtime--policy-path-allowed-p=: Return non-nil when POLICY allows all PATHS.
+- =gptel-agent-runtime--policy-command-blocked-p=: Return non-nil when POLICY blocks COMMAND.
+- =gptel-agent-runtime--policy-confirmation-required-p=: Return non-nil when POLICY requires confirmation for RISK.
+- =gptel-agent-runtime--default-caps-from-risk=: Return a conservative capability list derived from RISK.
+- =gptel-agent-runtime-caps-for-tool=: Return the required capability list for TOOL.
+- =gptel-agent-runtime-resolve-agent-caps=: Return the allowed-caps list for AGENT-OR-NAME, or nil when unknown.
+- =gptel-agent-runtime--caps-subset-p=: Return non-nil when every cap in REQUIRED is also in ALLOWED.
+- =gptel-agent-runtime--capability-check=: Return nil when AGENT may invoke TOOL at RISK, or a deny-reason string.
+- =gptel-agent-runtime--schema-violations-for-tool=: Return the list of validator violations for ARGS under TOOL's :arg-schema.
+- =gptel-agent-runtime-policy-evaluate-step=: Return policy decision for STEP in CONTEXT.
+- =gptel-agent-runtime-safety-check-step=: Return nil if STEP is allowed, or an explanatory error string.
+- =gptel-agent-runtime-confirmation-required-p=: Return non-nil when an action with RISK requires confirmation.
+- =gptel-agent-runtime--truncate-context=: Return TEXT truncated to MAX-CHARS.
+- =gptel-agent-runtime-untrusted-context=: Wrap TEXT-OR-EVIDENCE as untrusted evidence named LABEL from optional SOURCE.
+- =gptel-agent-runtime-trusted-context=: Wrap trusted runtime TEXT-OR-EVIDENCE with LABEL for prompt readability.
+<!-- gar:function-reference:end -->
+
 * File header
 
 #+begin_src emacs-lisp

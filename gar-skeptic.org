@@ -35,6 +35,17 @@ See also:
 - [[file:gar-policy.org][gar-policy]] (=policy-evaluate-step= calls =skeptic-evaluate= here)
 - [[file:gar-skeptic-model.org][gar-skeptic-model]] (model-based verdict path; loaded after this module)
 
+<!-- gar:function-reference:start -->
+* Function reference
+
+This section is generated from the Elisp docstrings in this Org file. It is Org prose, not tangled code, so it explains the functions without changing runtime behavior.
+
+- =gptel-agent-runtime--skeptic-applies-p=: Return non-nil when the skeptic should fire for RISK and REQUIRED-CAPS.
+- =gptel-agent-runtime--skeptic-rule-based-verdict=: Return a rule-based skeptic verdict plist.
+- =gptel-agent-runtime-skeptic-evaluate=: Return a skeptic verdict for STEP given the policy DECISION, or nil.
+- =gptel-agent-runtime--apply-skeptic-to-decision=: Mutate DECISION metadata with VERDICT and escalate confirmation for `high'.
+<!-- gar:function-reference:end -->
+
 * File header
 
 #+begin_src emacs-lisp

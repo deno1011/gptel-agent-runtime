@@ -37,6 +37,23 @@ See also:
 - [[file:gar-playbook-refine.org][gar-playbook-refine]] (consumer of the same signals, but action-side)
 - [[file:gar-mission-control.org][gar-mission-control]] (renders the dashboard summary)
 
+<!-- gar:function-reference:start -->
+* Function reference
+
+This section is generated from the Elisp docstrings in this Org file. It is Org prose, not tangled code, so it explains the functions without changing runtime behavior.
+
+- =gptel-agent-runtime--failure-analytics-classify-reason=: Return the bucket label for failure TEXT, or `"other"' when nothing matches.
+- =gptel-agent-runtime--failure-analytics-failures-from-verdicts=: Walk the in-memory ring of verifier verdicts and return failure plists -- one per `:passed nil' verdict -- with shape `(:tool TOOL :reason REASON :step STEP :at TIMESTAMP)'.
+- =gptel-agent-runtime--failure-analytics-failures-from-trajectories=: Walk the in-memory trajectory ring and return failure plists.
+- =gptel-agent-runtime--failure-analytics-all-failures=: Return the union of verdict + trajectory failures.
+- =gptel-agent-runtime--failure-analytics-top-counts=: Group FAILURES by KEY (`:tool' or `:reason'), return alist of (KEY-VALUE .
+- =gptel-agent-runtime-failure-analytics-stats=: Return a stats plist: `(:total N :by-tool ((TOOL .
+- =gptel-agent-runtime-failure-remediation-suggestion=: Look up a remediation suggestion for REASON (and optional TOOL).
+- =gptel-agent-runtime--failure-analytics-top-tool-for-reason=: Return the most-failing TOOL name for REASON among FAILURES, or nil.
+- =gptel-agent-runtime-failure-analytics-summary=: Return a multi-line string for the mission-control `Failure patterns' section.
+- =gptel-agent-runtime-failure-report=: Open a detailed failure-pattern report covering the recent trajectory + verifier-verdict ring.
+<!-- gar:function-reference:end -->
+
 * File header
 
 #+begin_src emacs-lisp

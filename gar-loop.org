@@ -48,6 +48,109 @@ See also:
   reflection and resume point)
 - [[file:gar-tools.org][gar-tools]] (every act step ultimately calls a registered tool)
 
+<!-- gar:function-reference:start -->
+* Function reference
+
+This section is generated from the Elisp docstrings in this Org file. It is Org prose, not tangled code, so it explains the functions without changing runtime behavior.
+
+- =gptel-agent-runtime--resolve-direct-response-buffer=: Return the buffer the autonomous loop should render direct-response output into.
+- =gptel-agent-runtime-start=: Start an autonomous agent session for GOAL with optional ROLE and PROCESS.
+- =gptel-agent-runtime-stop=: Stop the current autonomous agent session.
+- =gptel-agent-runtime-session-summary=: Return a short status summary for SESSION or the active session.
+- =gptel-agent-runtime-describe-session=: Display a summary of the current autonomous agent session.
+- =gptel-agent-runtime-list-sessions=: Return saved runtime session files newest first.
+- =gptel-agent-runtime--session-complete-p=: Return non-nil when SESSION is in a terminal state.
+- =gptel-agent-runtime-resume-session=: Resume an unfinished runtime session from FILE.
+- =gptel-agent-runtime--requeue-running-work=: Mark in-flight work in SESSION as requeued for restart-safe resume.
+- =gptel-agent-runtime-resume-last-session=: Resume the newest unfinished runtime session.
+- =gptel-agent-runtime--continue=: Continue SESSION through the next loop phase.
+- =gptel-agent-runtime--workspace-observation=: Return a compact observation string for the current workspace.
+- =gptel-agent-runtime--tool-names=: Return currently available gptel tool names.
+- =gptel-agent-runtime--planner-system=: Return the strict system prompt for planner JSON.
+- =gptel-agent-runtime--plan-review-system=: Return the strict system prompt for pre-execution plan review.
+- =gptel-agent-runtime--delphi-system=: Return the system prompt for one isolated Delphi specialist draft.
+- =gptel-agent-runtime--planner-handover-context=: Return a compact `RECENT SESSIONS' text block from the in-memory trajectory ring, or the empty string when the feature is disabled or the ring is empty.
+- =gptel-agent-runtime--planner-similar-trajectories-context=: Search the trajectory archive for past goals similar to GOAL and return a compact text block suitable for injection into the planner prompt.
+- =gptel-agent-runtime--observe-and-plan=: Observe current state and ask the planner to create a JSON plan for SESSION.
+- =gptel-agent-runtime--observe-and-delphi=: Observe SESSION and run a Delphi-style isolated draft process.
+- =gptel-agent-runtime--aggregate-delphi-drafts=: Ask an aggregator to synthesize Delphi DRAFTS for SESSION.
+- =gptel-agent-runtime--brainstorm-inventor-system=: System prompt used to ask the inventor for ranked alternatives.
+- =gptel-agent-runtime--brainstorm-simplifier-system=: System prompt used to ask the simplifier to pick a single alternative.
+- =gptel-agent-runtime--brainstorm-build-plan=: Turn the simplifier's CHOSEN plist into a one-step plan on SESSION.
+- =gptel-agent-runtime--observe-and-brainstorm=: Brainstorm SESSION's goal via the inventor + simplifier agents.
+- =gptel-agent-runtime--parse-brainstorm-alternatives=: Parse the inventor RESPONSE into a list of alternative plists.
+- =gptel-agent-runtime--handle-brainstorm-alternatives=: Send RESPONSE alternatives to the simplifier for SESSION.
+- =gptel-agent-runtime--handle-brainstorm-choice=: Parse simplifier RESPONSE; finalize the chosen alternative on SESSION.
+- =gptel-agent-runtime--brainstorm-finalize-choice=: Build a single-step plan from CHOSEN and hand off to --act.
+- =gptel-agent-runtime--observe-and-peer-review=: Run the planner with a forced Advocatus Diaboli review for every step.
+- =gptel-agent-runtime--maybe-route-novelty-to-brainstorm=: Subscriber: if EVENT is `novelty-detected' and the auto-flip option is on, flip the current session to brainstorm mode.
+- =gptel-agent-runtime--extract-json=: Extract the first likely JSON object from TEXT.
+- =gptel-agent-runtime--repair-json-string=: Apply deterministic repairs to common local-model JSON mistakes.
+- =gptel-agent-runtime--json-read-plist=: Read TEXT as JSON and return plists/lists.
+- =gptel-agent-runtime--keywordize-risk=: Normalize RISK from JSON to a risk symbol.
+- =gptel-agent-runtime--json-truthy-p=: Return non-nil when VALUE is JSON/logical true.
+- =gptel-agent-runtime--schema-error=: Create a schema error at PATH with MESSAGE.
+- =gptel-agent-runtime--external-json-schema-errors=: Return external JSON Schema validation errors for DATA against SCHEMA.
+- =gptel-agent-runtime--jsonschema-feature-errors=: Return validation errors using optional jsonschema feature.
+- =gptel-agent-runtime--validate-with-schema=: Return external schema validation errors for DATA and SCHEMA.
+- =gptel-agent-runtime--validate-plan-item=: Return schema errors for plan ITEM at INDEX.
+- =gptel-agent-runtime-validate-plan-data=: Return schema validation errors for parsed planner DATA.
+- =gptel-agent-runtime-validate-reflection-data=: Return schema validation errors for parsed reviewer DATA.
+- =gptel-agent-runtime--normalize-args=: Normalize JSON ARGS into a keyword plist.
+- =gptel-agent-runtime--parse-plan=: Parse planner TEXT into plan steps.
+- =gptel-agent-runtime--handle-plan-response=: Parse planner RESPONSE into SESSION plan and move to action.
+- =gptel-agent-runtime--plan-review-needed-p=: Return non-nil when PLAN in SESSION should be reviewed before execution.
+- =gptel-agent-runtime--format-plan-for-review=: Return compact text for PLAN review.
+- =gptel-agent-runtime--review-plan-before-execution=: Run Advocatus Diaboli review for PLAN before execution.
+- =gptel-agent-runtime--parse-plan-review=: Parse plan review RESPONSE into a plist.
+- =gptel-agent-runtime--handle-plan-review-response=: Apply pre-execution plan review RESPONSE for _PLAN in SESSION.
+- =gptel-agent-runtime--act=: Delegate and execute the next step in SESSION.
+- =gptel-agent-runtime--run-single-step=: Run STEP inside SESSION.
+- =gptel-agent-runtime--parallelizable-steps=: Return currently parallelizable draft steps from PLAN.
+- =gptel-agent-runtime--step-target-paths=: Return normalized target paths touched by STEP.
+- =gptel-agent-runtime--paths-conflict-p=: Return non-nil when PATHS overlap LOCKED-PATHS.
+- =gptel-agent-runtime--parallel-safe-step-p=: Return non-nil when STEP may run as a parallel worker.
+- =gptel-agent-runtime--find-plan-step-by-id=: Return plan step with STEP-ID in SESSION, or nil.
+- =gptel-agent-runtime--worker-active-count=: Return number of running workers for SESSION.
+- =gptel-agent-runtime--worker-queued-p=: Return non-nil when WORKER is queued.
+- =gptel-agent-runtime--worker-handle-cancel=: Best-effort cancellation of WORKER's process handle.
+- =gptel-agent-runtime--worker-finish=: Finish WORKER for STEP in SESSION with STATUS, VALUE, ERROR, and TOOL.
+- =gptel-agent-runtime--dispatch-worker-queue=: Start queued workers for SESSION up to the concurrency limit.
+- =gptel-agent-runtime--launch-parallel-workers=: Launch STEPS as independent worker requests for SESSION.
+- =gptel-agent-runtime--run-worker=: Run WORKER for STEP in SESSION.
+- =gptel-agent-runtime--worker-tool=: Run a safe/read tool WORKER for STEP.
+- =gptel-agent-runtime--worker-direct-response=: Run a direct-response WORKER request for STEP.
+- =gptel-agent-runtime-cancel-worker=: Cancel WORKER-ID in SESSION or the active session.
+- =gptel-agent-runtime-cancel-workers=: Cancel queued/running workers for SESSION.
+- =gptel-agent-runtime-retry-worker=: Requeue failed or cancelled WORKER-ID in SESSION or the active session.
+- =gptel-agent-runtime-workers-summary=: Return a human-readable summary of workers for SESSION.
+- =gptel-agent-runtime-list-workers=: Display parallel worker lifecycle status.
+- =gptel-agent-runtime--find-native-tool=: Return gptel tool named NAME, or nil.
+- =gptel-agent-runtime--confirm-action-p=: Return non-nil when STEP may execute.
+- =gptel-agent-runtime--dispatch-action=: Execute STEP for SESSION and continue to reflection.
+- =gptel-agent-runtime--needs-high-fidelity-p=: Return non-nil when GOAL matches any `high-fidelity-patterns'.
+- =gptel-agent-runtime--direct-response=: Ask the delegated agent to produce user-visible output for STEP.
+- =gptel-agent-runtime--call-native-tool=: Execute native gptel TOOL for STEP in SESSION.
+- =gptel-agent-runtime--local-output-path=: Return expanded local output PATH, or nil for remote/URL-like paths.
+- =gptel-agent-runtime--extract-exported-path=: Return exported file path parsed from tool OUTPUT, or nil.
+- =gptel-agent-runtime--extract-inline-output-paths=: Return local file paths referenced by Org links or :file headers in TEXT.
+- =gptel-agent-runtime--file-content-equal-p=: Return non-nil when PATH exists and its full contents equal CONTENT.
+- =gptel-agent-runtime--org-heading-state-tags-deadline=: Return non-nil when FILE contains HEADING with optional STATE, TAG, DEADLINE.
+- =gptel-agent-runtime--verify-step-result=: Return nil when RESULT verifies for STEP, or a failure reason.
+- =gptel-agent-runtime--record-step-skill-outcomes=: Record SUCCESS-P outcome for every skill on STEP with NOTE.
+- =gptel-agent-runtime--running-workers-p=: Return non-nil when SESSION has workers still running or queued.
+- =gptel-agent-runtime--worker-result-line=: Return one compact result line for WORKER.
+- =gptel-agent-runtime--worker-results-summary=: Return aggregate status for SESSION workers.
+- =gptel-agent-runtime--complete-parallel-worker-batch=: Record aggregate worker results for SESSION before reviewer reflection.
+- =gptel-agent-runtime--observe-result=: Record RESULT for STEP, then ask the reviewer to reflect.
+- =gptel-agent-runtime--reflection-system=: Return the strict system prompt for reflection JSON.
+- =gptel-agent-runtime--reflect=: Reflect on RESULT of STEP in SESSION and decide how to continue.
+- =gptel-agent-runtime--parse-reflection=: Parse reflection RESPONSE into a plist.
+- =gptel-agent-runtime--handle-reflection-response=: Apply reviewer RESPONSE for STEP and RESULT in SESSION.
+- =gptel-agent-runtime--finalize-task=: Finalize TASK in SESSION with REASON and write memory.
+- =gptel-agent-runtime--handle-execution-error=: Record ERR for STEP in SESSION and continue through reflection.
+<!-- gar:function-reference:end -->
+
 * File header
 
 #+begin_src emacs-lisp

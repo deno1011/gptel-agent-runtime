@@ -27,6 +27,21 @@ See also:
 - [[file:gar-policy.org][gar-policy]] (=policy-evaluate-step= calls the validator as a gate
   stacked between the capability gate and the quarantine pre-flight)
 
+<!-- gar:function-reference:start -->
+* Function reference
+
+This section is generated from the Elisp docstrings in this Org file. It is Org prose, not tangled code, so it explains the functions without changing runtime behavior.
+
+- =gptel-agent-runtime--validator-type-ok-p=: Return non-nil when VALUE matches a primitive TYPE symbol.
+- =gptel-agent-runtime--validator-types-ok-p=: Return non-nil when VALUE matches SPEC.
+- =gptel-agent-runtime--validator-format-path=: Format PATH (list of keys, newest first) as a JSON-pointer-like string.
+- =gptel-agent-runtime--validator-plist-keys=: Return the keys of VALUE when it looks like a plist or alist, else nil.
+- =gptel-agent-runtime--validator-plist-get=: Return KEY's value from VALUE (a plist OR alist), or nil.
+- =gptel-agent-runtime--validator-step=: Validate VALUE against SCHEMA at PATH.
+- =gptel-agent-runtime-validate-args=: Validate ARGS against SCHEMA.
+- =gptel-agent-runtime-args-valid-p=: Return non-nil when ARGS satisfies SCHEMA.
+<!-- gar:function-reference:end -->
+
 * File header
 
 #+begin_src emacs-lisp

@@ -26,6 +26,18 @@ See also:
   directive strings are plain text, not evaluated, so loading order does
   not matter)
 
+<!-- gar:function-reference:start -->
+* Function reference
+
+This section is generated from the Elisp docstrings in this Org file. It is Org prose, not tangled code, so it explains the functions without changing runtime behavior.
+
+- =gptel-agent-runtime-directive-for-choice=: Return the directive symbol that should be used for model CHOICE.
+- =gptel-agent-runtime-local-runtime-p=: Return non-nil when the active gptel backend/model is local.
+- =gptel-agent-runtime-directive-for-current-runtime=: Return the directive symbol for the active gptel backend/model.
+- =gptel-agent-runtime-sync-directive-for-current-runtime=: Set `gptel--system-message' according to the active backend/model.
+- =gptel-agent-runtime-current-directive-name=: Return the directive symbol that matches the current system message.
+<!-- gar:function-reference:end -->
+
 * File header
 
 #+begin_src emacs-lisp
