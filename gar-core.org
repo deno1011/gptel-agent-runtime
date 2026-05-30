@@ -460,6 +460,29 @@ or when origin-buffer protection redirects file-backed buffers."
   :type 'string
   :group 'gptel-agent-runtime)
 
+(defcustom gptel-agent-runtime-planner-handover-enabled t
+  "When non-nil, the planner prompt prepends a `RECENT SESSIONS' block
+listing the last N trajectories in chronological order.
+
+This is the cross-session continuity signal -- complementary to PR
+13's similar-trajectories injection.  PR 13 ranks by goal similarity
+(`you have done this kind of thing before'); handover ranks by
+time (`here is what just happened'), regardless of similarity.
+
+In practice the model uses the two together: similar trajectories
+show patterns the new goal echoes; handover shows momentum (what
+the user has been working on this week, what just failed)."
+  :type 'boolean
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-planner-handover-count 5
+  "Number of most-recent trajectories to inject into the planner prompt
+as the `RECENT SESSIONS' block.  0 disables (same as turning off
+`planner-handover-enabled')."
+  :type 'integer
+  :safe #'integerp
+  :group 'gptel-agent-runtime)
+
 (defcustom gptel-agent-runtime-planner-similar-trajectories-strategy 'similar
   "Search strategy used to find prior trajectories for the planner.
 

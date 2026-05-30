@@ -562,6 +562,78 @@ into a user's org or source file."
       (when (get-buffer "*gar-test-out*") (kill-buffer "*gar-test-out*"))
       (ignore-errors (delete-file tmp)))))
 
+;; ============================================================================
+;; PR 22: cross-session handover (chronological recent sessions)
+;; ============================================================================
+
+(defun gar-e2e--make-traj (id goal outcome &optional finalized-at reason)
+  (gptel-agent-runtime-trajectory-create
+   :id id
+   :goal goal
+   :outcome outcome
+   :finalized-at (or finalized-at "2026-05-31T00:00:00")
+   :reason reason))
+
+(ert-deftest gar-e2e-planner-handover-empty-when-disabled ()
+  (let ((gptel-agent-runtime-planner-handover-enabled nil)
+        (gptel-agent-runtime--trajectories
+         (list (gar-e2e--make-traj "a" "g" 'success))))
+    (should (string-empty-p
+             (gptel-agent-runtime--planner-handover-context)))))
+
+(ert-deftest gar-e2e-planner-handover-empty-when-count-zero ()
+  (let ((gptel-agent-runtime-planner-handover-enabled t)
+        (gptel-agent-runtime-planner-handover-count 0)
+        (gptel-agent-runtime--trajectories
+         (list (gar-e2e--make-traj "a" "g" 'success))))
+    (should (string-empty-p
+             (gptel-agent-runtime--planner-handover-context)))))
+
+(ert-deftest gar-e2e-planner-handover-empty-when-ring-empty ()
+  (let ((gptel-agent-runtime-planner-handover-enabled t)
+        (gptel-agent-runtime-planner-handover-count 5)
+        (gptel-agent-runtime--trajectories nil))
+    (should (string-empty-p
+             (gptel-agent-runtime--planner-handover-context)))))
+
+(ert-deftest gar-e2e-planner-handover-lists-up-to-n-trajectories ()
+  (let* ((gptel-agent-runtime-planner-handover-enabled t)
+         (gptel-agent-runtime-planner-handover-count 3)
+         (gptel-agent-runtime--trajectories
+          (list (gar-e2e--make-traj "t1" "list todos" 'success
+                                    "2026-05-31T11:00:00")
+                (gar-e2e--make-traj "t2" "set deadline on Hello2" 'failure
+                                    "2026-05-31T10:00:00"
+                                    "Heading not found")
+                (gar-e2e--make-traj "t3" "read inbox" 'success
+                                    "2026-05-31T09:00:00")
+                (gar-e2e--make-traj "t4" "old goal" 'success
+                                    "2026-05-30T00:00:00")))
+         (s (gptel-agent-runtime--planner-handover-context)))
+    (should (string-match-p "RECENT SESSIONS" s))
+    ;; First 3 trajectories appear in chronological-recent order.
+    (should (string-match-p "list todos" s))
+    (should (string-match-p "set deadline on Hello2" s))
+    (should (string-match-p "read inbox" s))
+    ;; Fourth (older) does NOT.
+    (should-not (string-match-p "old goal" s))
+    ;; Outcome icons applied.
+    (should (string-match-p "✓.*list todos" s))
+    (should (string-match-p "✗.*set deadline on Hello2" s))
+    ;; Failure reason rendered.
+    (should (string-match-p "(reason: Heading not found)" s))))
+
+(ert-deftest gar-e2e-planner-handover-handles-partial-ring ()
+  "When the ring has fewer than COUNT trajectories, the helper still
+returns a non-empty block listing what's available."
+  (let* ((gptel-agent-runtime-planner-handover-enabled t)
+         (gptel-agent-runtime-planner-handover-count 10)
+         (gptel-agent-runtime--trajectories
+          (list (gar-e2e--make-traj "only-one" "only goal" 'success)))
+         (s (gptel-agent-runtime--planner-handover-context)))
+    (should (string-match-p "RECENT SESSIONS" s))
+    (should (string-match-p "only goal" s))))
+
 (provide 'gar-loop-e2e-test)
 
 ;;; gar-loop-e2e-test.el ends here
