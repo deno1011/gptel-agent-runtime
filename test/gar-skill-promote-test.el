@@ -286,10 +286,91 @@ root AND registers a playbook with the same id."
           (with-current-buffer buf
             (gptel-agent-runtime-skill-promote-review-mode)
             (should (vectorp tabulated-list-format))
-            (should (= 3 (length tabulated-list-format)))
-            (should (string= "Skill id"
-                             (car (aref tabulated-list-format 0)))))
+            ;; PR 17 added the Type column for unified review of skill +
+            ;; refinement candidates.
+            (should (= 4 (length tabulated-list-format)))
+            (should (string= "Type"
+                             (car (aref tabulated-list-format 0))))
+            (should (string= "Candidate id"
+                             (car (aref tabulated-list-format 1)))))
         (when (buffer-live-p buf) (kill-buffer buf))))))
+
+;; --- PR 17: unified review covers both skill + refinement candidates ---
+
+(ert-deftest gar-skill-promote-rows-includes-refinement-candidates ()
+  "When PR 3 refinement candidates exist alongside skill candidates,
+the unified row builder lists both."
+  (gar-skill-promote-test--with-temp-skills
+    (gar-skill-promote-test--seed-candidate "auto-skill-one")
+    ;; Seed a fake refinement candidate using the .el format that
+    ;; gar-memory writes.
+    (cl-letf* ((tmp-refines-dir (make-temp-file "gar-refines-" t))
+               ((symbol-function 'gptel-agent-runtime--candidates-directory)
+                (lambda () tmp-refines-dir)))
+      (with-temp-file (expand-file-name "candidate-x.el" tmp-refines-dir)
+        (prin1 (gptel-agent-runtime--state-header "test")
+               (current-buffer))
+        (insert "\n")
+        (prin1 '(:id "candidate-x" :summary "refined"
+                 :triggers ("a") :steps ((:title "s")))
+               (current-buffer))
+        (insert "\n"))
+      (let ((rows (gptel-agent-runtime--skill-promote-rows)))
+        (should (= 2 (length rows)))
+        ;; Type column should distinguish skill vs refinement.
+        (let ((types (mapcar (lambda (row) (aref (cadr row) 0)) rows)))
+          (should (member "skill" types))
+          (should (member "refinement" types))))
+      (delete-directory tmp-refines-dir t))))
+
+(ert-deftest gar-skill-promote-candidate-type-by-extension ()
+  (should (eq 'skill (gptel-agent-runtime--skill-promote-candidate-type
+                      "/tmp/x.md")))
+  (should (eq 'refinement
+              (gptel-agent-runtime--skill-promote-candidate-type
+               "/tmp/y.el")))
+  (should (eq 'unknown
+              (gptel-agent-runtime--skill-promote-candidate-type
+               "/tmp/z.txt"))))
+
+(ert-deftest gar-skill-promote-approve-refinement-replaces-playbook ()
+  "Approving a refinement candidate moves the file to promoted/ AND
+replaces the existing playbook with the candidate body."
+  (let* ((tmp-root (make-temp-file "gar-refines-promote-" t))
+         (cand-file (expand-file-name "test-rf.el" tmp-root))
+         (gptel-agent-runtime-playbook-registry
+          (list (gptel-agent-runtime-playbook-create
+                 :id "test-rf"
+                 :summary "old summary"
+                 :triggers '("old")
+                 :steps '((:title "old"))
+                 :success-count 5 :failure-count 5))))
+    (cl-letf (((symbol-function 'gptel-agent-runtime--candidates-directory)
+               (lambda () tmp-root))
+              ((symbol-function 'gptel-agent-runtime--skill-promote-current-file)
+               (lambda () cand-file)))
+      (with-temp-file cand-file
+        (prin1 (gptel-agent-runtime--state-header "test")
+               (current-buffer))
+        (insert "\n")
+        (prin1 '(:id "test-rf" :summary "refined"
+                 :triggers ("new") :steps ((:title "new step")))
+               (current-buffer))
+        (insert "\n"))
+      (gptel-agent-runtime-skill-promote-approve)
+      ;; Original .el moved out of candidates/ root.
+      (should-not (file-exists-p cand-file))
+      ;; And into candidates/promoted/.
+      (should (file-exists-p
+               (expand-file-name "promoted/test-rf.el" tmp-root)))
+      ;; Registry now holds the refined version.
+      (let ((pb (cl-find "test-rf" gptel-agent-runtime-playbook-registry
+                         :key #'gptel-agent-runtime-playbook-id
+                         :test #'equal)))
+        (should pb)
+        (should (string= "refined"
+                         (gptel-agent-runtime-playbook-summary pb)))))
+    (when (file-directory-p tmp-root) (delete-directory tmp-root t))))
 
 (provide 'gar-skill-promote-test)
 

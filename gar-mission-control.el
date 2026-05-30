@@ -353,40 +353,54 @@ status, and the registered agent capability allowlist."
                            0 (min 5 (length gptel-agent-runtime--last-refinements)))
                 "\n"))))
     (gptel-agent-runtime--mission-control-section
-     "Skill promotion"
+     "Candidates (auto-synth skills + refinements)"
      (let* ((mode (and (boundp 'gptel-agent-runtime-skill-promote-mode)
                        gptel-agent-runtime-skill-promote-mode))
             (min-n (and (boundp 'gptel-agent-runtime-skill-promote-min-successes)
                         gptel-agent-runtime-skill-promote-min-successes))
             (count (and (boundp 'gptel-agent-runtime--skill-promote-trajectory-count)
                         gptel-agent-runtime--skill-promote-trajectory-count))
-            (dir (and (fboundp 'gptel-agent-runtime--skill-promote-directory)
-                      (ignore-errors
-                        (gptel-agent-runtime--skill-promote-directory))))
-            (candidates (and dir (file-directory-p dir)
-                             (cl-remove-if
-                              #'file-directory-p
-                              (directory-files dir t "\\.md\\'"))))
-            (rejected-dir (and (fboundp 'gptel-agent-runtime--skill-promote-rejected-directory)
-                               (ignore-errors
-                                 (gptel-agent-runtime--skill-promote-rejected-directory))))
-            (rejected (and rejected-dir (file-directory-p rejected-dir)
-                           (cl-remove-if
-                            #'file-directory-p
-                            (directory-files rejected-dir t "\\.md\\'"))))
+            ;; Skill side (PR 15)
+            (skill-dir (and (fboundp 'gptel-agent-runtime--skill-promote-directory)
+                            (ignore-errors
+                              (gptel-agent-runtime--skill-promote-directory))))
+            (skill-candidates
+             (and skill-dir (file-directory-p skill-dir)
+                  (cl-remove-if
+                   #'file-directory-p
+                   (directory-files skill-dir t "\\.md\\'"))))
+            (skill-rejected-dir
+             (and (fboundp 'gptel-agent-runtime--skill-promote-rejected-directory)
+                  (ignore-errors
+                    (gptel-agent-runtime--skill-promote-rejected-directory))))
+            (skill-rejected
+             (and skill-rejected-dir (file-directory-p skill-rejected-dir)
+                  (cl-remove-if
+                   #'file-directory-p
+                   (directory-files skill-rejected-dir t "\\.md\\'"))))
             (skills-dir (and (boundp 'gptel-agent-runtime-skills-directory)
                              gptel-agent-runtime-skills-directory))
             (approved (and skills-dir (file-directory-p skills-dir)
                            (cl-remove-if
                             #'file-directory-p
-                            (directory-files skills-dir t "\\.md\\'")))))
-       (format "  Mode: %s   Min cluster: %s   Trajectories observed: %s\n  Pending candidates: %d   Approved skills: %d   Rejected: %d\n  Review: M-x gptel-agent-runtime-skill-promote-review"
+                            (directory-files skills-dir t "\\.md\\'"))))
+            ;; Refinement side (PR 3)
+            (refine-dir (and (fboundp 'gptel-agent-runtime--candidates-directory)
+                             (ignore-errors
+                               (gptel-agent-runtime--candidates-directory))))
+            (refine-candidates
+             (and refine-dir (file-directory-p refine-dir)
+                  (cl-remove-if
+                   #'file-directory-p
+                   (directory-files refine-dir t "\\.el\\'")))))
+       (format "  Skill promotion mode: %s   Min cluster: %s   Trajectories: %s\n  Pending skill candidates: %d   Approved skills: %d   Rejected skills: %d\n  Pending refinement candidates: %d\n  Review (both queues): M-x gptel-agent-runtime-skill-promote-review"
                (or mode 'off)
                (or min-n "?")
                (or count 0)
-               (length (or candidates '()))
+               (length (or skill-candidates '()))
                (length (or approved '()))
-               (length (or rejected '())))))
+               (length (or skill-rejected '()))
+               (length (or refine-candidates '())))))
     (gptel-agent-runtime--mission-control-section
      "Memory index (SQLite)"
      (let ((stats (and (fboundp 'gptel-agent-runtime-sqlite-stats)
