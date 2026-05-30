@@ -24,6 +24,7 @@
 
 (require 'test-helper)
 (require 'gar-test-fake-llm)
+(require 'gar-live-test-shared)
 (require 'gptel-ollama)
 (require 'url)
 
@@ -37,8 +38,7 @@
 `ollama list' reports.  Tests fall back to whatever the user's
 currently active `gptel-model' is when this one is unavailable.")
 
-(defvar gar-live-test--request-timeout 90
-  "Seconds to wait for a single Ollama response before failing.")
+;; (gar-live-test--request-timeout now lives in gar-live-test-shared)
 
 ;; --- Availability probe ---
 
@@ -102,26 +102,7 @@ and run BODY.  Restores prior `gptel-backend' / `gptel-model' values."
        (setq gptel-backend orig-backend
              gptel-model orig-model))))
 
-;; --- Synchronous request helper ---
-
-(defun gar-live-test--sync-request (prompt &rest args)
-  "Send PROMPT via `gptel-request' and block until the response arrives.
-ARGS are forwarded to `gptel-request' (except :callback, which is
-supplied here).  Returns the response string, or signals on timeout."
-  (let* ((done nil)
-         (result nil)
-         (cb (lambda (response _info)
-               (setq result response done t)))
-         (deadline (+ (float-time) gar-live-test--request-timeout)))
-    (apply #'gptel-request prompt
-           :callback cb
-           args)
-    (while (and (not done) (< (float-time) deadline))
-      (accept-process-output nil 0.1))
-    (unless done
-      (error "Live Ollama request timed out after %ds"
-             gar-live-test--request-timeout))
-    result))
+;; --- Synchronous request helper now lives in `gar-live-test-shared'. ---
 
 ;; ============================================================================
 ;; The live tests
