@@ -34,6 +34,251 @@ flowchart TD
 
 The key point: gptel is the transport and chat UI. The agent-like behavior now lives in the `gptel-agent-runtime` package, while the private Emacs config only installs and loads it.
 
+## Graphical Flow Overview
+
+The runtime now has several possible paths. The diagrams below show the
+important branches: normal chat, response execution, chat-to-swarm routing,
+autonomous planning, tool safety, verification, memory/learning, and
+observability.
+
+### Whole-System Map
+
+```mermaid
+flowchart LR
+    User["User in Emacs/gptel buffer"]
+    Gptel["gptel chat transport"]
+    Runtime["gptel-agent-runtime"]
+    Backend["Backend/model layer\nClaude, OpenAI-compatible, LM Studio, MLX, Ollama"]
+    Directives["Directive layer\nassistant, local assistant, planner"]
+    Context["Context helpers\nworkspace, images, web"]
+    Executor["Response Executor\nBabel, AUTORUN, file output, inline images"]
+    Router["Routing layer\nchat router, agent router, model router"]
+    Loop["Autonomous loop\nobserve, plan, act, reflect"]
+    Tools["Tool registry\nOrg, file, buffer, web, code, memory"]
+    Guardrails["Guardrails\npolicy, validator, quarantine, skeptic, verifier"]
+    Memory["Memory and learning\nsessions, trajectories, playbooks, skills"]
+    UI["Observability\nswarm trace, mission control, reports"]
+
+    User --> Gptel
+    Gptel --> Runtime
+    Runtime --> Backend
+    Runtime --> Directives
+    Runtime --> Context
+    Runtime --> Executor
+    Runtime --> Router
+    Router --> Loop
+    Loop --> Guardrails
+    Guardrails --> Tools
+    Tools --> Loop
+    Loop --> Memory
+    Memory --> Router
+    Runtime --> UI
+    Loop --> UI
+    Guardrails --> UI
+    Memory --> UI
+```
+
+### Entry Points And Branches
+
+```mermaid
+flowchart TD
+    Start["User request"]
+    Send["gptel-send"]
+    Advice["gar-agents advice\ninject context and classify"]
+    Capability["Capability/status question?"]
+    Normal["Normal gptel chat"]
+    RouteScore["Chat router score"]
+    SwarmEnabled["Swarm routing enabled?"]
+    Autonomous["Start autonomous session"]
+    Manual["M-x gptel-agent-runtime-start"]
+
+    Start --> Send
+    Start --> Manual
+    Send --> Advice
+    Advice --> Capability
+    Capability -- yes --> Normal
+    Capability -- no --> RouteScore
+    RouteScore --> SwarmEnabled
+    SwarmEnabled -- no --> Normal
+    SwarmEnabled -- yes, score high enough --> Autonomous
+    SwarmEnabled -- yes, score low --> Normal
+    Manual --> Autonomous
+```
+
+### Normal Chat And Response Execution
+
+```mermaid
+flowchart TD
+    Normal["Normal gptel chat path"]
+    SyncDirective["Sync directive for active runtime"]
+    SelectBackend["Use current backend/model"]
+    Model["Model response"]
+    NativeTools["Native gptel tool calls\nwhen model supports them"]
+    PostHook["gptel post-response hook"]
+    Executor["Response Executor"]
+    Scan["Scan response for executable artifacts"]
+    Babel["Org Babel blocks"]
+    Autorun["AUTORUN Elisp"]
+    FileOut["file-output blocks"]
+    Images["inline image links"]
+    Repair["narrow local-model repair hooks"]
+    Display["Insert/display results in buffer"]
+
+    Normal --> SyncDirective --> SelectBackend --> Model
+    Model --> NativeTools
+    Model --> PostHook --> Executor --> Scan
+    Scan --> Babel --> Display
+    Scan --> Autorun --> Display
+    Scan --> FileOut --> Display
+    Scan --> Images --> Display
+    Scan --> Repair --> Display
+```
+
+### Autonomous Session Flow
+
+```mermaid
+flowchart TD
+    Start["gptel-agent-runtime-start"]
+    Session["Create task + session"]
+    Event["Emit user-request event"]
+    Observe["Observe workspace, memory, route, playbooks"]
+    ModelRoute["Optional model-router switch"]
+    Plan["Planner JSON plan"]
+    ValidatePlan["Repair + schema-validate plan"]
+    PlanReview["Optional plan review"]
+    NextStep["Select next plan step"]
+    Policy["Policy evaluation"]
+    Dispatch["Dispatch worker/tool/direct response"]
+    Verify["Verify action result"]
+    Reflect["Reviewer reflection JSON"]
+    Decision{"Continue?"}
+    Finalize["Finalize session"]
+    Persist["Persist memory + trajectory"]
+
+    Start --> Session --> Event --> Observe --> ModelRoute --> Plan
+    Plan --> ValidatePlan --> PlanReview --> NextStep --> Policy
+    Policy --> Dispatch --> Verify --> Reflect --> Decision
+    Decision -- continue/retry/replan --> Observe
+    Decision -- done/failed --> Finalize --> Persist
+```
+
+### Tool Safety Flow
+
+```mermaid
+flowchart TD
+    Step["Plan step with tool + args"]
+    ToolMeta["Lookup tool metadata"]
+    Caps["Capability gate\nagent allowed-caps vs tool required-caps"]
+    Schema["Argument schema validator"]
+    Paths["Protected path / allowed root checks"]
+    Shell["Blocked shell and placeholder checks"]
+    Quarantine["Quarantine pre-flight\nuntrusted evidence overlap"]
+    Policy["Per-tool policy / preset"]
+    Skeptic["Advocatus Diaboli skeptic\nrule-based or model-based"]
+    Confirm{"Confirmation required?"}
+    Execute["Execute tool"]
+    Deny["Deny with reason"]
+    Wait["Ask user / stop"]
+
+    Step --> ToolMeta --> Caps
+    Caps -- denied --> Deny
+    Caps --> Schema
+    Schema -- invalid --> Deny
+    Schema --> Paths
+    Paths -- denied --> Deny
+    Paths --> Shell
+    Shell -- denied --> Deny
+    Shell --> Quarantine
+    Quarantine -- conflict --> Deny
+    Quarantine --> Policy
+    Policy -- denied --> Deny
+    Policy --> Skeptic
+    Skeptic --> Confirm
+    Confirm -- no --> Execute
+    Confirm -- yes --> Wait
+```
+
+### Verification And Retry Flow
+
+```mermaid
+flowchart TD
+    Result["Tool/direct-response result"]
+    Applies["Verifier applies?"]
+    Rule["Rule-based verifier"]
+    ModelVerifier["Optional model verifier"]
+    Complete["Completeness verifier\ncount/list coverage"]
+    Verdict{"Verdict"}
+    Pass["Mark step done"]
+    Retryable["Prepare retry hint"]
+    Requeue["Requeue/mutate step"]
+    Fail["Record failure"]
+    Analytics["Failure analytics"]
+
+    Result --> Applies
+    Applies -- no --> Pass
+    Applies -- yes --> Rule
+    Rule --> ModelVerifier
+    ModelVerifier --> Complete
+    Complete --> Verdict
+    Verdict -- passed --> Pass
+    Verdict -- failed + retryable --> Retryable --> Requeue
+    Verdict -- failed final --> Fail --> Analytics
+```
+
+### Memory And Learning Flow
+
+```mermaid
+flowchart TD
+    Finalized["Session finalized"]
+    SessionMemory["Save session memory"]
+    Trajectory["Record trajectory"]
+    SQLite["Optional SQLite/FTS/vector index"]
+    Failure["Failure analytics"]
+    Refine["Playbook refinement\nconsistent failures"]
+    Experiment["Playbook experiment\nA/B original vs candidate"]
+    Promote["Skill promotion\nsuccessful trajectory clusters"]
+    Trust["Trust lifecycle\nproposed -> approved -> trusted"]
+    Transfer["Transfer-trust auto approval"]
+    Router["Future routing uses playbooks, skills, stats"]
+
+    Finalized --> SessionMemory
+    Finalized --> Trajectory
+    Trajectory --> SQLite
+    Trajectory --> Failure
+    Trajectory --> Refine
+    Refine --> Experiment
+    Trajectory --> Promote
+    Promote --> Trust --> Transfer
+    SessionMemory --> Router
+    SQLite --> Router
+    Experiment --> Router
+    Transfer --> Router
+```
+
+### Event And Observability Flow
+
+```mermaid
+flowchart LR
+    Emit["emit-event"]
+    Tick["advance tick"]
+    Log["append event log"]
+    Dispatch["dispatch subscribers"]
+    Swarm["swarm trace buffer"]
+    Mission["mission control"]
+    Trajectory["trajectory subscriber"]
+    Memory["memory subscriber"]
+    Refine["refine / experiment / skill subscribers"]
+    Reports["failure report / skill review / policy editor"]
+
+    Emit --> Tick --> Log --> Dispatch
+    Dispatch --> Swarm
+    Dispatch --> Mission
+    Dispatch --> Trajectory
+    Dispatch --> Memory
+    Dispatch --> Refine
+    Mission --> Reports
+```
+
 ## Main Components
 
 ### Backend and Model Layer
