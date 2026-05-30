@@ -67,6 +67,21 @@ This section is generated from the Elisp docstrings in this Org file. It is Org 
 - =gptel-agent-runtime--verifier-prepare-retry=: Mutate STEP for the next --act pass, embedding VERDICT's suggested correction.
 <!-- gar:function-reference:end -->
 
+<!-- gar:execution-flow:start -->
+* Execution flow
+
+This section explains how the functions above participate in runtime execution. It is Org prose outside source blocks, so tangling preserves behavior.
+
+This module checks tool results after execution and prepares retries.
+
+- `gptel-agent-runtime-verify-action-result' dispatches primary and completeness verification when risk/tool settings apply.
+- Rule-based verification catches obvious error statuses and error-like output.
+- Model-based verification serializes step/result/task into a prompt and parses JSON verdicts.
+- Completeness verification compares item counts requested by the user against prior tool output and the final result.
+- Retry helpers decide whether a failed verdict can be retried and mutate the plan step with correction guidance.
+<!-- gar:execution-flow:end -->
+
+
 * File header
 
 #+begin_src emacs-lisp

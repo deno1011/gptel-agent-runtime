@@ -39,6 +39,20 @@ This section is generated from the Elisp docstrings in this Org file. It is Org 
 - =gptel-agent-runtime-insert-image-inline=: Append FILE-OR-URL as an org image link to the current buffer end.
 <!-- gar:function-reference:end -->
 
+<!-- gar:execution-flow:start -->
+* Execution flow
+
+This section explains how the functions above participate in runtime execution. It is Org prose outside source blocks, so tangling preserves behavior.
+
+This module adds multimodal, clipboard, web, and inline image helpers.
+
+- Image helper setup checks platform support and can install required helpers.
+- Clipboard image insertion captures the clipboard to a file, shrinks it if needed, inserts a link, and optionally attaches it for gptel.
+- Web fetch helpers retrieve raw bytes, HTML, plain text, DuckDuckGo result summaries, images, and image links.
+- Inline image helpers make local or fetched images visible in Org/chat buffers.
+<!-- gar:execution-flow:end -->
+
+
 * File header
 
 #+begin_src emacs-lisp

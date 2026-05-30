@@ -46,6 +46,20 @@ This section is generated from the Elisp docstrings in this Org file. It is Org 
 - =gptel-agent-runtime--skeptic-model-based-verdict=: Synchronously ask a model for a skeptic verdict on this proposed tool call.
 <!-- gar:function-reference:end -->
 
+<!-- gar:execution-flow:start -->
+* Execution flow
+
+This section explains how the functions above participate in runtime execution. It is Org prose outside source blocks, so tangling preserves behavior.
+
+This module is the optional model-backed skeptic path.
+
+- `gptel-agent-runtime--skeptic-system-prompt' defines the reviewer role.
+- `gptel-agent-runtime--skeptic-build-prompt' serializes the proposed step for review.
+- `gptel-agent-runtime--skeptic-model-based-verdict' performs the synchronous model request.
+- `gptel-agent-runtime--skeptic-extract-json-object' and `gptel-agent-runtime--skeptic-parse-verdict' normalize the response back into the stable verdict shape consumed by `gar-skeptic'.
+<!-- gar:execution-flow:end -->
+
+
 * File header
 
 #+begin_src emacs-lisp

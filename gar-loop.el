@@ -6,7 +6,7 @@
 ;;; Commentary:
 
 ;; The autonomous agent loop and its worker lifecycle. Calls into
-;; gar-agents for routing, gar-safety for policy + skeptic, gar-tools
+;; gar-agents for routing, gar-policy/gar-skeptic for policy + skeptic, gar-tools
 ;; for tool invocation, gar-memory for session/playbook persistence,
 ;; and gar-substrate for event emission and provenance.
 
@@ -55,15 +55,15 @@
 (declare-function gptel-agent-runtime-event-payload "gar-substrate" (event))
 (declare-function gptel-agent-runtime-make-evidence "gar-substrate"
                   (text source-type source-id &rest plist))
-(declare-function gptel-agent-runtime-untrusted-context "gar-safety"
+(declare-function gptel-agent-runtime-untrusted-context "gar-policy"
                   (label text-or-evidence &optional source))
-(declare-function gptel-agent-runtime-trusted-context "gar-safety"
+(declare-function gptel-agent-runtime-trusted-context "gar-policy"
                   (label text-or-evidence))
-(declare-function gptel-agent-runtime-policy-evaluate-step "gar-safety"
+(declare-function gptel-agent-runtime-policy-evaluate-step "gar-policy"
                   (step &optional context))
-(declare-function gptel-agent-runtime-safety-check-step "gar-safety"
+(declare-function gptel-agent-runtime-safety-check-step "gar-policy"
                   (step &optional context))
-(declare-function gptel-agent-runtime-skeptic-evaluate "gar-safety"
+(declare-function gptel-agent-runtime-skeptic-evaluate "gar-skeptic"
                   (step decision))
 (declare-function gptel-agent-runtime-verify-action-result "gar-verifier"
                   (step result &optional task))

@@ -79,6 +79,21 @@ This section is generated from the Elisp docstrings in this Org file. It is Org 
 - =gptel-agent-runtime-emit-candidate-as-markdown=: Write CANDIDATE (a candidate playbook plist) as a markdown sibling of ELISP-FILE.
 <!-- gar:function-reference:end -->
 
+<!-- gar:execution-flow:start -->
+* Execution flow
+
+This section explains how the functions above participate in runtime execution. It is Org prose outside source blocks, so tangling preserves behavior.
+
+This module bridges markdown skill files and runtime playbooks.
+
+- Loading flows from `gptel-agent-runtime-load-skills-from-directory' to `gptel-agent-runtime-skill-from-file' and `gptel-agent-runtime-skill-from-markdown'.
+- Parsing extracts frontmatter, body text, triggers, and optional Elisp blocks.
+- Serialization flows through `gptel-agent-runtime-skill-to-markdown' and `gptel-agent-runtime-skill-to-file'.
+- Parsed skills are converted to playbooks and registered for routing.
+- Refinement/promotion code can call `gptel-agent-runtime-emit-candidate-as-markdown' to create human-readable candidates.
+<!-- gar:execution-flow:end -->
+
+
 * File header
 
 #+begin_src emacs-lisp

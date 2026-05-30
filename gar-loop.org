@@ -39,8 +39,8 @@ See also:
 - [[file:gptel-agent-runtime.org][gptel-agent-runtime]] (master entrypoint that requires this module)
 - [[file:gar-substrate.org][gar-substrate]] (event pump that this loop emits =step-delegated=,
   =worker-*=, =reflection-completed=, =memory-write= events into)
-- [[file:gar-safety.org][gar-safety]] (every step passes through =policy-evaluate-step= and
-  the skeptic before the worker dispatcher runs it)
+- [[file:gar-policy.org][gar-policy]] and [[file:gar-skeptic.org][gar-skeptic]] (every step passes through
+  =policy-evaluate-step= and the skeptic before the worker dispatcher runs it)
 - [[file:gar-agents.org][gar-agents]] (the loop asks =route-task= to pick an agent and
   matching skills/playbooks; the chat router decides whether
   =gptel-send= enters swarm mode via this loop)
@@ -151,6 +151,23 @@ This section is generated from the Elisp docstrings in this Org file. It is Org 
 - =gptel-agent-runtime--handle-execution-error=: Record ERR for STEP in SESSION and continue through reflection.
 <!-- gar:function-reference:end -->
 
+<!-- gar:execution-flow:start -->
+* Execution flow
+
+This section explains how the functions above participate in runtime execution. It is Org prose outside source blocks, so tangling preserves behavior.
+
+This module is the autonomous execution engine.
+
+- Session start creates a task/session, emits request events, shows trace buffers, and enters planning.
+- Observation gathers workspace, memory, similar trajectories, handover, matching playbooks, and route context.
+- Planning asks the model for JSON steps, parses them, optionally reviews plans, and installs a plan on the session.
+- Dispatch evaluates each step through policy, starts workers, runs tools or direct responses, and records observations.
+- Reflection decides done/continue/retry/fail; verifier retry hints can mutate a step and requeue it.
+- Parallel-worker logic queues, starts, cancels, retries, and waits for worker batches before final reflection.
+- Finalization records memory/trajectory events and returns user-visible output.
+<!-- gar:execution-flow:end -->
+
+
 * File header
 
 #+begin_src emacs-lisp
@@ -162,7 +179,7 @@ This section is generated from the Elisp docstrings in this Org file. It is Org 
 ;;; Commentary:
 
 ;; The autonomous agent loop and its worker lifecycle. Calls into
-;; gar-agents for routing, gar-safety for policy + skeptic, gar-tools
+;; gar-agents for routing, gar-policy/gar-skeptic for policy + skeptic, gar-tools
 ;; for tool invocation, gar-memory for session/playbook persistence,
 ;; and gar-substrate for event emission and provenance.
 
@@ -211,15 +228,15 @@ This section is generated from the Elisp docstrings in this Org file. It is Org 
 (declare-function gptel-agent-runtime-event-payload "gar-substrate" (event))
 (declare-function gptel-agent-runtime-make-evidence "gar-substrate"
                   (text source-type source-id &rest plist))
-(declare-function gptel-agent-runtime-untrusted-context "gar-safety"
+(declare-function gptel-agent-runtime-untrusted-context "gar-policy"
                   (label text-or-evidence &optional source))
-(declare-function gptel-agent-runtime-trusted-context "gar-safety"
+(declare-function gptel-agent-runtime-trusted-context "gar-policy"
                   (label text-or-evidence))
-(declare-function gptel-agent-runtime-policy-evaluate-step "gar-safety"
+(declare-function gptel-agent-runtime-policy-evaluate-step "gar-policy"
                   (step &optional context))
-(declare-function gptel-agent-runtime-safety-check-step "gar-safety"
+(declare-function gptel-agent-runtime-safety-check-step "gar-policy"
                   (step &optional context))
-(declare-function gptel-agent-runtime-skeptic-evaluate "gar-safety"
+(declare-function gptel-agent-runtime-skeptic-evaluate "gar-skeptic"
                   (step decision))
 (declare-function gptel-agent-runtime-verify-action-result "gar-verifier"
                   (step result &optional task))

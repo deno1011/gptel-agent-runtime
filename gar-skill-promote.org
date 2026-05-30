@@ -90,6 +90,22 @@ This section is generated from the Elisp docstrings in this Org file. It is Org 
 - =gptel-agent-runtime-skill-promote-review=: Open the tabulated-list reviewer for auto-synth skill candidates.
 <!-- gar:function-reference:end -->
 
+<!-- gar:execution-flow:start -->
+* Execution flow
+
+This section explains how the functions above participate in runtime execution. It is Org prose outside source blocks, so tangling preserves behavior.
+
+This module turns repeated successful trajectories into reviewable markdown skills.
+
+- Trajectory-finalized events call `gptel-agent-runtime--skill-promote-on-trajectory'.
+- Similar-success clustering filters recent trajectories by goal similarity and success count.
+- Skill synthesis derives an id, triggers, body, and steps from the trajectory cluster.
+- Candidate writing checks exact trusted-skill bypass first, then transfer-trust auto-approval, then writes a markdown review file.
+- The review buffer lets the user approve, reject, or view skill/refinement candidates.
+- Trust state advances from proposed to approved to trusted; trusted patterns reduce future review noise.
+<!-- gar:execution-flow:end -->
+
+
 * File header
 
 #+begin_src emacs-lisp

@@ -59,6 +59,21 @@ This section is generated from the Elisp docstrings in this Org file. It is Org 
 - =gptel-agent-runtime--heading-error-string=: Format an error string for a non-`:found' RESOLUTION from `--resolve-single-heading'.
 <!-- gar:function-reference:end -->
 
+<!-- gar:execution-flow:start -->
+* Execution flow
+
+This section explains how the functions above participate in runtime execution. It is Org prose outside source blocks, so tangling preserves behavior.
+
+This module owns the runtime tool registry, native gptel tools, argument schemas, and tool-invention review.
+
+- Tool registration flows through `gptel-agent-runtime-register-tool', then lookup/category helpers feed policy and worker dispatch.
+- Result constructors normalize successful, failed, and pending-reflection tool outcomes.
+- Native tools provide file, buffer, Org, web, memory, and execution operations used by plan steps.
+- High-risk tools have argument schemas consumed by `gar-validator' through `gar-policy'.
+- Tool invention writes proposed Elisp, statically scans denied forms/prefixes, byte-compiles in a subprocess, and requires explicit approval before registration.
+<!-- gar:execution-flow:end -->
+
+
 * File header
 
 #+begin_src emacs-lisp

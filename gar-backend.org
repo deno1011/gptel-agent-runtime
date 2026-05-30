@@ -53,6 +53,20 @@ This section is generated from the Elisp docstrings in this Org file. It is Org 
 - =gptel-agent-runtime-register-model=: Register NAME with BACKEND+MODEL in `gptel-agent-runtime-backends'.
 <!-- gar:function-reference:end -->
 
+<!-- gar:execution-flow:start -->
+* Execution flow
+
+This section explains how the functions above participate in runtime execution. It is Org prose outside source blocks, so tangling preserves behavior.
+
+This module mediates between runtime model selection and host-defined gptel backends.
+
+- Ollama helpers build URLs, probe server availability, optionally start Ollama, and detect the currently loaded model.
+- Model normalization converts gptel metadata shapes into stable symbols.
+- `gptel-agent-runtime-use-default-local-model' chooses the active Ollama model or configured fallback, then syncs directives/tools.
+- `gptel-agent-runtime-register-model' updates the backend/model registry consumed by selection UI and model routing.
+<!-- gar:execution-flow:end -->
+
+
 * File header
 
 #+begin_src emacs-lisp

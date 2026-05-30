@@ -54,6 +54,21 @@ This section is generated from the Elisp docstrings in this Org file. It is Org 
 - =gptel-agent-runtime-failure-report=: Open a detailed failure-pattern report covering the recent trajectory + verifier-verdict ring.
 <!-- gar:function-reference:end -->
 
+<!-- gar:execution-flow:start -->
+* Execution flow
+
+This section explains how the functions above participate in runtime execution. It is Org prose outside source blocks, so tangling preserves behavior.
+
+This module summarizes failure patterns for the dashboard and reports.
+
+- It gathers failure evidence from verifier verdicts and stored trajectories.
+- Reason classification maps raw messages to categories like not-found, ambiguous, policy-denied, timeout, incomplete, or quarantined.
+- Aggregation counts top reasons and tools.
+- Remediation helpers map common reason/tool pairs to suggested next actions.
+- Mission control uses the summary; `gptel-agent-runtime-failure-report' opens the detailed report buffer.
+<!-- gar:execution-flow:end -->
+
+
 * File header
 
 #+begin_src emacs-lisp

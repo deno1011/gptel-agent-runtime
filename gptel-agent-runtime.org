@@ -35,8 +35,103 @@ travels through this layered stack:
    active backend.
 10. =gar-backend= provides the Ollama runtime utilities; the consuming
     setup file is responsible for the actual backend constructors.
-11. =gar-core= is the layer underneath everything else: defgroup, ~50
+11. =gar-core= is the layer underneath everything else: defgroup,
     defcustoms, every cl-defstruct, base helpers.
+
+** Functionality catalog
+
+The runtime currently gives you these user-visible capability families:
+
+- /Normal gptel integration/: backend/model selection, local Ollama helper
+  startup, runtime-specific directives, global tool activation, image/web
+  context helpers, and response execution for Org/Babel/file-output blocks.
+- /Autonomous task execution/: a planner creates a session and plan, workers
+  execute allowed steps, reflection decides whether to continue, and the
+  session finalizes into memory and trajectory records.
+- /Routing/: chat-to-swarm routing decides when ordinary chat should become
+  an autonomous session; agent/organization routing chooses a role and process;
+  model routing can switch to a configured backend/model profile for harder or
+  riskier prompts.
+- /Tools/: a registry wraps native gptel tools, high-risk argument schemas,
+  Org/file/buffer/web helpers, raw local-model tool shims, and a reviewable
+  tool-invention pipeline.
+- /Guardrails/: capability checks, per-tool policy, protected path checks,
+  blocked shell/placeholders, quarantine of untrusted evidence, skeptic review,
+  JSON-like argument validation, post-execution verification, completeness
+  checks, retry preparation, and prompt-injection canaries.
+- /Memory and learning/: session memory, embedding cache, playbook scoring,
+  novelty detection, strategy synthesis, trajectory storage, SQLite/FTS/vector
+  retrieval, failure analytics, playbook refinement, A/B experiments, markdown
+  skills, and trajectory-to-skill promotion with trust/transfer-trust.
+- /Observability/: swarm trace, event pump view, evidence trace, mission
+  control, tool-policy editor, failure report, skill promotion review, and
+  status/command-center entry points.
+
+** Main execution paths
+
+The function reference sections in each =gar-*.org= list every function in
+that file. The flows below explain how those functions compose at runtime.
+
+*** Package load
+
+1. =gptel-agent-runtime.org= requires modules in dependency order.
+2. =gar-core= defines all shared options, structs, and constructor helpers.
+3. =gar-substrate= installs the event/tick/evidence substrate that later
+   modules subscribe to.
+4. Guardrail, memory, tool, backend, directive, context, executor, agent, and
+   loop modules load their registries and command definitions.
+5. Tail-of-load wiring forwards =my/data-dir=, activates the Response
+   Executor, selects the default local model if an Ollama backend exists, and
+   enables global gptel tools once =gptel= itself is loaded.
+
+*** Ordinary gptel send
+
+1. =gar-agents--inject-context= may add workspace context around =gptel-send=.
+2. =gptel-agent-runtime-sync-directive-for-current-runtime= keeps the active
+   directive matched to the current backend/model.
+3. =gar-response-executor-mode= watches the assistant response.
+4. When the response contains executable blocks or file-output markers,
+   =gar-executor= validates, runs, renders, and records outputs.
+
+*** Chat routed to autonomous runtime
+
+1. =gptel-agent-runtime--maybe-route-chat-to-swarm= receives the latest chat
+   text and asks =gptel-agent-runtime-classify-chat-request= whether to route.
+2. =gptel-agent-runtime-route-task= matches organization units, agents, skills,
+   and playbooks; =gptel-agent-runtime-apply-model-route= may switch model.
+3. =gptel-agent-runtime-start= creates a session and enters the loop.
+4. =gar-loop= observes workspace/memory, asks the planner for steps, evaluates
+   each step through =gar-policy=, dispatches allowed tool work, verifies
+   results, reflects, and either retries, continues, or finalizes.
+5. Finalization emits events consumed by trajectory, memory, failure
+   analytics, refinement, experiments, and skill-promotion subscribers.
+
+*** Tool execution and safety
+
+1. A plan step names a tool and arguments.
+2. =gptel-agent-runtime-policy-evaluate-step= checks capability allowlists,
+   argument schema, protected paths, command/path placeholders, quarantine
+   conflicts, per-tool policy, and skeptic verdicts.
+3. Allowed steps run through worker dispatchers in =gar-loop= and native tool
+   functions registered by =gar-tools=.
+4. =gptel-agent-runtime-verify-action-result= checks the observed result; when
+   configured, completeness verification compares requested counts against
+   prior tool output.
+5. Failures become verifier verdicts, failure analytics rows, retry hints, and
+   eventually playbook-refinement evidence.
+
+*** Learning loop
+
+1. Successful and failed sessions become trajectories in =gar-trajectory= and
+   optional SQLite rows in =gar-memory-sqlite=.
+2. =gar-memory= ranks matching playbooks, detects novelty, and can synthesize
+   candidate strategies.
+3. =gar-playbook-refine= watches consistent failures and writes candidate
+   refinements.
+4. =gar-playbook-experiment= can A/B test refined playbooks against originals.
+5. =gar-skill-promote= watches successful trajectories, writes markdown skill
+   candidates, tracks user approval, promotes trusted repeated patterns, and
+   transfer-approves similar future candidates.
 
 ** Load order
 
@@ -148,7 +243,7 @@ the master load sequence. New setups should customise
 `gptel-agent-runtime-data-directory' directly.")
 
 ;; Module load order (respects the dependency DAG).
-(require 'gar-core)        ; defgroup + ~50 defcustoms + all cl-defstructs + base helpers
+(require 'gar-core)        ; defgroup + defcustoms + all cl-defstructs + base helpers
 (require 'gar-substrate)   ; tick, event pump, evidence, versioned state
 (require 'gar-quarantine)  ; per-source quarantine + promote + pre-flight conflict check
 (require 'gar-skeptic)     ; Advocatus Diaboli core (rule-based + dispatcher)

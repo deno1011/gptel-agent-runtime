@@ -38,6 +38,20 @@ This section is generated from the Elisp docstrings in this Org file. It is Org 
 - =gptel-agent-runtime-current-directive-name=: Return the directive symbol that matches the current system message.
 <!-- gar:function-reference:end -->
 
+<!-- gar:execution-flow:start -->
+* Execution flow
+
+This section explains how the functions above participate in runtime execution. It is Org prose outside source blocks, so tangling preserves behavior.
+
+This module selects and synchronizes gptel system directives.
+
+- Runtime checks identify local backends/models with `gptel-agent-runtime-local-runtime-p'.
+- `gptel-agent-runtime-directive-for-current-runtime' chooses the local-assistant or default assistant directive.
+- `gptel-agent-runtime-sync-directive-for-current-runtime' installs that directive into gptel state before sends/model switches.
+- Directive strings encode tool-calling, raw-tool fallback, faithfulness, and local-model behavior expectations.
+<!-- gar:execution-flow:end -->
+
+
 * File header
 
 #+begin_src emacs-lisp

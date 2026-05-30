@@ -10,7 +10,7 @@ What this module owns:
 - /Package metadata/: =defgroup gptel-agent-runtime=,
   =gptel-agent-runtime-package-name=, =-public-prefix=,
   =-private-prefix=, =-state-schema-version=.
-- /All defcustoms/: ~50 user-facing options that other modules
+- /All defcustoms/: user-facing options that other modules
   consult by symbol -- chat router, model router, event log, policy
   presets, embedding model, parallel workers, raw-tool allow lists,
   trace buffer names, swarm trace, status markers, plan review,
@@ -69,6 +69,21 @@ This section is generated from the Elisp docstrings in this Org file. It is Org 
 - =gptel-agent-runtime-sync-and-status=: Synchronize the directive for the active runtime and display status.
 <!-- gar:function-reference:end -->
 
+<!-- gar:execution-flow:start -->
+* Execution flow
+
+This section explains how the functions above participate in runtime execution. It is Org prose outside source blocks, so tangling preserves behavior.
+
+This module is the shared vocabulary and state foundation. It mostly runs at load time, then other modules consume the constructors, structs, and settings.
+
+- Load time defines the defgroup, user options, compatibility aliases, structs, and base helper functions.
+- Session construction flows through `gptel-agent-runtime-create-task' -> `gptel-agent-runtime-create-session' -> `gptel-agent-runtime-create-plan' -> `gptel-agent-runtime-create-plan-step'.
+- Plan readers use `gptel-agent-runtime-plan-complete-p' and `gptel-agent-runtime-next-plan-step' to decide what is still pending.
+- Tool setup flows through `gptel-agent-runtime-tools-all' and `gptel-agent-runtime-sync-tools'.
+- User inspection flows through `gptel-agent-runtime-select-model', `gptel-agent-runtime-mode-line', `gptel-agent-runtime-status', and `gptel-agent-runtime-sync-and-status'.
+<!-- gar:execution-flow:end -->
+
+
 * File header
 
 #+begin_src emacs-lisp
@@ -80,7 +95,7 @@ This section is generated from the Elisp docstrings in this Org file. It is Org 
 ;;; Commentary:
 
 ;; The lowest layer of the runtime, loaded first by the master. Owns
-;; the package's defgroup, the ~50 defcustoms, all defvars not yet
+;; the package's defgroup, the defcustoms, all defvars not yet
 ;; owned by other modules, all cl-defstruct definitions, and the
 ;; low-level helper functions every other module depends on.
 

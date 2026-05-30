@@ -6,7 +6,7 @@
 ;;; Commentary:
 
 ;; The lowest layer of the runtime, loaded first by the master. Owns
-;; the package's defgroup, the ~50 defcustoms, all defvars not yet
+;; the package's defgroup, the defcustoms, all defvars not yet
 ;; owned by other modules, all cl-defstruct definitions, and the
 ;; low-level helper functions every other module depends on.
 

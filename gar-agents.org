@@ -52,7 +52,7 @@ strategy synthesis).
 See also:
 - [[file:gptel-agent-runtime.org][gptel-agent-runtime]] (master entrypoint that requires this module)
 - [[file:gar-substrate.org][gar-substrate]] (event pump that fires =route-event=)
-- [[file:gar-safety.org][gar-safety]] (capability gate consults =allowed-caps= declared on
+- [[file:gar-policy.org][gar-policy]] (capability gate consults =allowed-caps= declared on
   agent records here)
 - [[file:gar-memory.org][gar-memory]] (novelty detector + playbook success-scoring helpers
   consume the playbook registry defined here)
@@ -139,6 +139,22 @@ This section is generated from the Elisp docstrings in this Org file. It is Org 
 - =gptel-agent-runtime--maybe-route-chat-to-swarm=: Maybe start a swarm session from TASK-TEXT and return non-nil if handled.
 - =gar-agents--inject-context=: Around advice for `gptel-send': route, sync directive, and prepend context.
 <!-- gar:function-reference:end -->
+
+<!-- gar:execution-flow:start -->
+* Execution flow
+
+This section explains how the functions above participate in runtime execution. It is Org prose outside source blocks, so tangling preserves behavior.
+
+This module routes user text to agents, skills, playbooks, chat routing, model routing, and workspace context.
+
+- Default registrations create agents, skills, organization units, and playbooks.
+- Task routing matches triggers, skills, playbooks, organization units, and agent permissions to choose role/process/directives.
+- Model routing analyzes complexity/risk/context/privacy signals and selects a registered backend/model profile.
+- Workspace context collectors summarize Org todos and current task context.
+- Chat-router advice decides whether a normal gptel send should stay chat or start a swarm session.
+- Command-center/self-test/status commands expose routing behavior without requiring live tool execution.
+<!-- gar:execution-flow:end -->
+
 
 * File header
 

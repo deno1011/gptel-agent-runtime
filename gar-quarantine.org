@@ -11,7 +11,7 @@ Split out of =gar-safety= on 2026-05-27.
 See also:
 - [[file:gptel-agent-runtime.org][gptel-agent-runtime]] (master entrypoint that requires this module)
 - [[file:gar-substrate.org][gar-substrate]] (provides =emit-event=, =--evidence-trace=, the evidence struct)
-- [[file:gar-safety.org][gar-safety]] (calls =--quarantine-rule-text= from =untrusted-context=
+- [[file:gar-policy.org][gar-policy]] (calls =--quarantine-rule-text= from =untrusted-context=
   and =--quarantine-conflict-p= from =policy-evaluate-step=)
 
 <!-- gar:function-reference:start -->
@@ -25,6 +25,20 @@ This section is generated from the Elisp docstrings in this Org file. It is Org 
 - =gptel-agent-runtime--quarantine-rule-text=: Return the quarantine rule appended to untrusted wrappers when active.
 - =gptel-agent-runtime--quarantine-conflict-p=: Return a deny-reason string when STEP arguments overlap quarantined text.
 <!-- gar:function-reference:end -->
+
+<!-- gar:execution-flow:start -->
+* Execution flow
+
+This section explains how the functions above participate in runtime execution. It is Org prose outside source blocks, so tangling preserves behavior.
+
+This module tracks untrusted evidence sources and blocks suspicious reuse until the user promotes the evidence.
+
+- Untrusted evidence enters the trace through `gptel-agent-runtime-make-evidence' in `gar-substrate'.
+- Context wrappers ask `gptel-agent-runtime--quarantine-rule-text' and `gptel-agent-runtime-evidence-quarantined-p' whether to append extra quarantine instructions.
+- Policy evaluation calls `gptel-agent-runtime--quarantine-conflict-p' before tool execution.
+- User trust flows through `gptel-agent-runtime-promote-evidence', which clears the quarantine and emits a policy-changed event.
+<!-- gar:execution-flow:end -->
+
 
 * File header
 
@@ -46,7 +60,7 @@ This section is generated from the Elisp docstrings in this Org file. It is Org 
 ;; arguments contain a substring of significant length from un-promoted
 ;; quarantined evidence text.
 ;;
-;; Loaded BEFORE gar-safety so the policy broker and the
+;; Loaded BEFORE gar-policy so the policy broker and the
 ;; untrusted-context wrapper can call into this module directly without
 ;; fboundp guards.
 

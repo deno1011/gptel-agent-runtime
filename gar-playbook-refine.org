@@ -53,6 +53,21 @@ This section is generated from the Elisp docstrings in this Org file. It is Org 
 - =gptel-agent-runtime--maybe-auto-refine-on-trajectory=: Subscriber on `trajectory-recorded': in auto mode, check each matched playbook against the consistent-failure heuristic and trigger refinement when the pattern is found and cooldown allows.
 <!-- gar:function-reference:end -->
 
+<!-- gar:execution-flow:start -->
+* Execution flow
+
+This section explains how the functions above participate in runtime execution. It is Org prose outside source blocks, so tangling preserves behavior.
+
+This module watches repeated failures and proposes playbook refinements.
+
+- Trajectory-recorded events call `gptel-agent-runtime--maybe-auto-refine-on-trajectory'.
+- The module groups recent trajectories by playbook, applies cooldowns, and detects consistent failure patterns.
+- Prompt building serializes the failing playbook and evidence for model-based refinement.
+- Parsed candidates are written for review; when markdown skill support is loaded, a readable markdown sibling is emitted as well.
+- Nothing is auto-applied: approval is handled by the review/promotion layer.
+<!-- gar:execution-flow:end -->
+
+
 * File header
 
 #+begin_src emacs-lisp
