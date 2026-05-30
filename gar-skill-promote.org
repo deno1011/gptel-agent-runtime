@@ -202,6 +202,38 @@ detector)."
   :type 'boolean
   :group 'gptel-agent-runtime)
 
+(defcustom gptel-agent-runtime-skill-promote-transfer-trust-enabled t
+  "PR 20: when non-nil, a NEW auto-synth candidate that is similar to
+at least `transfer-trust-min-matches' already-trusted skills is
+auto-approved without writing a candidate file or asking the user.
+
+This is the second-stage autonomy gate.  PR 19 stops re-asking about
+exact-id matches.  PR 20 extends that trust signal to NEAR matches:
+once the user has approved (and trusted) several skills shaped like
+the new candidate, the system extrapolates the user's preference."
+  :type 'boolean
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-skill-promote-transfer-trust-min-matches 2
+  "Number of trusted skills a new candidate must resemble (above the
+similarity threshold) before transfer-trust auto-approves it.
+Conservative default of 2: a single similar trusted skill is not
+enough evidence; two-or-more says the user has consistently approved
+this shape of work."
+  :type 'integer
+  :safe #'integerp
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-skill-promote-transfer-trust-threshold 0.6
+  "Similarity threshold applied per trusted-skill comparison.
+Same value is used for both cosine similarity (when Ollama embeddings
+are reachable -- typical values 0.6-0.85) and the Jaccard fallback
+over derived triggers (typical values 0.3-0.8).  0.6 is the midpoint
+that works reasonably for both."
+  :type 'float
+  :safe #'floatp
+  :group 'gptel-agent-runtime)
+
 (defvar gptel-agent-runtime--skill-promote-recent-ids nil
   "Recently-promoted skill ids -- alist (id . trajectory-count-at-promotion).
 Used to enforce `skill-promote-cooldown-trajectories'.")
@@ -353,6 +385,7 @@ extractable steps."
                             :status 'proposed
                             :cluster-size (length cluster)
                             :source-trajectory-ids cluster-ids
+                            :source-goal goal
                             :created-at
                             (gptel-agent-runtime--timestamp))))))
 #+end_src
@@ -437,7 +470,14 @@ and writes."
       (let ((skill (gptel-agent-runtime--skill-promote-synthesize
                     traj cluster)))
         (when skill
-          (let ((id (plist-get skill :id)))
+          (let* ((id (plist-get skill :id))
+                 (goal (plist-get payload :goal))
+                 (transfer-matches
+                  (and goal
+                       (gptel-agent-runtime--skill-promote-transfer-trust-applies-p
+                        goal)
+                       (gptel-agent-runtime--skill-promote-trusted-matches
+                        goal))))
             (cond
              ;; PR 19: bypass writing when an already-trusted skill
              ;; covers this exact pattern -- the user has already
@@ -452,6 +492,14 @@ and writes."
                :payload (list :id id
                               :reason "Skill is already trusted; skipping review.")
                :taint 'trusted)
+              nil)
+             ;; PR 20: when the user has trusted enough similar skills
+             ;; in the past, extrapolate that trust to this new
+             ;; candidate -- register and mark approved without
+             ;; writing a review file.
+             (transfer-matches
+              (gptel-agent-runtime--skill-promote-auto-approve-via-transfer
+               skill goal transfer-matches)
               nil)
              (t
               (let ((file (gptel-agent-runtime--skill-promote-write skill)))
@@ -497,8 +545,15 @@ the id has no entry (still implicitly `proposed')."
   (gptel-agent-runtime--skill-promote-save-trust-registry)
   plist)
 
-(defun gptel-agent-runtime--skill-promote-mark-approved (id)
+(defun gptel-agent-runtime--skill-promote-mark-approved (id &optional source-goal via)
   "Transition ID into `approved' state at the current timestamp.
+
+Optional SOURCE-GOAL is the original goal text that produced the
+skill -- recorded for future transfer-trust matching (PR 20).
+Optional VIA tracks how the approval happened: `'user' (manual
+click on `a' in the review buffer) or `'transfer-trust' (PR 20
+auto-approval from extrapolated trust).
+
 Idempotent -- re-approving an already-trusted skill is a no-op so
 the trust ratchet only moves forward."
   (let ((current (gptel-agent-runtime--skill-promote-trust-state id)))
@@ -507,11 +562,13 @@ the trust ratchet only moves forward."
        id
        (list :state 'approved
              :approved-at (gptel-agent-runtime--timestamp)
-             :invocations-since-approval 0))
+             :invocations-since-approval 0
+             :source-goal source-goal
+             :via (or via 'user)))
       (gptel-agent-runtime-emit-event
        'skill-promote-trust-approved
        :source "skill-promote"
-       :payload (list :id id)
+       :payload (list :id id :via (or via 'user))
        :taint 'trusted))))
 
 (defun gptel-agent-runtime--skill-promote-bump-invocation (id)
@@ -589,6 +646,97 @@ No-op when the file does not exist."
                     (setq gptel-agent-runtime--skill-promote-trust-registry
                           data))))))))
     (error nil)))
+
+;; ---------- PR 20: transfer-trust ------------------------------------------
+
+(defun gptel-agent-runtime--skill-promote-jaccard-similarity (text-a text-b)
+  "Return Jaccard similarity (0.0-1.0) over derived triggers of two
+goal strings.  Lexical fallback when Ollama embeddings aren't available."
+  (let* ((a (gptel-agent-runtime--skill-promote-derive-triggers (or text-a "")))
+         (b (gptel-agent-runtime--skill-promote-derive-triggers (or text-b "")))
+         (set-a (delete-dups a))
+         (set-b (delete-dups b))
+         (intersection
+          (cl-remove-if-not (lambda (x) (member x set-b)) set-a))
+         (union (delete-dups (append set-a set-b))))
+    (if (null union) 0.0
+      (/ (float (length intersection))
+         (float (length union))))))
+
+(defun gptel-agent-runtime--skill-promote-similarity (text-a text-b)
+  "Return similarity (0.0-1.0) between two goal texts.
+
+Prefers cosine similarity over Ollama embeddings when both texts can
+be embedded (requires `memory-retrieval-method' to be
+`ollama-embeddings').  Falls back to Jaccard over derived triggers
+when embeddings are unavailable."
+  (let ((emb-a (and (fboundp 'gptel-agent-runtime--ollama-embedding)
+                    (gptel-agent-runtime--ollama-embedding text-a)))
+        (emb-b (and (fboundp 'gptel-agent-runtime--ollama-embedding)
+                    (gptel-agent-runtime--ollama-embedding text-b))))
+    (if (and emb-a emb-b
+             (fboundp 'gptel-agent-runtime--cosine-similarity))
+        (gptel-agent-runtime--cosine-similarity emb-a emb-b)
+      (gptel-agent-runtime--skill-promote-jaccard-similarity text-a text-b))))
+
+(defun gptel-agent-runtime--skill-promote-trusted-matches (candidate-goal)
+  "Return list of (TRUSTED-ID . SIMILARITY) pairs where SIMILARITY
+>= `transfer-trust-threshold' and the entry's state is `trusted'
+and it has a `:source-goal' to compare against."
+  (let ((threshold gptel-agent-runtime-skill-promote-transfer-trust-threshold)
+        (matches nil))
+    (dolist (entry gptel-agent-runtime--skill-promote-trust-registry)
+      (let* ((id (car entry))
+             (plist (cdr entry))
+             (state (plist-get plist :state))
+             (source (plist-get plist :source-goal)))
+        (when (and (eq state 'trusted)
+                   (stringp source)
+                   (not (string-empty-p source)))
+          (let ((sim (gptel-agent-runtime--skill-promote-similarity
+                      candidate-goal source)))
+            (when (and (numberp sim) (>= sim threshold))
+              (push (cons id sim) matches))))))
+    (nreverse matches)))
+
+(defun gptel-agent-runtime--skill-promote-transfer-trust-applies-p (candidate-goal)
+  "Return non-nil when transfer-trust should auto-approve a candidate
+with CANDIDATE-GOAL.  Conditions: feature is enabled AND there are at
+least `transfer-trust-min-matches' trusted skills above the
+similarity threshold."
+  (and gptel-agent-runtime-skill-promote-transfer-trust-enabled
+       (let ((matches
+              (gptel-agent-runtime--skill-promote-trusted-matches
+               candidate-goal)))
+         (>= (length matches)
+             gptel-agent-runtime-skill-promote-transfer-trust-min-matches))))
+
+(defun gptel-agent-runtime--skill-promote-auto-approve-via-transfer
+    (skill source-goal matches)
+  "Register SKILL as a playbook AND mark it approved via transfer-trust.
+SOURCE-GOAL is the original goal text (stored on the trust entry so
+this newly-approved skill can ALSO participate in future
+transfer-trust matching). MATCHES is the list of (id . sim) pairs
+that caused the auto-approval -- recorded in the
+`skill-promote-transfer-approved' event for auditability."
+  (when (and skill
+             (fboundp 'gptel-agent-runtime--skills-md-skill->playbook)
+             (fboundp 'gptel-agent-runtime--skills-md-register-playbook))
+    (gptel-agent-runtime--skills-md-register-playbook
+     (gptel-agent-runtime--skills-md-skill->playbook skill)))
+  (gptel-agent-runtime--skill-promote-mark-approved
+   (plist-get skill :id) source-goal 'transfer-trust)
+  (gptel-agent-runtime-emit-event
+   'skill-promote-transfer-approved
+   :source "skill-promote"
+   :payload (list :id (plist-get skill :id)
+                  :goal source-goal
+                  :matched-trusted matches)
+   :taint 'trusted)
+  (message "Skill %s auto-approved via transfer-trust (%d match%s)"
+           (plist-get skill :id)
+           (length matches)
+           (if (= 1 (length matches)) "" "es")))
 
 ;;;###autoload
 (defun gptel-agent-runtime-skill-promote-trust-status ()
@@ -762,8 +910,18 @@ already-approved refinement candidates."
       (gptel-agent-runtime--skills-md-register-playbook
        (gptel-agent-runtime--skills-md-skill->playbook skill)))
     (when (and skill (plist-get skill :id))
-      (gptel-agent-runtime--skill-promote-mark-approved
-       (plist-get skill :id)))
+      ;; PR 20: capture the source goal from the skill's metadata so
+      ;; this approval can participate in future transfer-trust
+      ;; matching.  When the skill was hand-authored or pre-dates PR
+      ;; 15's metadata field, fall back to deriving a goal from the
+      ;; summary (best effort -- a missing source-goal just means
+      ;; this skill won't help with transfer-trust).
+      (let* ((meta (plist-get skill :metadata))
+             (source-goal
+              (or (and (listp meta) (plist-get meta :source-goal))
+                  (plist-get skill :summary))))
+        (gptel-agent-runtime--skill-promote-mark-approved
+         (plist-get skill :id) source-goal 'user)))
     (gptel-agent-runtime-emit-event
      'skill-promote-approved
      :source "skill-promote"

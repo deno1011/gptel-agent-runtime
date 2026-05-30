@@ -504,6 +504,204 @@ only progresses for explicitly-approved skills)."
                                          (buffer-string))))))
         (when (get-buffer buf-name) (kill-buffer buf-name))))))
 
+;; ============================================================================
+;; PR 20: transfer-trust auto-approval
+;; ============================================================================
+
+(ert-deftest gar-skill-promote-jaccard-overlap-detected ()
+  "Two goals about the same task type share derived triggers, so
+Jaccard is >0; two unrelated goals share none, so Jaccard is 0."
+  (let ((sim-related (gptel-agent-runtime--skill-promote-jaccard-similarity
+                      "list my todos here" "show all my todos"))
+        (sim-unrelated (gptel-agent-runtime--skill-promote-jaccard-similarity
+                        "list my todos here" "rename this variable")))
+    (should (> sim-related 0.0))
+    (should (= sim-unrelated 0.0))))
+
+(ert-deftest gar-skill-promote-jaccard-identical-is-one ()
+  (should (= 1.0 (gptel-agent-runtime--skill-promote-jaccard-similarity
+                  "configure deadlines" "configure deadlines"))))
+
+(ert-deftest gar-skill-promote-jaccard-empty-is-zero ()
+  (should (= 0.0 (gptel-agent-runtime--skill-promote-jaccard-similarity
+                  "" "the and to or"))))
+
+(ert-deftest gar-skill-promote-similarity-uses-jaccard-without-embeddings ()
+  "When `--ollama-embedding' returns nil (default config), the
+similarity helper falls back to Jaccard."
+  (cl-letf (((symbol-function 'gptel-agent-runtime--ollama-embedding)
+             (lambda (_text) nil)))
+    (let ((sim (gptel-agent-runtime--skill-promote-similarity
+                "list my todos" "show all my todos")))
+      (should (> sim 0.0))
+      (should (<= sim 1.0)))))
+
+(ert-deftest gar-skill-promote-trusted-matches-requires-trusted-state ()
+  "Only `trusted' entries count; `approved' entries don't transfer."
+  (gar-skill-promote-test--with-clean-trust
+    (gptel-agent-runtime--skill-promote-trust-entry-set
+     "auto-related-1"
+     (list :state 'trusted :approved-at "t"
+           :invocations-since-approval 10 :promoted-at "t2"
+           :source-goal "list my todos"))
+    (gptel-agent-runtime--skill-promote-trust-entry-set
+     "auto-related-2"
+     (list :state 'approved :approved-at "t"
+           :invocations-since-approval 1
+           :source-goal "show my todos"))
+    (let* ((gptel-agent-runtime-skill-promote-transfer-trust-threshold 0.3)
+           (matches (gptel-agent-runtime--skill-promote-trusted-matches
+                     "list all my todos")))
+      ;; Only the trusted entry matches.
+      (should (= 1 (length matches)))
+      (should (equal "auto-related-1" (car (car matches)))))))
+
+(ert-deftest gar-skill-promote-trusted-matches-skips-entries-without-source-goal ()
+  "Old trust entries (pre-PR-20) without :source-goal are skipped."
+  (gar-skill-promote-test--with-clean-trust
+    (gptel-agent-runtime--skill-promote-trust-entry-set
+     "legacy-trusted"
+     (list :state 'trusted :approved-at "t"
+           :invocations-since-approval 10 :promoted-at "t2"))
+    (let ((matches (gptel-agent-runtime--skill-promote-trusted-matches
+                    "anything at all")))
+      (should (null matches)))))
+
+(ert-deftest gar-skill-promote-transfer-applies-when-min-matches-reached ()
+  (gar-skill-promote-test--with-clean-trust
+    (let ((gptel-agent-runtime-skill-promote-transfer-trust-min-matches 2)
+          (gptel-agent-runtime-skill-promote-transfer-trust-threshold 0.3))
+      ;; Seed three trusted skills, all similar to the candidate.
+      (dolist (entry '(("auto-todos-1" . "list my todos")
+                       ("auto-todos-2" . "show all my todos")
+                       ("auto-todos-3" . "give me the todos")))
+        (gptel-agent-runtime--skill-promote-trust-entry-set
+         (car entry)
+         (list :state 'trusted
+               :approved-at "t"
+               :invocations-since-approval 10
+               :promoted-at "t2"
+               :source-goal (cdr entry))))
+      (should
+       (gptel-agent-runtime--skill-promote-transfer-trust-applies-p
+        "list all of my todos here")))))
+
+(ert-deftest gar-skill-promote-transfer-does-not-apply-below-min-matches ()
+  (gar-skill-promote-test--with-clean-trust
+    (let ((gptel-agent-runtime-skill-promote-transfer-trust-min-matches 2)
+          (gptel-agent-runtime-skill-promote-transfer-trust-threshold 0.3))
+      ;; Only one trusted skill -- below the min.
+      (gptel-agent-runtime--skill-promote-trust-entry-set
+       "auto-todos-1"
+       (list :state 'trusted :approved-at "t"
+             :invocations-since-approval 10 :promoted-at "t2"
+             :source-goal "list my todos"))
+      (should-not
+       (gptel-agent-runtime--skill-promote-transfer-trust-applies-p
+        "list all of my todos here")))))
+
+(ert-deftest gar-skill-promote-transfer-disabled-flag-respected ()
+  (gar-skill-promote-test--with-clean-trust
+    (let ((gptel-agent-runtime-skill-promote-transfer-trust-enabled nil)
+          (gptel-agent-runtime-skill-promote-transfer-trust-min-matches 1)
+          (gptel-agent-runtime-skill-promote-transfer-trust-threshold 0.0))
+      (gptel-agent-runtime--skill-promote-trust-entry-set
+       "auto-any"
+       (list :state 'trusted :approved-at "t"
+             :invocations-since-approval 10 :promoted-at "t2"
+             :source-goal "anything"))
+      (should-not
+       (gptel-agent-runtime--skill-promote-transfer-trust-applies-p
+        "anything else")))))
+
+(ert-deftest gar-skill-promote-transfer-auto-approve-registers-and-marks ()
+  (gar-skill-promote-test--with-clean-trust
+    (let ((gptel-agent-runtime-playbook-registry nil)
+          (skill (list :id "auto-newcomer"
+                       :summary "Distilled"
+                       :triggers '("todos")
+                       :steps '((:title "do it"))))
+          (matches '(("auto-todos-1" . 0.85)
+                     ("auto-todos-2" . 0.72))))
+      (gptel-agent-runtime--skill-promote-auto-approve-via-transfer
+       skill "list my todos" matches)
+      ;; Now registered as a playbook.
+      (should (cl-find "auto-newcomer"
+                       gptel-agent-runtime-playbook-registry
+                       :key #'gptel-agent-runtime-playbook-id
+                       :test #'equal))
+      ;; And the trust registry records it as approved via
+      ;; transfer-trust, with the source goal stored for FURTHER
+      ;; transfer-trust propagation.
+      (let ((entry (cdr (assoc "auto-newcomer"
+                                gptel-agent-runtime--skill-promote-trust-registry))))
+        (should (eq 'approved (plist-get entry :state)))
+        (should (eq 'transfer-trust (plist-get entry :via)))
+        (should (string= "list my todos" (plist-get entry :source-goal)))))))
+
+(ert-deftest gar-skill-promote-write-from-payload-transfer-skips-file-write ()
+  "End-to-end: with enough trusted similar skills, the auto-synth
+writer registers + auto-approves WITHOUT writing a candidate file."
+  (gar-skill-promote-test--with-clean-trust
+    (let* ((tmp-dir (make-temp-file "gar-skill-transfer-" t))
+           (gptel-agent-runtime-skills-directory tmp-dir)
+           (gptel-agent-runtime-skill-promote-transfer-trust-enabled t)
+           (gptel-agent-runtime-skill-promote-transfer-trust-min-matches 2)
+           (gptel-agent-runtime-skill-promote-transfer-trust-threshold 0.2)
+           (gptel-agent-runtime-playbook-registry nil)
+           (traj (gptel-agent-runtime-trajectory-create
+                  :id "new-traj"
+                  :goal "list all open todos verbatim"
+                  :outcome 'success
+                  :finalized-at "ts"
+                  :steps (list (gptel-agent-runtime-trajectory-step-create
+                                :title "answer"
+                                :suggested-tool "direct_response"))))
+           (gptel-agent-runtime--trajectories (list traj)))
+      (unwind-protect
+          (progn
+            ;; Seed two trusted similar skills.
+            (gptel-agent-runtime--skill-promote-trust-entry-set
+             "auto-list-my-todos-here"
+             (list :state 'trusted :approved-at "t"
+                   :invocations-since-approval 10 :promoted-at "t2"
+                   :source-goal "list my todos here"))
+            (gptel-agent-runtime--skill-promote-trust-entry-set
+             "auto-show-all-my-todos"
+             (list :state 'trusted :approved-at "t"
+                   :invocations-since-approval 10 :promoted-at "t2"
+                   :source-goal "show all my todos"))
+            (let ((result
+                   (gptel-agent-runtime--skill-promote-write-from-payload
+                    (list :id (gptel-agent-runtime-trajectory-id traj)
+                          :goal "list all open todos verbatim"
+                          :outcome 'success)
+                    (list (list :id "x" :outcome 'success)
+                          (list :id "y" :outcome 'success)))))
+              ;; Returns nil (the transfer-trust branch returns nil) and
+              ;; writes no candidate file.
+              (should-not result)
+              (let* ((auto-dir
+                      (gptel-agent-runtime--skill-promote-directory))
+                     (md-files
+                      (and (file-directory-p auto-dir)
+                           (directory-files auto-dir t "\\.md\\'"))))
+                (should (null md-files)))
+              ;; BUT the new skill IS registered as a playbook AND
+              ;; marked approved-via-transfer.
+              (let ((pb (cl-find "auto-list-all-open-todos-verbatim"
+                                  gptel-agent-runtime-playbook-registry
+                                  :key #'gptel-agent-runtime-playbook-id
+                                  :test #'equal)))
+                (should pb))
+              (let ((entry
+                     (cdr (assoc
+                           "auto-list-all-open-todos-verbatim"
+                           gptel-agent-runtime--skill-promote-trust-registry))))
+                (should (eq 'approved (plist-get entry :state)))
+                (should (eq 'transfer-trust (plist-get entry :via))))))
+        (when (file-directory-p tmp-dir) (delete-directory tmp-dir t))))))
+
 (provide 'gar-skill-promote-test)
 
 ;;; gar-skill-promote-test.el ends here
