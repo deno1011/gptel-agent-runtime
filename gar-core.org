@@ -227,7 +227,7 @@ in-memory event log and live swarm buffer still receive the event."
 (defcustom gptel-agent-runtime-idle-pump-enabled nil
   "When non-nil, run a background idle pump that advances the runtime clock.
 The pump fires on an idle timer every `gptel-agent-runtime-idle-pump-interval'
-seconds and advances the OpenClaw substrate tick so background subscribers
+seconds and advances the runtime substrate tick so background subscribers
 (memory consolidation, novelty rescoring, candidate playbook synthesis) can do
 work even when no user request is in flight. Default is off so a fresh package
 load does not start a background timer until the user opts in."
@@ -967,7 +967,7 @@ much to trust the data and where it came from.
 TEXT is the raw string content. SOURCE-TYPE is one of `user', `tool-result',
 `web', `file', `memory', `worker', `runtime', `experiment'. SOURCE-ID identifies
 the concrete source (tool name, file path, agent name, URL). TICK records the
-OpenClaw substrate clock value when the evidence was created. AGENT is the
+Runtime substrate clock value when the evidence was created. AGENT is the
 agent name that produced or first received the evidence. TAINT is one of
 `trusted', `untrusted', `quarantined'. PARENT-EVIDENCE-ID links derived
 evidence back to its source so the full lineage DAG can be reconstructed."

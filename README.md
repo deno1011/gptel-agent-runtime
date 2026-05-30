@@ -12,7 +12,7 @@ for MELPA.
 - Multi-file package: a thin master entrypoint + 11 focused modules.
 - Literate sources: edit the matching `gar-*.org` (or `gptel-agent-runtime.org`
   for the master); generated `.el` files are tangle output.
-- OpenClaw-style substrate (tick + event pump + provenance + versioned state)
+- Runtime substrate (tick + event pump + provenance + versioned state)
   underpins every other module.
 - Zero-trust capability gate per agent, Advocatus Diaboli skeptic, per-source
   evidence quarantine, prompt-injection canaries, unified mission-control
@@ -53,7 +53,7 @@ The package loads in this order (each `(require)` lives in the thin master
 | Module | Concern |
 |---|---|
 | `gar-core` | `defgroup`, ~50 defcustoms, all `cl-defstruct`s, base helpers (`--symbol-name`, `--tokenize-text`, `--trigger-matches-p`, native-tool dispatch, status / mode-line / sync helpers) |
-| `gar-substrate` | OpenClaw tick + event pump + idle pump, evidence struct + provenance, versioned state header, swarm trace buffer, `emit-event` (universal event constructor) |
+| `gar-substrate` | Runtime tick + event pump + idle pump, evidence struct + provenance, versioned state header, swarm trace buffer, `emit-event` (universal event constructor) |
 | `gar-safety` | Policy broker (`policy-evaluate-step`, `safety-check-step`), capability gate, untrusted/trusted context wrappers, per-source quarantine + `promote-evidence`, Advocatus Diaboli skeptic, 5 prompt-injection canaries, 5 policy presets, unified mission-control dashboard |
 | `gar-memory` | Sessions persistence, embedding cache (lexical + optional Ollama), novelty detector, playbook success-rate scoring, strategy synthesis (writes candidate playbooks), hypothesis-test scaffolding |
 | `gar-tools` | Tool registry + `action-result` data model, 22 native `gptel-make-tool` registrations, tool-invention pipeline (propose / static-check / subprocess sandbox / manual approval) |
@@ -78,7 +78,7 @@ M-x gptel-agent-runtime-show-guardrails        ; policy state + protected paths
 M-x gptel-agent-runtime-trace-evidence         ; evidence lineage DAG
 M-x gptel-agent-runtime-show-event-pump        ; subscribers + recent dispatches
 M-x gptel-agent-runtime-promote-evidence       ; release quarantine on a specific evidence ID
-M-x gptel-agent-runtime-toggle-idle-pump       ; OpenClaw background tick
+M-x gptel-agent-runtime-toggle-idle-pump       ; runtime background tick
 M-x gptel-agent-runtime-run-injection-canaries ; structural canary suite
 M-x gptel-agent-runtime-workers-summary        ; worker queue + status
 M-x gptel-agent-runtime-worker-self-test       ; visible no-tool worker self-test
