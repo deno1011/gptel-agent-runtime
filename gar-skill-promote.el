@@ -1,0 +1,355 @@
+;;; gar-skill-promote.el --- trajectory-to-skill promotion -*- lexical-binding: t; -*-
+
+;; Part of deno1011/gptel-agent-runtime. Added 2026-05-30 as PR 15 of
+;; the self-reflective / learning / memorising track.
+
+;;; Commentary:
+
+;; Watches session-finalized events. When a successful trajectory
+;; matches N+ similar past successes (by cosine over embeddings or
+;; lexical fallback), distills a reusable markdown skill into
+;; skills-directory/auto-synth/ for human review.
+
+;;; Code:
+
+(require 'cl-lib)
+(require 'subr-x)
+
+(declare-function gptel-agent-runtime--timestamp "gar-substrate" ())
+(declare-function gptel-agent-runtime-emit-event "gptel-agent-runtime"
+                  (type &rest args))
+(declare-function gptel-agent-runtime-subscribe "gar-substrate"
+                  (event-type handler))
+(declare-function gptel-agent-runtime-event-payload "gar-substrate" (event))
+
+;; gar-trajectory accessors
+(declare-function gptel-agent-runtime-trajectory-p "gptel-agent-runtime" (obj))
+(declare-function gptel-agent-runtime-trajectory-id
+                  "gptel-agent-runtime" (traj))
+(declare-function gptel-agent-runtime-trajectory-goal
+                  "gptel-agent-runtime" (traj))
+(declare-function gptel-agent-runtime-trajectory-outcome
+                  "gptel-agent-runtime" (traj))
+(declare-function gptel-agent-runtime-trajectory-steps
+                  "gptel-agent-runtime" (traj))
+(declare-function gptel-agent-runtime-trajectory-step-title
+                  "gptel-agent-runtime" (step))
+(declare-function gptel-agent-runtime-trajectory-step-suggested-tool
+                  "gptel-agent-runtime" (step))
+(declare-function gptel-agent-runtime-trajectory-step-args
+                  "gptel-agent-runtime" (step))
+
+;; gar-memory-sqlite similarity search
+(declare-function gptel-agent-runtime-sqlite-similar-trajectories
+                  "gar-memory-sqlite" (text &optional limit))
+(declare-function gptel-agent-runtime-sqlite-search-by-text
+                  "gar-memory-sqlite" (pattern &optional limit))
+
+;; gar-skills-md writer
+(declare-function gptel-agent-runtime-skill-to-file
+                  "gar-skills-md" (skill file))
+
+(defvar gptel-agent-runtime-skills-directory)
+
+(defcustom gptel-agent-runtime-skill-promote-mode 'auto
+  "Operating mode for trajectory-to-skill promotion.
+
+- `off':    no auto-promotion; the substrate stays read-only.
+- `manual': cluster detection still runs and emits a
+            `skill-promote-candidate' event, but no file is written
+            -- you call `M-x gptel-agent-runtime-promote-candidate'
+            to materialise.
+- `auto':   detection runs AND the candidate gets written to
+            `skills-directory/auto-synth/' as :status proposed.
+            Files are never auto-registered as playbooks unless
+            `skill-promote-auto-register' is also non-nil."
+  :type '(choice (const :tag "Off" off)
+                 (const :tag "Manual (event only)" manual)
+                 (const :tag "Auto-write candidate" auto))
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-skill-promote-min-successes 3
+  "Cluster size threshold before a candidate skill is proposed.
+The current trajectory counts toward this -- so the default 3 fires
+on the third consecutive success of the same pattern."
+  :type 'integer
+  :safe #'integerp
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-skill-promote-similarity-threshold 0.7
+  "Minimum cosine similarity for a trajectory to count as `same
+pattern' as the current one.  Only consulted when embeddings are
+available; the lexical fallback path uses FTS5 keyword overlap and
+ignores this defcustom."
+  :type 'float
+  :safe #'floatp
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-skill-promote-search-window 50
+  "Maximum number of past trajectories to pull from the index when
+looking for the cluster.  Keeps the cosine scan bounded on very
+large archives."
+  :type 'integer
+  :safe #'integerp
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-skill-promote-cooldown-trajectories 10
+  "Don't re-propose the same pattern until N new trajectories have
+been recorded since its last proposal.  Prevents the same skill
+from being written every time the user runs the underlying goal."
+  :type 'integer
+  :safe #'integerp
+  :group 'gptel-agent-runtime)
+
+(defcustom gptel-agent-runtime-skill-promote-auto-register nil
+  "When non-nil, auto-proposed skills are also registered as
+playbooks in `gptel-agent-runtime-playbook-registry' immediately.
+Default is nil because the safe path is `propose, human reviews,
+human approves'."
+  :type 'boolean
+  :group 'gptel-agent-runtime)
+
+(defvar gptel-agent-runtime--skill-promote-recent-ids nil
+  "Recently-promoted skill ids -- alist (id . trajectory-count-at-promotion).
+Used to enforce `skill-promote-cooldown-trajectories'.")
+
+(defvar gptel-agent-runtime--skill-promote-trajectory-count 0
+  "Running count of trajectories observed since this Emacs started.
+Used to age `--skill-promote-recent-ids' for the cooldown.")
+
+(defun gptel-agent-runtime--skill-promote-directory ()
+  "Return (and create if needed) the auto-synth skills subdirectory."
+  (let ((dir (expand-file-name
+              "auto-synth/"
+              (or (and (boundp 'gptel-agent-runtime-skills-directory)
+                       gptel-agent-runtime-skills-directory)
+                  (expand-file-name "skills/"
+                                    user-emacs-directory)))))
+    (unless (file-directory-p dir) (make-directory dir t))
+    dir))
+
+(defun gptel-agent-runtime--skill-promote-fetch-similar (goal)
+  "Return up to `skill-promote-search-window' similar past trajectories
+for GOAL.  Prefers cosine similarity, falls back to lexical search.
+Each hit is a plist with at least `:id :goal :outcome' and (for
+the cosine path) `:similarity'."
+  (let ((n gptel-agent-runtime-skill-promote-search-window))
+    (or (and (fboundp 'gptel-agent-runtime-sqlite-similar-trajectories)
+             (gptel-agent-runtime-sqlite-similar-trajectories goal n))
+        (and (fboundp 'gptel-agent-runtime-sqlite-search-by-text)
+             (gptel-agent-runtime-sqlite-search-by-text goal n))
+        nil)))
+
+(defun gptel-agent-runtime--skill-promote-filter-cluster (hits)
+  "Return the subset of HITS that count as `same pattern' successes.
+- :outcome must be `success' (or `\"success\"' as stored).
+- When `:similarity' is present, it must be >= the threshold."
+  (let ((thr gptel-agent-runtime-skill-promote-similarity-threshold))
+    (cl-remove-if-not
+     (lambda (hit)
+       (and (let ((out (plist-get hit :outcome)))
+              (or (eq out 'success)
+                  (and (stringp out) (string= "success" out))))
+            (let ((sim (plist-get hit :similarity)))
+              (or (null sim) (>= sim thr)))))
+     hits)))
+
+(defun gptel-agent-runtime--skill-promote-cooldown-active-p (goal)
+  "Return non-nil when a skill for GOAL was promoted within the
+last `skill-promote-cooldown-trajectories' new trajectories."
+  (let* ((cool gptel-agent-runtime-skill-promote-cooldown-trajectories)
+         (now gptel-agent-runtime--skill-promote-trajectory-count)
+         (entry (assoc (gptel-agent-runtime--skill-promote-derive-id goal)
+                       gptel-agent-runtime--skill-promote-recent-ids)))
+    (and entry (< (- now (cdr entry)) cool))))
+
+(defun gptel-agent-runtime--skill-promote-derive-id (goal)
+  "Derive a stable skill id from GOAL.  Lowercases, replaces
+non-alphanumerics with hyphens, truncates to 40 chars.  The same
+goal text always produces the same id so re-promotion replaces
+rather than duplicates."
+  (let* ((stripped (downcase (or goal "")))
+         (slug (replace-regexp-in-string "[^a-z0-9]+" "-" stripped))
+         (slug (replace-regexp-in-string "^-+\\|-+$" "" slug))
+         (slug (if (string-empty-p slug) "skill" slug))
+         (slug (if (> (length slug) 40) (substring slug 0 40) slug)))
+    (concat "auto-" slug)))
+
+(defun gptel-agent-runtime--skill-promote-derive-triggers (goal)
+  "Derive a small trigger list from GOAL by lowercasing and
+splitting on non-alphanumerics, then dropping function words and
+short tokens."
+  (let* ((stopwords '("the" "a" "an" "and" "or" "of" "in" "on" "at"
+                      "to" "for" "with" "by" "is" "are" "was" "were"
+                      "be" "i" "me" "my" "you" "your" "it" "this"
+                      "that" "these" "those" "do" "does" "did"
+                      "have" "has" "had" "show" "list" "get" "set"
+                      "from" "into" "as" "but" "not"
+                      "all" "every" "any" "some" "here" "there"
+                      "now" "then" "also" "just" "only" "can" "will"))
+         (raw (split-string (downcase (or goal "")) "[^a-z0-9]+" t)))
+    (cl-remove-if (lambda (w)
+                    (or (< (length w) 3)
+                        (member w stopwords)))
+                  raw)))
+
+(defun gptel-agent-runtime--skill-promote-extract-steps (trajectory)
+  "Extract a step-plist list from TRAJECTORY's trajectory-steps so
+the markdown skill writer can serialise them.  Skips steps with no
+:suggested-tool.  Returns nil when there's nothing extractable."
+  (let ((out nil))
+    (dolist (step (or (gptel-agent-runtime-trajectory-steps trajectory) '()))
+      (let ((title (gptel-agent-runtime-trajectory-step-title step))
+            (tool (gptel-agent-runtime-trajectory-step-suggested-tool step))
+            (args (gptel-agent-runtime-trajectory-step-args step)))
+        (when (and tool (not (string-empty-p (or tool ""))))
+          (push (list :title (or title "")
+                      :tool tool
+                      :args (or args nil)
+                      :rationale "Distilled from a successful trajectory.")
+                out))))
+    (nreverse out)))
+
+(defun gptel-agent-runtime--skill-promote-synthesize (trajectory cluster)
+  "Build a skill plist from TRAJECTORY (the most-recent success in
+the cluster) and CLUSTER (list of trajectory summary plists, may
+include TRAJECTORY).  Returns a plist with :id :summary :triggers
+:steps :metadata.  Returns nil when the trajectory has no
+extractable steps."
+  (let* ((goal (gptel-agent-runtime-trajectory-goal trajectory))
+         (steps (gptel-agent-runtime--skill-promote-extract-steps
+                 trajectory))
+         (id (gptel-agent-runtime--skill-promote-derive-id goal))
+         (cluster-ids (mapcar (lambda (h) (plist-get h :id)) cluster)))
+    (when steps
+      (list :id id
+            :summary (format
+                      "Distilled from %d similar successful sessions: %s"
+                      (length cluster)
+                      (or goal "<no goal>"))
+            :triggers (gptel-agent-runtime--skill-promote-derive-triggers
+                       goal)
+            :steps steps
+            :metadata (list :source 'auto-synth
+                            :status 'proposed
+                            :cluster-size (length cluster)
+                            :source-trajectory-ids cluster-ids
+                            :created-at
+                            (gptel-agent-runtime--timestamp))))))
+
+(defun gptel-agent-runtime--skill-promote-target-file (skill)
+  "Return the .md path for SKILL inside the auto-synth subdirectory."
+  (expand-file-name (format "%s.md" (plist-get skill :id))
+                    (gptel-agent-runtime--skill-promote-directory)))
+
+(defun gptel-agent-runtime--skill-promote-write (skill)
+  "Persist SKILL to disk and return the path.  Records the id in
+`--skill-promote-recent-ids' so the cooldown takes effect."
+  (when (fboundp 'gptel-agent-runtime-skill-to-file)
+    (let ((file (gptel-agent-runtime--skill-promote-target-file skill)))
+      (gptel-agent-runtime-skill-to-file skill file)
+      (setq gptel-agent-runtime--skill-promote-recent-ids
+            (cons (cons (plist-get skill :id)
+                        gptel-agent-runtime--skill-promote-trajectory-count)
+                  (cl-remove (plist-get skill :id)
+                             gptel-agent-runtime--skill-promote-recent-ids
+                             :key #'car :test #'equal)))
+      file)))
+
+(defun gptel-agent-runtime--skill-promote-on-trajectory (event)
+  "Subscriber for `trajectory-recorded' events.  Increments the
+running trajectory count, then runs the promotion check.  Wrapped
+in `condition-case' so a synthesis error never breaks the substrate."
+  (cl-incf gptel-agent-runtime--skill-promote-trajectory-count)
+  (when (and (not (eq gptel-agent-runtime-skill-promote-mode 'off))
+             (fboundp 'gptel-agent-runtime-trajectory-p))
+    (condition-case _err
+        (let* ((payload (and event
+                             (gptel-agent-runtime-event-payload event)))
+               (id (plist-get payload :id))
+               (outcome (plist-get payload :outcome))
+               (goal (plist-get payload :goal)))
+          (when (and id
+                     (or (eq outcome 'success)
+                         (and (stringp outcome)
+                              (string= "success" outcome)))
+                     goal
+                     (not (gptel-agent-runtime--skill-promote-cooldown-active-p
+                           goal)))
+            (let* ((hits (gptel-agent-runtime--skill-promote-fetch-similar
+                          goal))
+                   (cluster (gptel-agent-runtime--skill-promote-filter-cluster
+                             hits))
+                   (n (length cluster)))
+              (when (>= n
+                        gptel-agent-runtime-skill-promote-min-successes)
+                (gptel-agent-runtime-emit-event
+                 'skill-promote-candidate
+                 :source "skill-promote"
+                 :payload (list :id (gptel-agent-runtime--skill-promote-derive-id
+                                     goal)
+                                :goal goal
+                                :cluster-size n
+                                :outcome outcome)
+                 :taint 'trusted)
+                (when (eq gptel-agent-runtime-skill-promote-mode 'auto)
+                  (gptel-agent-runtime--skill-promote-write-from-payload
+                   payload cluster))))))
+      (error nil))))
+
+(defun gptel-agent-runtime--skill-promote-write-from-payload (payload cluster)
+  "Helper used by the subscriber when `mode' is `auto'.  Looks up the
+in-memory trajectory by id (so we can read its real steps), synthesises,
+and writes."
+  (let* ((id (plist-get payload :id))
+         (traj (and (boundp 'gptel-agent-runtime--trajectories)
+                    (cl-find id gptel-agent-runtime--trajectories
+                             :key #'gptel-agent-runtime-trajectory-id
+                             :test #'equal))))
+    (when traj
+      (let ((skill (gptel-agent-runtime--skill-promote-synthesize
+                    traj cluster)))
+        (when skill
+          (let ((file (gptel-agent-runtime--skill-promote-write skill)))
+            (gptel-agent-runtime-emit-event
+             'skill-promote-written
+             :source "skill-promote"
+             :payload (list :id (plist-get skill :id)
+                            :file file
+                            :cluster-size (length cluster))
+             :taint 'trusted)
+            file))))))
+
+;;;###autoload
+(defun gptel-agent-runtime-list-auto-synth-skills ()
+  "List the auto-synthesised skill candidates in
+`skills-directory/auto-synth/'."
+  (interactive)
+  (let* ((dir (gptel-agent-runtime--skill-promote-directory))
+         (files (and (file-directory-p dir)
+                     (directory-files dir t "\\.md\\'")))
+         (buf (get-buffer-create "*gptel-agent-auto-synth-skills*")))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert (format "Auto-synth skills directory: %s\n" dir))
+        (insert (format "Candidates: %d\n\n" (length (or files '()))))
+        (dolist (f (or files '()))
+          (insert (format "  %s  (%s)\n"
+                          (file-name-nondirectory f)
+                          (format-time-string
+                           "%Y-%m-%d %H:%M"
+                           (file-attribute-modification-time
+                            (file-attributes f)))))))
+      (goto-char (point-min))
+      (special-mode))
+    (display-buffer buf)))
+
+(when (fboundp 'gptel-agent-runtime-subscribe)
+  (gptel-agent-runtime-subscribe
+   'trajectory-recorded
+   #'gptel-agent-runtime--skill-promote-on-trajectory))
+
+(provide 'gar-skill-promote)
+
+;;; gar-skill-promote.el ends here

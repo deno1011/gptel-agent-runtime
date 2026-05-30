@@ -1,0 +1,211 @@
+;;; gar-skill-promote-test.el --- ERT tests for gar-skill-promote -*- lexical-binding: t; -*-
+
+;;; Code:
+
+(require 'test-helper)
+(require 'gar-test-fake-llm)
+
+(defun gar-skill-promote-test--trajectory (goal outcome &optional steps)
+  "Build a trajectory struct with GOAL, OUTCOME, and STEPS (list of
+trajectory-step structs).  Defaults to a single direct_response step
+when STEPS is nil."
+  (gptel-agent-runtime-trajectory-create
+   :id (format "test-%s" (substring (secure-hash 'md5 goal) 0 8))
+   :goal goal
+   :outcome outcome
+   :finalized-at "2026-05-30T00:00:00"
+   :steps (or steps
+              (list (gptel-agent-runtime-trajectory-step-create
+                     :title "Answer directly"
+                     :suggested-tool "direct_response")))))
+
+;; --- ID + trigger derivation ---
+
+(ert-deftest gar-skill-promote-id-is-stable-and-slugified ()
+  (let ((id (gptel-agent-runtime--skill-promote-derive-id
+             "List my todos here")))
+    (should (string= "auto-list-my-todos-here" id))
+    (should (string= id
+                     (gptel-agent-runtime--skill-promote-derive-id
+                      "List my todos here")))))
+
+(ert-deftest gar-skill-promote-id-handles-empty-and-special-chars ()
+  (should (string-match-p "^auto-"
+                          (gptel-agent-runtime--skill-promote-derive-id "")))
+  (should (string= "auto-foo-bar"
+                   (gptel-agent-runtime--skill-promote-derive-id
+                    "  Foo!!! BAR  "))))
+
+(ert-deftest gar-skill-promote-id-truncates-long-goals ()
+  (let ((id (gptel-agent-runtime--skill-promote-derive-id
+             (make-string 200 ?a))))
+    (should (<= (length id) 45))))
+
+(ert-deftest gar-skill-promote-triggers-strip-stopwords ()
+  (let ((trigs (gptel-agent-runtime--skill-promote-derive-triggers
+                "List all my open TODOs and habits")))
+    (should (member "open" trigs))
+    (should (member "todos" trigs))
+    (should (member "habits" trigs))
+    (should-not (member "all" trigs))
+    (should-not (member "my" trigs))
+    (should-not (member "and" trigs))))
+
+;; --- step extraction ---
+
+(ert-deftest gar-skill-promote-extracts-tool-steps ()
+  (let* ((s1 (gptel-agent-runtime-trajectory-step-create
+              :title "Read inbox" :suggested-tool "read_file"
+              :args '(:path "/tmp/inbox.org")))
+         (s2 (gptel-agent-runtime-trajectory-step-create
+              :title "Render" :suggested-tool "direct_response"))
+         (traj (gar-skill-promote-test--trajectory
+                "demo" 'success (list s1 s2)))
+         (extracted (gptel-agent-runtime--skill-promote-extract-steps traj)))
+    (should (= 2 (length extracted)))
+    (should (equal "read_file" (plist-get (car extracted) :tool)))
+    (should (equal "direct_response" (plist-get (cadr extracted) :tool)))))
+
+(ert-deftest gar-skill-promote-extract-skips-steps-without-tool ()
+  (let* ((s1 (gptel-agent-runtime-trajectory-step-create
+              :title "Pure thinking" :suggested-tool nil))
+         (s2 (gptel-agent-runtime-trajectory-step-create
+              :title "Render" :suggested-tool "direct_response"))
+         (traj (gar-skill-promote-test--trajectory
+                "demo" 'success (list s1 s2))))
+    (should (= 1 (length
+                  (gptel-agent-runtime--skill-promote-extract-steps traj))))))
+
+;; --- cluster filter ---
+
+(ert-deftest gar-skill-promote-filter-keeps-successes-above-threshold ()
+  (let ((gptel-agent-runtime-skill-promote-similarity-threshold 0.7))
+    (let ((cluster (gptel-agent-runtime--skill-promote-filter-cluster
+                    (list (list :id "a" :outcome 'success :similarity 0.91)
+                          (list :id "b" :outcome 'success :similarity 0.50)
+                          (list :id "c" :outcome 'failure :similarity 0.95)
+                          (list :id "d" :outcome 'success :similarity 0.71)
+                          ;; No :similarity means lexical hit -- kept.
+                          (list :id "e" :outcome 'success)))))
+      (should (= 3 (length cluster)))
+      (should (cl-find "a" cluster :key (lambda (h) (plist-get h :id))
+                       :test #'equal))
+      (should (cl-find "d" cluster :key (lambda (h) (plist-get h :id))
+                       :test #'equal))
+      (should (cl-find "e" cluster :key (lambda (h) (plist-get h :id))
+                       :test #'equal))
+      (should-not (cl-find "b" cluster :key (lambda (h) (plist-get h :id))
+                           :test #'equal))
+      (should-not (cl-find "c" cluster :key (lambda (h) (plist-get h :id))
+                           :test #'equal)))))
+
+;; --- synthesis ---
+
+(ert-deftest gar-skill-promote-synthesize-returns-skill-plist ()
+  (let* ((s1 (gptel-agent-runtime-trajectory-step-create
+              :title "Read" :suggested-tool "read_file"
+              :args '(:path "/tmp/x")))
+         (traj (gar-skill-promote-test--trajectory
+                "list my todos here" 'success (list s1)))
+         (cluster (list (list :id "t1" :outcome 'success :similarity 0.91)
+                        (list :id "t2" :outcome 'success :similarity 0.85)
+                        (list :id "t3" :outcome 'success :similarity 0.72)))
+         (skill (gptel-agent-runtime--skill-promote-synthesize traj cluster)))
+    (should skill)
+    (should (string= "auto-list-my-todos-here" (plist-get skill :id)))
+    (should (= 1 (length (plist-get skill :steps))))
+    (should (member "todos" (plist-get skill :triggers)))
+    (let ((meta (plist-get skill :metadata)))
+      (should (eq 'auto-synth (plist-get meta :source)))
+      (should (eq 'proposed (plist-get meta :status)))
+      (should (= 3 (plist-get meta :cluster-size))))))
+
+(ert-deftest gar-skill-promote-synthesize-returns-nil-without-steps ()
+  "When the trajectory has no extractable steps, synthesis returns nil."
+  (let* ((traj (gar-skill-promote-test--trajectory
+                "no steps" 'success
+                (list (gptel-agent-runtime-trajectory-step-create
+                       :title "Thought only" :suggested-tool nil)))))
+    (should-not
+     (gptel-agent-runtime--skill-promote-synthesize traj '()))))
+
+;; --- cooldown ---
+
+(ert-deftest gar-skill-promote-cooldown-blocks-re-promotion ()
+  (let* ((gptel-agent-runtime-skill-promote-cooldown-trajectories 10)
+         (gptel-agent-runtime--skill-promote-trajectory-count 100)
+         (gptel-agent-runtime--skill-promote-recent-ids
+          (list (cons "auto-list-my-todos-here" 95))))
+    (should (gptel-agent-runtime--skill-promote-cooldown-active-p
+             "list my todos here")))
+  (let* ((gptel-agent-runtime-skill-promote-cooldown-trajectories 10)
+         (gptel-agent-runtime--skill-promote-trajectory-count 200)
+         (gptel-agent-runtime--skill-promote-recent-ids
+          (list (cons "auto-list-my-todos-here" 95))))
+    (should-not (gptel-agent-runtime--skill-promote-cooldown-active-p
+                 "list my todos here"))))
+
+;; --- end-to-end auto-write ---
+
+(ert-deftest gar-skill-promote-auto-write-creates-markdown-candidate ()
+  "When the cluster exceeds the threshold AND mode is auto, the
+candidate is written to disk."
+  (let* ((tmp-dir (make-temp-file "gar-skill-promote-test-" t))
+         (gptel-agent-runtime-skills-directory tmp-dir)
+         (gptel-agent-runtime-skill-promote-mode 'auto)
+         (gptel-agent-runtime-skill-promote-min-successes 2)
+         (gptel-agent-runtime-skill-promote-similarity-threshold 0.5)
+         (gptel-agent-runtime--skill-promote-recent-ids nil)
+         (gptel-agent-runtime--skill-promote-trajectory-count 0)
+         (s1 (gptel-agent-runtime-trajectory-step-create
+              :title "Read" :suggested-tool "read_file"))
+         (traj (gar-skill-promote-test--trajectory
+                "demo goal" 'success (list s1)))
+         (gptel-agent-runtime--trajectories (list traj)))
+    (unwind-protect
+        (cl-letf
+            (((symbol-function
+               'gptel-agent-runtime-sqlite-similar-trajectories)
+              (lambda (&rest _)
+                (list (list :id "x1" :outcome 'success :similarity 0.91)
+                      (list :id "x2" :outcome 'success :similarity 0.81)))))
+          (let* ((payload (list :id (gptel-agent-runtime-trajectory-id traj)
+                                :goal "demo goal"
+                                :outcome 'success))
+                 (event (gptel-agent-runtime-event-create
+                         :type 'trajectory-recorded
+                         :payload payload
+                         :taint 'trusted
+                         :created-at "2026-05-30T00:00:00")))
+            (gptel-agent-runtime--skill-promote-on-trajectory event)
+            (let* ((auto-dir (gptel-agent-runtime--skill-promote-directory))
+                   (files (directory-files auto-dir t "\\.md\\'")))
+              (should (= 1 (length files)))
+              (let ((content (with-temp-buffer
+                               (insert-file-contents (car files))
+                               (buffer-string))))
+                (should (string-match-p "auto-demo-goal" content))
+                (should (string-match-p "Distilled from 2 similar"
+                                         content))))))
+      (when (file-directory-p tmp-dir)
+        (delete-directory tmp-dir t)))))
+
+;; --- mode=off short-circuits ---
+
+(ert-deftest gar-skill-promote-mode-off-does-not-fire ()
+  (let* ((gptel-agent-runtime-skill-promote-mode 'off)
+         (called nil))
+    (cl-letf (((symbol-function
+                'gptel-agent-runtime--skill-promote-fetch-similar)
+               (lambda (&rest _) (setq called t) nil)))
+      (gptel-agent-runtime--skill-promote-on-trajectory
+       (gptel-agent-runtime-event-create
+        :type 'trajectory-recorded
+        :payload (list :id "x" :goal "y" :outcome 'success)
+        :taint 'trusted
+        :created-at "2026-05-30T00:00:00")))
+    (should-not called)))
+
+(provide 'gar-skill-promote-test)
+
+;;; gar-skill-promote-test.el ends here
