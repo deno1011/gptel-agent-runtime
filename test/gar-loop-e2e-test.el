@@ -410,6 +410,81 @@ in the event log so mission control can surface it."
                        'high-fidelity-model-engaged))
                  gptel-agent-runtime-event-log))))))
 
+;; ============================================================================
+;; PR 13: similar-trajectories injection into the planner prompt
+;; ============================================================================
+
+(ert-deftest gar-e2e-planner-similar-context-empty-when-disabled ()
+  "Helper returns empty string when the feature is disabled."
+  (let ((gptel-agent-runtime-planner-similar-trajectories-enabled nil))
+    (should (string-empty-p
+             (gptel-agent-runtime--planner-similar-trajectories-context
+              "list my todos")))))
+
+(ert-deftest gar-e2e-planner-similar-context-empty-when-count-zero ()
+  (let ((gptel-agent-runtime-planner-similar-trajectories-enabled t)
+        (gptel-agent-runtime-planner-similar-trajectories-count 0))
+    (should (string-empty-p
+             (gptel-agent-runtime--planner-similar-trajectories-context
+              "list my todos")))))
+
+(ert-deftest gar-e2e-planner-similar-context-renders-when-hits-present ()
+  "Helper renders the SIMILAR PAST GOALS block when search returns hits."
+  (let ((gptel-agent-runtime-planner-similar-trajectories-enabled t)
+        (gptel-agent-runtime-planner-similar-trajectories-count 3)
+        (gptel-agent-runtime-planner-similar-trajectories-strategy 'lexical))
+    (cl-letf (((symbol-function 'gptel-agent-runtime-sqlite-search-by-text)
+               (lambda (_goal _n)
+                 (list (list :id "t1" :goal "list my todos"
+                             :outcome 'success
+                             :finalized-at "2026-05-29T00:00:00")
+                       (list :id "t2" :goal "show all todos verbatim"
+                             :outcome 'failure
+                             :finalized-at "2026-05-28T00:00:00")))))
+      (let ((s (gptel-agent-runtime--planner-similar-trajectories-context
+                "list my todos")))
+        (should (stringp s))
+        (should (string-match-p "SIMILAR PAST GOALS" s))
+        (should (string-match-p "\\[success\\] list my todos" s))
+        (should (string-match-p "\\[failure\\] show all todos verbatim" s))))))
+
+(ert-deftest gar-e2e-planner-similar-context-prefers-cosine-when-available ()
+  "When the strategy is `similar' and cosine API is bound, it is
+called instead of the lexical fallback."
+  (let ((gptel-agent-runtime-planner-similar-trajectories-enabled t)
+        (gptel-agent-runtime-planner-similar-trajectories-count 2)
+        (gptel-agent-runtime-planner-similar-trajectories-strategy 'similar)
+        (cosine-called nil)
+        (lex-called nil))
+    (cl-letf
+        (((symbol-function 'gptel-agent-runtime-sqlite-similar-trajectories)
+          (lambda (_goal _n)
+            (setq cosine-called t)
+            (list (list :id "tx" :goal "x" :outcome 'success
+                        :similarity 0.92))))
+         ((symbol-function 'gptel-agent-runtime-sqlite-search-by-text)
+          (lambda (&rest _) (setq lex-called t) nil)))
+      (gptel-agent-runtime--planner-similar-trajectories-context "x")
+      (should cosine-called)
+      (should-not lex-called))))
+
+(ert-deftest gar-e2e-planner-similar-context-falls-back-to-lexical ()
+  "When cosine returns nil and strategy is `similar', the lexical
+fallback runs."
+  (let ((gptel-agent-runtime-planner-similar-trajectories-enabled t)
+        (gptel-agent-runtime-planner-similar-trajectories-count 2)
+        (gptel-agent-runtime-planner-similar-trajectories-strategy 'similar)
+        (lex-called nil))
+    (cl-letf
+        (((symbol-function 'gptel-agent-runtime-sqlite-similar-trajectories)
+          (lambda (&rest _) nil))
+         ((symbol-function 'gptel-agent-runtime-sqlite-search-by-text)
+          (lambda (&rest _)
+            (setq lex-called t)
+            (list (list :id "tx" :goal "x" :outcome 'success)))))
+      (gptel-agent-runtime--planner-similar-trajectories-context "x")
+      (should lex-called))))
+
 (provide 'gar-loop-e2e-test)
 
 ;;; gar-loop-e2e-test.el ends here

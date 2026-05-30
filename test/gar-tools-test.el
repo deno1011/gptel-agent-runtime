@@ -107,6 +107,73 @@
     (should errs)
     (should (cl-some (lambda (e) (string-match-p ":enum" e)) errs))))
 
+;; ============================================================================
+;; PR 13: heading-resolution helper for the tightened modification tools
+;; ============================================================================
+
+(defmacro gar-tools-test--with-temp-org (content &rest body)
+  "Write CONTENT to a temp org file, bind `tmp-file' to the path, run BODY."
+  (declare (indent 1))
+  `(let ((tmp-file (make-temp-file "gar-tools-test-" nil ".org")))
+     (unwind-protect
+         (progn
+           (with-temp-file tmp-file (insert ,content))
+           ,@body)
+       (ignore-errors (delete-file tmp-file)))))
+
+(ert-deftest gar-tools-heading-matches-anchors-end-of-word ()
+  "`Hello' must NOT match `Hello2 Task' -- the new regex requires a
+trailing whitespace, eol, or tag-colon."
+  (gar-tools-test--with-temp-org
+      "* TODO Hello2 Task\n* TODO Hello\n"
+    (let ((matches (gptel-agent-runtime--heading-matches-in-file
+                    tmp-file "Hello")))
+      (should (= 1 (length matches))))))
+
+(ert-deftest gar-tools-heading-matches-detects-multiple ()
+  "When two headings genuinely match the search text, both are
+returned so callers can fail loud."
+  (gar-tools-test--with-temp-org
+      "* TODO Buy milk\n** Subhead\n* TODO Buy milk\n"
+    (let ((matches (gptel-agent-runtime--heading-matches-in-file
+                    tmp-file "Buy milk")))
+      (should (= 2 (length matches))))))
+
+(ert-deftest gar-tools-heading-matches-zero-when-absent ()
+  (gar-tools-test--with-temp-org "* TODO Something else\n"
+    (should (null (gptel-agent-runtime--heading-matches-in-file
+                   tmp-file "Hello2")))))
+
+(ert-deftest gar-tools-resolve-single-heading-returns-not-found ()
+  (gar-tools-test--with-temp-org "* TODO Other\n"
+    (let ((r (gptel-agent-runtime--resolve-single-heading
+              tmp-file "Hello2")))
+      (should (eq :not-found (car r))))))
+
+(ert-deftest gar-tools-resolve-single-heading-returns-found ()
+  (gar-tools-test--with-temp-org "* TODO Hello2\n"
+    (let ((r (gptel-agent-runtime--resolve-single-heading
+              tmp-file "Hello2")))
+      (should (eq :found (car r)))
+      (should (consp (cdr r))))))
+
+(ert-deftest gar-tools-resolve-single-heading-returns-ambiguous ()
+  (gar-tools-test--with-temp-org
+      "* TODO Buy milk\n** Subhead\n* TODO Buy milk\n"
+    (let ((r (gptel-agent-runtime--resolve-single-heading
+              tmp-file "Buy milk")))
+      (should (eq :ambiguous (car r)))
+      (should (= 2 (length (cdr r)))))))
+
+(ert-deftest gar-tools-heading-error-string-mentions-file ()
+  "`--heading-error-string' includes the file path so the model can
+correct its argument on the next attempt."
+  (let* ((r (cons :not-found nil))
+         (s (gptel-agent-runtime--heading-error-string
+             r "~/org/reminders.org" "Hello2")))
+    (should (string-match-p "Hello2" s))
+    (should (string-match-p "reminders.org" s))))
+
 (provide 'gar-tools-test)
 
 ;;; gar-tools-test.el ends here

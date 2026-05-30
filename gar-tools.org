@@ -574,6 +574,61 @@ returns nil otherwise so the package works standalone."
   (and (fboundp 'my/gptel-protected-p)
        (funcall (symbol-function 'my/gptel-protected-p) path)))
 
+(defun gptel-agent-runtime--heading-matches-in-file (file heading)
+  "Return list of buffer positions in FILE that match HEADING as a TODO line.
+A match is `^*+ [STATE ]? HEADING <space|eol|colon>' so `Hello'
+no longer accidentally matches `Hello2 Task' (regex without an
+end-anchor) and so the modification tools can detect ambiguity
+before acting.  Returns a list of (POSITION . LINE-TEXT) cons cells
+in document order."
+  (when (file-exists-p file)
+    (with-current-buffer (find-file-noselect file)
+      (save-excursion
+        (goto-char (point-min))
+        (let ((matches nil)
+              (re (concat "^\\*+ \\(?:[A-Z]+ \\)?"
+                          (regexp-quote heading)
+                          "\\(?:[[:space:]]\\|$\\|:\\)")))
+          (while (re-search-forward re nil t)
+            (push (cons (match-beginning 0)
+                        (buffer-substring-no-properties
+                         (line-beginning-position)
+                         (line-end-position)))
+                  matches))
+          (nreverse matches))))))
+
+(defun gptel-agent-runtime--resolve-single-heading (file heading)
+  "Resolve HEADING in FILE to a single (POSITION . LINE-TEXT) cons.
+Returns either:
+- nil with a `:status not-found' indicator (use `--heading-error-string')
+- a single cons when exactly one match exists
+- nil with `:status ambiguous' when multiple matches exist
+
+This function is the gate every heading-modifying tool should run
+through so silent multi-match edits stop happening."
+  (let* ((p (expand-file-name file))
+         (matches (gptel-agent-runtime--heading-matches-in-file p heading)))
+    (cond
+     ((null matches) (cons :not-found nil))
+     ((= 1 (length matches)) (cons :found (car matches)))
+     (t (cons :ambiguous matches)))))
+
+(defun gptel-agent-runtime--heading-error-string (resolution file heading)
+  "Format an error string for a non-`:found' RESOLUTION from
+`--resolve-single-heading'.  Includes the file path and (for ambiguous
+resolutions) the full list of matching lines so the model can rename
+the heading argument to disambiguate."
+  (pcase (car resolution)
+    (:not-found
+     (format "Heading not found in %s: %s" file heading))
+    (:ambiguous
+     (let ((matches (cdr resolution)))
+       (format "Ambiguous: %d headings match '%s' in %s. Refine the heading text to disambiguate. Candidates:\n%s"
+               (length matches) heading file
+               (mapconcat (lambda (m) (format "  %s" (cdr m)))
+                          matches "\n"))))
+    (_ (format "Unknown heading resolution status: %S" (car resolution)))))
+
 (with-eval-after-load 'gptel
   ;; describe_capabilities — deterministic summary of current runtime tools
   (gptel-make-tool
@@ -640,7 +695,11 @@ returns nil otherwise so the package works standalone."
                    (save-buffer))
                  (format "Added %s: %s to %s" state heading p))))
 
-  ;; change_todo_state — change state of a heading by exact title match
+  ;; change_todo_state -- change state of a heading by exact title match.
+  ;; Tightened (PR 13): regex now requires a word-boundary after the
+  ;; heading text so `Hello' no longer matches `Hello2 Task', and
+  ;; ambiguous matches return a list of candidates rather than silently
+  ;; mutating every match.
   (gptel-make-tool
    :name "change_todo_state"
    :description "Change the TODO state of a heading that matches the given title."
@@ -648,21 +707,21 @@ returns nil otherwise so the package works standalone."
            (:name "heading" :type string :description "Exact heading text (case-insensitive)")
            (:name "state"   :type string :description "New state, e.g. DONE, IN-PROGRESS"))
    :function (lambda (file heading state)
-               (let ((p (expand-file-name file))
-                     found)
-                 (with-current-buffer (find-file-noselect p)
-                   (goto-char (point-min))
-                   (while (re-search-forward
-                           (concat "^\\*+ \\(?:[A-Z]+ \\)?" (regexp-quote heading))
-                           nil t)
-                     (org-todo state)
-                     (setq found t))
-                   (when found (save-buffer)))
-                 (if found
-                     (format "State set to %s for: %s" state heading)
-                   (format "Heading not found: %s" heading)))))
+               (let* ((p (expand-file-name file))
+                      (resolution (gptel-agent-runtime--resolve-single-heading
+                                   p heading)))
+                 (if (not (eq :found (car resolution)))
+                     (gptel-agent-runtime--heading-error-string
+                      resolution p heading)
+                   (with-current-buffer (find-file-noselect p)
+                     (save-excursion
+                       (goto-char (car (cdr resolution)))
+                       (org-todo state))
+                     (save-buffer))
+                   (format "State set to %s for: %s" state heading)))))
 
-  ;; set_deadline — set or update deadline on a heading
+  ;; set_deadline -- set or update deadline on a heading.
+  ;; Tightened (PR 13): same as above.
   (gptel-make-tool
    :name "set_deadline"
    :description "Set a DEADLINE on a heading. Use ISO date format YYYY-MM-DD."
@@ -670,21 +729,21 @@ returns nil otherwise so the package works standalone."
            (:name "heading" :type string :description "Exact heading text")
            (:name "date"    :type string :description "Date string YYYY-MM-DD"))
    :function (lambda (file heading date)
-               (let ((p (expand-file-name file))
-                     found)
-                 (with-current-buffer (find-file-noselect p)
-                   (goto-char (point-min))
-                   (when (re-search-forward
-                          (concat "^\\*+ \\(?:[A-Z]+ \\)?" (regexp-quote heading))
-                          nil t)
-                     (org-deadline nil date)
-                     (setq found t)
-                     (save-buffer)))
-                 (if found
-                     (format "Deadline %s set on: %s" date heading)
-                   (format "Heading not found: %s" heading)))))
+               (let* ((p (expand-file-name file))
+                      (resolution (gptel-agent-runtime--resolve-single-heading
+                                   p heading)))
+                 (if (not (eq :found (car resolution)))
+                     (gptel-agent-runtime--heading-error-string
+                      resolution p heading)
+                   (with-current-buffer (find-file-noselect p)
+                     (save-excursion
+                       (goto-char (car (cdr resolution)))
+                       (org-deadline nil date))
+                     (save-buffer))
+                   (format "Deadline %s set on: %s" date heading)))))
 
-  ;; add_tag — add a tag to a heading
+  ;; add_tag -- add a tag to a heading.
+  ;; Tightened (PR 13): same as above.
   (gptel-make-tool
    :name "add_tag"
    :description "Add a tag to a matching org heading."
@@ -692,19 +751,18 @@ returns nil otherwise so the package works standalone."
            (:name "heading" :type string :description "Exact heading text")
            (:name "tag"     :type string :description "Tag to add (no colons)"))
    :function (lambda (file heading tag)
-               (let ((p (expand-file-name file))
-                     found)
-                 (with-current-buffer (find-file-noselect p)
-                   (goto-char (point-min))
-                   (when (re-search-forward
-                          (concat "^\\*+ \\(?:[A-Z]+ \\)?" (regexp-quote heading))
-                          nil t)
-                     (org-set-tags (cons tag (org-get-tags nil t)))
-                     (setq found t)
-                     (save-buffer)))
-                 (if found
-                     (format "Tag :%s: added to: %s" tag heading)
-                   (format "Heading not found: %s" heading)))))
+               (let* ((p (expand-file-name file))
+                      (resolution (gptel-agent-runtime--resolve-single-heading
+                                   p heading)))
+                 (if (not (eq :found (car resolution)))
+                     (gptel-agent-runtime--heading-error-string
+                      resolution p heading)
+                   (with-current-buffer (find-file-noselect p)
+                     (save-excursion
+                       (goto-char (car (cdr resolution)))
+                       (org-set-tags (cons tag (org-get-tags nil t))))
+                     (save-buffer))
+                   (format "Tag :%s: added to: %s" tag heading)))))
 
   ;; get_org_structure — outline of an org file (headings only)
   (gptel-make-tool
