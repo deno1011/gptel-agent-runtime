@@ -83,6 +83,13 @@ table seeded with whatever the package wired at load time."
            (expand-file-name "experiments/" tmp-root))
           (gptel-agent-runtime-sqlite-file
            (expand-file-name "agent.sqlite" tmp-root))
+          ;; test-helper.el globally disables sqlite so leaky tests can't
+          ;; pollute the user's real ~/.emacs.d archive.  E2E tests still
+          ;; want to exercise the sqlite mirror path, so they explicitly
+          ;; re-enable it -- scoped to the temp file path bound above and
+          ;; with the connection cache reset so each test opens its own
+          ;; handle.
+          (gptel-agent-runtime-sqlite-enabled t)
           (gptel-agent-runtime--trajectories nil)
           (gptel-agent-runtime--experiments nil)
           (gptel-agent-runtime--sqlite-db nil)

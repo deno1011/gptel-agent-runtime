@@ -35,6 +35,20 @@
 (require 'ert)
 (require 'gptel-agent-runtime)
 
+;; Defensive: tests must never write to the user's real SQLite at
+;; ~/.emacs.d/gptel-agent-runtime/agent.sqlite.  Disable the SQLite
+;; mirror globally for the duration of any test run.  Tests that
+;; genuinely exercise the SQLite layer (gar-memory-sqlite-test) and
+;; tests that go through the e2e sandbox (gar-test-fake-llm) re-enable
+;; it explicitly within their let-binding, scoped to a temp DB file.
+;;
+;; Before this guard, gar-trajectory-test let-bound the trajectories
+;; directory to a temp path but forgot the sqlite-file -- every
+;; record-trajectory call wrote a "Test goal: write a file" row into
+;; the real agent.sqlite.  ~40 of those leaked into the user's archive
+;; over a single day of CI runs.
+(setq gptel-agent-runtime-sqlite-enabled nil)
+
 (provide 'test-helper)
 
 ;;; test-helper.el ends here
