@@ -18,6 +18,14 @@
                   (re-search-forward (concat "=== " (regexp-quote s) " ===")
                                      nil t)))))))
 
+(ert-deftest gar-mission-control-renders-failure-patterns-section ()
+  "PR 18: dashboard surfaces the failure-pattern aggregation."
+  (gptel-agent-runtime-mission-control)
+  (with-current-buffer gptel-agent-runtime-mission-control-buffer-name
+    (should (save-excursion
+              (goto-char (point-min))
+              (re-search-forward "=== Failure patterns ===" nil t)))))
+
 (ert-deftest gar-mission-control-renders-candidates-section ()
   "PR 16/17: dashboard surfaces the candidate subsystems (skill +
 refinement) with pending / approved / rejected counts and the

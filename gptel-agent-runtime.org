@@ -134,6 +134,7 @@ the master load sequence. New setups should customise
 (require 'gar-memory-sqlite) ; SQLite/FTS5 + vector trajectory retrieval (optional)
 (require 'gar-skills-md)   ; markdown skill format + load + emit refinement candidates as md
 (require 'gar-skill-promote) ; trajectory-to-skill promotion (success side of the learning loop)
+(require 'gar-failure-analytics) ; visible failure-pattern aggregation for mission control
 (require 'gar-tools)       ; tool registry, native gptel tools, tool-invention pipeline
 (require 'gar-backend)     ; Ollama runtime utilities + model-id normalization
 (require 'gar-directives)  ; emacs-local-assistant / planner / assistant directives

@@ -402,6 +402,11 @@ status, and the registered agent capability allowlist."
                (length (or skill-rejected '()))
                (length (or refine-candidates '())))))
     (gptel-agent-runtime--mission-control-section
+     "Failure patterns"
+     (if (fboundp 'gptel-agent-runtime-failure-analytics-summary)
+         (gptel-agent-runtime-failure-analytics-summary)
+       "  (gar-failure-analytics not loaded)"))
+    (gptel-agent-runtime--mission-control-section
      "Memory index (SQLite)"
      (let ((stats (and (fboundp 'gptel-agent-runtime-sqlite-stats)
                        (gptel-agent-runtime-sqlite-stats))))
