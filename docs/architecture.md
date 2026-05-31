@@ -4,6 +4,10 @@ This document explains the AI/gptel implementation after the split into the
 standalone `gptel-agent-runtime` package. It is meant to make the architecture
 understandable before changing more code.
 
+For the complete list of user-settable runtime options, including the knobs for
+chat routing, learning, skill promotion, guardrails, model routing, and storage,
+see [Runtime Options](options.md).
+
 ## Repository Roles
 
 - `~/emacs` is the live private Emacs-plus runtime repo. Emacs loads
