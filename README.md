@@ -29,6 +29,8 @@ for MELPA.
 - `main` and `stable` track in parallel; `stable` is the slower-moving install
   target.
 
+For every user-settable `defcustom`, see [`docs/options.md`](docs/options.md).
+
 ## Installation
 
 ```elisp
